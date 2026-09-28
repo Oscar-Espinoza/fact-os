@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { request } from 'node:http';
 import { startDash } from '../lib/dash.js';
 
 let root, dash;
@@ -68,4 +69,11 @@ test('"Mark done" only applies to ready features in manual-merge projects', asyn
   assert.equal((await post('/api/feature/merged', { project: join(root, 'group/blog'), id: 'post' })).status, 200);
   const fs = JSON.parse(readFileSync(join(root, 'group/blog/.shipyard/features.json'), 'utf8')).features;
   assert.equal(fs[0].status, 'merged');
+});
+
+test('a request with a foreign Host header is rejected (DNS rebinding)', async () => {
+  const status = (host) => new Promise((res, rej) => request(dash.url + '/api/state', { headers: { host } }, (r) => { r.resume(); res(r.statusCode); })
+    .on('error', rej).end());
+  assert.equal(await status('evil.example:' + new URL(dash.url).port), 403);
+  assert.equal(await status(new URL(dash.url).host), 200);
 });
