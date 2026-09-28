@@ -27,7 +27,7 @@ before(async () => {
   project(join(root, 'shop-worktrees/pay'), { gitFile: true }); // a worktree checkout, not a project
   dash = await startDash({ root, port: 0 });
 });
-after(() => { dash.server.close(); rmSync(root, { recursive: true, force: true }); });
+after(() => { dash?.server.close(); rmSync(root, { recursive: true, force: true }); });
 
 test('serves the page and /api/state for discovered projects, skipping worktrees', async () => {
   const html = await (await fetch(dash.url + '/')).text();
