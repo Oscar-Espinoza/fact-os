@@ -42,7 +42,9 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `shipyard run`** reaches it — earlier runs' `costUsd` do not count; `null` = unlimited), `timeoutMin` (null = no timeout;
   per `claude`/test/`prepare` (null; a shell command run in the feature worktree before every build, e.g. install and provision databases; must be idempotent; a failure fails the attempt) and `postMerge` (it gets `SHIPYARD_FEATURE` and `SHIPYARD_BRANCH`) child), `builder`/`evaluator` `{model, effort, permissionMode}`,
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
-  (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null).
+  (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null), `refreshBeforeTest`
+  (false; true merges the current `base` into the feature branch after the build and before the test, so two features
+  that pass alone can't break `base` together — see below).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
@@ -80,7 +82,10 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   and the foreman itself merges `base` into the feature's (clean) worktree: if that is clean the next build
   re-runs the tests on top; if it conflicts, the merge is left in progress and the next build resolves and
   commits it (that merge commit counts as the builder's commit). Neither costs an attempt; they are counted
-  in `refreshes`, and after 5 the feature is `stuck` ("too many base refreshes").
+  in `refreshes`, and after 5 the feature is `stuck` ("too many base refreshes"). With `refreshBeforeTest: true` the
+  same refresh runs before the test whenever `base` has commits the branch lacks: a clean merge goes straight on to
+  test, evaluate (diff still `base...sha`) and merge that merge commit, without counting as a refresh; a conflict
+  goes back to `todo` exactly as above.
 - Tamper checks: if `config.json` changes on disk during a run, or `base` moves other than by Shipyard's
   own merges and lesson commits so that it now reaches a commit of a feature branch (`branchPrefix*` or a
   feature's `branch`), or carries a (non-empty) blob that is also in one, the foreman logs an `alert`,

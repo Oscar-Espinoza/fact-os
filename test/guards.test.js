@@ -396,3 +396,40 @@ test('a failing prepare fails the attempt before the builder runs', (t) => {
   assert.match(s.feature('a').lastFeedback, /prepare .* exited 3[\s\S]*no database/);
   assert.equal(s.calls('build', 'a').length, 0);
 });
+
+test('refreshBeforeTest: base moves during the build → the verified base is merged in before the test, which sees it; that sha is merged', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, refreshBeforeTest: true, test: 'test -f base-a.txt' }, scenario: { a: 'base-file' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const a = s.feature('a');
+  assert.deepEqual([a.status, a.attempts, a.refreshes], ['merged', 0, undefined]);
+  assert.equal(a.sha, s.git('rev-parse', 'ship/a'), 'the recorded sha is the new branch tip');
+  assert.equal(s.git('rev-list', '--count', '--merges', `${a.sha}^!`), '1', 'the tip is the foreman\'s merge of base');
+  assert.equal(s.git('merge-base', '--is-ancestor', a.sha, 'main'), '');
+  const diff = s.calls('eval', 'a')[0].prompt.split('Diff main...ship/a:')[1];
+  assert.match(diff, /b\/a\.txt/);
+  assert.doesNotMatch(diff, /base-a\.txt/, 'the diff shows only the feature\'s own changes');
+  for (const f of ['a.txt', 'base-a.txt']) assert.ok(existsSync(join(s.repo, f)), f);
+  assert.doesNotMatch(s.log(), /"alert"/);
+});
+
+test('refreshBeforeTest: a conflicting base move sends the feature back to todo before test and eval, attempts unchanged', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, refreshBeforeTest: true }, scenario: { a: 'base-conflict,resolve' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['merged', 0, 1]);
+  const builds = s.calls('build', 'a');
+  assert.equal(builds.length, 2);
+  assert.match(builds[1].prompt, /the foreman started merging main into your branch and it conflicts in: a\.txt\. Resolve/);
+  assert.equal(s.calls('eval', 'a').length, 1, 'the conflicted state was never evaluated');
+  assert.doesNotMatch(s.log(), /"alert"|commit your work/);
+});
+
+test('refreshBeforeTest defaults to false: the test runs on the branch as built, without the moved base', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, test: 'test -f base-a.txt' }, scenario: { a: 'base-file' } });
+  assert.equal(JSON.parse(readFileSync(join(s.repo, '.shipyard/config.json'), 'utf8')).refreshBeforeTest, false);
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.match(s.feature('a').lastFeedback, /test command `test -f base-a\.txt` exited 1/);
+  assert.equal(s.calls('eval', 'a').length, 0);
+});

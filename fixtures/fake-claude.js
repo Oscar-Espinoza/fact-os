@@ -66,6 +66,11 @@ if (mode === 'build') {
       git('-C', root(), 'add', `${id}.txt`); git('-C', root(), 'commit', '-qm', 'looks like the user too');
     }
     if (has('user-commit')) git('-C', root(), 'commit', '-q', '--allow-empty', '-m', 'the user\'s own work on main');
+    for (const [flag, f, text] of [['base-file', `base-${id}.txt`, 'from base\n'], ['base-conflict', `${id}.txt`, 'base version\n']])
+      if (has(flag)) { // the user commits on base while this feature builds (base-conflict: the same file, other content)
+        writeFileSync(join(root(), f), text);
+        git('-C', root(), 'add', f); git('-C', root(), 'commit', '-qm', `the user's ${f} on main`);
+      }
   }
 } else {
   if (has('move-branch')) commit('evil.txt', 'committed during evaluation\n');

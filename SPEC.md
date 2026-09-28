@@ -37,7 +37,8 @@ and one dashboard across projects.
   "merge": "auto",              // "auto": foreman merges; "manual": status becomes "ready" and stops there
   "briefFiles": [],             // extra files whose contents are appended to builder AND evaluator prompts
   "lessonsFile": "CLAUDE.md",   // where compounded lessons are appended
-  "postMerge": null             // optional shell command run in the main checkout after a merge
+  "postMerge": null,            // optional shell command run in the main checkout after a merge
+  "refreshBeforeTest": false    // true: merge the recorded base sha into the feature branch before its test (see Test)
 }
 ```
 `.shipyard/features.json` — `{ "features": [Feature] }`
@@ -100,6 +101,12 @@ Each tick:
      clean, with no merge in progress, and the branch must have commits beyond `base` (a merge commit completing a
      base refresh counts), else the attempt fails with "commit your work" (plus `git status --porcelain`, 40 lines); the branch sha is recorded and only that sha is tested,
      evaluated and merged.
+   - **Refresh before test** (`refreshBeforeTest: true` only). If the recorded base sha is not an ancestor of the
+     branch, a base refresh (below) runs now, before the test. Clean → the pipeline goes on: the new branch tip (the
+     foreman's merge commit) becomes the recorded sha that is tested, evaluated (`base...<sha>` still shows only the
+     feature's own changes) and merged; this does not count in `refreshes`. Conflicted → the same as the refresh after
+     a merge conflict: merge left in progress, `todo` with the conflict feedback, no attempt spent, `refreshes++`
+     (at 5, the merge is aborted and the feature is `stuck`). So the test always runs on "current base + this feature".
    - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++.
    - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the diff
      `base...<sha>` (`--text --no-ext-diff --no-textconv`), the acceptance list as read at launch and
