@@ -44,7 +44,7 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?,
-  status, onMock?, attempts, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
+  status, onMock?, attempts, refreshes?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
   `todo|building|testing|evaluating|ready|merged|stuck`.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
@@ -72,8 +72,12 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   is not killed and its feature becomes `stuck` ("previous child still running (pid N)"), so two processes
   never write one worktree. The rest go back to `todo` (worktree reused).
 - Merges only when the main checkout is on `base` with no tracked changes outside `.shipyard/`; otherwise
-  the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge. A
-  conflicting merge is aborted (`git merge --abort`) and costs an attempt.
+  the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge.
+- Builders never merge, rebase, pull or switch branches. A conflicting merge is aborted (`git merge --abort`)
+  and the foreman itself merges `base` into the feature's (clean) worktree: if that is clean the next build
+  re-runs the tests on top; if it conflicts, the merge is left in progress and the next build resolves and
+  commits it (that merge commit counts as the builder's commit). Neither costs an attempt; they are counted
+  in `refreshes`, and after 5 the feature is `stuck` ("too many base refreshes").
 - Tamper checks: if `config.json` changes on disk during a run, or `base` moves other than by Shipyard's
   own merges and lesson commits so that it now reaches a commit of a feature branch (`branchPrefix*` or a
   feature's `branch`), or carries a (non-empty) blob that is also in one, the foreman logs an `alert`,

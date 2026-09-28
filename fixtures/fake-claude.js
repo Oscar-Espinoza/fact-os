@@ -39,6 +39,14 @@ if (mode === 'build') {
   }
   if (has('budget')) extra = { subtype: 'error_max_budget_usd', is_error: true, result: '' };
   else if (has('noop')) {} // no changes, no commit
+  else if (has('resolve') && existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
+    // finish the merge the foreman started: keep both sides of each conflicted file, commit the merge and nothing else
+    for (const f of git('diff', '--name-only', '--diff-filter=U').split('\n').filter(Boolean)) {
+      writeFileSync(f, git('show', `:2:${f}`) + '\n' + git('show', `:3:${f}`) + '\n');
+      git('add', f);
+    }
+    git('commit', '-q', '--no-edit');
+  }
   else {
     if (has('hide')) { // hide the diff from a plain `git diff`
       writeFileSync('.gitattributes', '*.txt diff=hide\n');

@@ -51,7 +51,7 @@ Feature {
   branch?: string                 // existing branch to continue/evaluate instead of starting fresh
   status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"
   onMock?: boolean                // built while a human task it needs is open
-  attempts: number, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
+  attempts: number, refreshes?: number /* base refreshes after merge conflicts */, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
   sha?: string                    // evaluated commit, recorded when the feature becomes ready or merged
   pid?, pidStart?, foremanPid?    // current child: pid, /proc/<pid>/stat start time, foreman that spawned it
 }
@@ -90,11 +90,12 @@ Each tick:
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
      previous evaluator feedback, lessons file, briefFiles, and the rule "commit your work; do not
      weaken or delete tests to make them pass; do not stub behavior the acceptance checks require", plus: the builder may
-     run parallel subagents on disjoint files; only it commits, and nobody merges, rebases, pulls or switches branches.
+     run parallel subagents on disjoint files; only it commits, and nobody merges, rebases, pulls or switches branches,
+     except that the builder completes (resolve, `git add`, `git commit`) a merge the foreman started in its worktree.
      A branch with no commits of its own is first fast-forwarded to `base` (ff-only, clean worktree only).
      Hook settings and deny rules are passed via `--settings` (see Hooks). Afterwards the worktree must be
-     clean and the branch must have commits beyond `base`, else the attempt fails with "commit your work"
-     (plus `git status --porcelain`, 40 lines); the branch sha is recorded and only that sha is tested,
+     clean, with no merge in progress, and the branch must have commits beyond `base` (a merge commit completing a
+     base refresh counts), else the attempt fails with "commit your work" (plus `git status --porcelain`, 40 lines); the branch sha is recorded and only that sha is tested,
      evaluated and merged.
    - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++.
    - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the diff
@@ -107,9 +108,15 @@ Each tick:
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
      becomes `ready` and a log event explains why; "clean" = no tracked changes outside `.shipyard/`),
      `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to
-     start leaves the feature `ready` without costing an attempt); on conflict,
-     `git merge --abort`, status `todo` with feedback "rebase on <base>", attempt++. Then run
-     `postMerge`. Status `merged`. `merge: "manual"` → status `ready`.
+     start leaves the feature `ready` without costing an attempt); on conflict, `git merge --abort`, then a
+     **base refresh**: the foreman runs `git merge --no-edit <recorded base sha>` in the feature's worktree
+     (which must be clean, else attempt++). Clean → `todo` with feedback "the foreman merged <base> into your
+     branch (conflict-free); re-run the tests and fix anything the new base broke". Conflicted → the merge is
+     left in progress, `todo` with feedback "the foreman started merging <base> into your branch and it
+     conflicts in: <files>. Resolve the conflicts preserving both sides' intent, run the tests, and commit the
+     merge (git add + git commit). Do not abort it and do not start another merge or rebase." Neither spends
+     an attempt; `refreshes++` instead, and a conflict with `refreshes` already at 5 makes the feature `stuck`
+     ("too many base refreshes"). Otherwise run `postMerge`. Status `merged`. `merge: "manual"` → status `ready`.
    - **Fail** → attempts++, `lastFeedback` = failed findings + cheating; back to `todo`; at
      `maxAttempts` → `stuck`.
    - **Compound.** A non-null `lesson` is appended to `lessonsFile` as one dated bullet under a
@@ -119,7 +126,8 @@ Each tick:
      merges/lesson commits so that it reaches a feature-branch commit, or its new objects
      (`git rev-list --objects <newBase> ^<recordedBase>`) include a non-empty blob that is also in a feature
      branch, log an `alert`, launch and merge nothing more, exit 2. Commits reachable from a `ready` or
-     `merged` feature's recorded `sha` do not count, so merging a `ready` branch by hand is fine. Other
+     `merged` feature's recorded `sha` do not count, so merging a `ready` branch by hand is fine; nor do commits of
+     `base` that reach a feature branch through a base refresh (they are reachable from the recorded base). Other
      `base` moves are logged and re-recorded.
 4. Stop conditions: nothing in flight and nothing ready → if `--watch` and some feature is
    waiting-on-human, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s);

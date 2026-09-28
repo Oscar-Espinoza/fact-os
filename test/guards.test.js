@@ -104,19 +104,62 @@ test('merge is skipped (feature ready) when the main checkout is dirty or on ano
   assert.equal(s.git('log', '--merges', '--oneline', 'main'), '');
 });
 
-test('a conflicting merge is aborted and the feature goes back with "rebase on main"', (t) => {
-  const s = setup(t, { features: [F('a', { branch: 'ship/a' })], config: { maxAttempts: 1 } });
-  s.git('checkout', '-qb', 'ship/a'); writeFileSync(join(s.repo, 'own.txt'), 'own\n');
-  s.git('add', 'own.txt'); s.git('commit', '-qm', 'branch has its own commit, so it is not fast-forwarded');
+// main gets shared.txt = "base"; branch ship/<id> gets its own commit with `branch` content (+ extra files); main then
+// commits `main` content, so merging the branch into main conflicts.
+function conflict(s, id, { branch, main, extra = {} }) {
+  const w = (f, c) => writeFileSync(join(s.repo, f), c);
+  if (!existsSync(join(s.repo, 'shared.txt'))) { w('shared.txt', 'base\n'); s.git('add', 'shared.txt'); s.git('commit', '-qm', 'shared'); }
+  s.git('checkout', '-qb', `ship/${id}`);
+  for (const [f, c] of Object.entries({ ...extra, 'shared.txt': branch })) { w(f, c); s.git('add', f); }
+  s.git('commit', '-qm', `${id} edits shared.txt`);
   s.git('checkout', '-q', 'main');
-  writeFileSync(join(s.repo, 'a.txt'), 'main version\n');
-  s.git('add', 'a.txt'); s.git('commit', '-qm', 'main changes a.txt');
-  assert.equal(s.cli('run').status, 2);
-  assert.equal(s.feature('a').attempts, 1);
-  assert.match(s.feature('a').lastFeedback, /conflict: rebase on main/);
-  assert.equal(existsSync(join(s.repo, '.git/MERGE_HEAD')), false, 'merge --abort ran');
+  if (main != null) { w('shared.txt', main); s.git('commit', '-qam', 'main edits shared.txt'); }
+}
+const wtOf = (s, id) => join(s.repo, '..', 'app-worktrees', id);
+
+test('a conflicting merge is aborted; the foreman merges main into the worktree conflict-free, and the next attempt merges (attempts unchanged)', (t) => {
+  const s = setup(t, { features: [F('a', { branch: 'ship/a' })], config: { maxAttempts: 1 } });
+  // union merge driver on the branch only: merging main into the branch is clean, merging the branch into main is not
+  conflict(s, 'a', { branch: 'base\nbranch\n', main: 'base\nmain\n', extra: { '.gitattributes': 'shared.txt merge=union\n' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['merged', 0, 1]);
+  const builds = s.calls('build', 'a');
+  assert.equal(builds.length, 2);
+  assert.match(builds[1].prompt, /the foreman merged main into your branch \(conflict-free\); re-run the tests/);
+  assert.doesNotMatch(r.stdout + s.log(), /rebase|"alert"/);
+  assert.match(readFileSync(join(s.repo, 'shared.txt'), 'utf8'), /branch[\s\S]*main|main[\s\S]*branch/);
   assert.equal(s.git('status', '--porcelain', '--untracked-files=no'), '');
-  assert.equal(readFileSync(join(s.repo, 'a.txt'), 'utf8'), 'main version\n');
+});
+
+test('a conflicted base refresh is left for the builder, who resolves and commits the merge; feature-branch commits that came through base are no alert', (t) => {
+  const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
+    config: { maxAttempts: 1, maxParallel: 1 }, scenario: { a: 'resolve' } });
+  conflict(s, 'b', { branch: 'from b\n' });
+  conflict(s, 'a', { branch: 'from a\n' }); // conflicts with b once b is merged
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('b').status, s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['merged', 'merged', 0, 1]);
+  const builds = s.calls('build', 'a');
+  assert.equal(builds.length, 2);
+  assert.match(builds[1].prompt, /the foreman started merging main into your branch and it conflicts in: shared\.txt\. Resolve/);
+  assert.match(builds[1].prompt, /Do not abort it/);
+  assert.match(builds[0].prompt, /except to complete a merge the foreman started/);
+  assert.equal(s.git('rev-list', '--count', '--merges', `${s.feature('a').sha}^!`), '1', 'the evaluated sha is the builder\'s merge commit');
+  assert.doesNotMatch(s.log(), /"alert"|commit your work/);
+  assert.equal(readFileSync(join(s.repo, 'shared.txt'), 'utf8'), 'from a\nfrom b\n');
+});
+
+test('after 5 base refreshes a conflicting feature is stuck with "too many base refreshes", worktree untouched', (t) => {
+  const s = setup(t, { features: [F('a', { branch: 'ship/a', refreshes: 5 })] });
+  conflict(s, 'a', { branch: 'from a\n', main: 'from main\n' });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['stuck', 0, 5]);
+  assert.match(s.feature('a').lastFeedback, /too many base refreshes/);
+  const wt = wtOf(s, 'a');
+  assert.equal(spawnSync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: wt }).status, 1, 'no merge started in the worktree');
+  assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: wt, encoding: 'utf8' }), '');
+  assert.equal(existsSync(join(s.repo, '.git/MERGE_HEAD')), false, 'merge --abort ran');
 });
 
 test('base moved by someone other than Shipyard: alert, nothing more is launched or merged, exit 2', (t) => {
