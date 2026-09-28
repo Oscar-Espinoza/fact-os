@@ -46,8 +46,11 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   (false; true merges the current `base` into the feature branch after the build and before the test, so two features
   that pass alone can't break `base` together — see below), `maxRefreshes` (5), `groupBy` (null; `"idPrefix:<n>"` puts
   each feature in the conflict group named by its id's first n chars, e.g. `"idPrefix:3"`: `F05-02-x` → `F05`; a
-  feature's own `group` wins). Two features of one group are never in flight together: the foreman launches the
-  next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target.
+  feature's own `group` wins; two features of one group are never in flight together: the foreman launches the
+  next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target), `mergeHook` (null;
+  a shell command run in the main checkout on the staged `git merge --no-ff --no-commit`, with
+  `SHIPYARD_FEATURE`/`SHIPYARD_BRANCH`, e.g. to renumber migrations: what it `git add`s joins the merge commit; a
+  non-zero exit aborts the merge and sends the feature back to `todo` with the hook's output as feedback, costing no attempt).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is

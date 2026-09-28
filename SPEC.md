@@ -40,6 +40,7 @@ and one dashboard across projects.
   "postMerge": null,            // optional shell command run in the main checkout after a merge
   "refreshBeforeTest": false,   // true: merge the recorded base sha into the feature branch before its test (see Test)
   "maxRefreshes": 5,            // base refreshes after merge conflicts before a feature is stuck
+  "mergeHook": null,            // optional shell command run in the main checkout on the staged merge, before its commit (see Pass)
   "groupBy": null               // conflict groups: null = only explicit `group`s; "idPrefix:<n>" = a feature's group defaults to its id's first n chars
 }
 ```
@@ -132,7 +133,12 @@ Each tick:
      conflicts in: <files>. Resolve the conflicts preserving both sides' intent, run the tests, and commit the
      merge (git add + git commit). Do not abort it and do not start another merge or rebase." Neither spends
      an attempt; `refreshes++` instead, and a conflict with `refreshes` already at `maxRefreshes` makes the feature `stuck`
-     ("too many base refreshes"). Otherwise run `postMerge`. Status `merged`. `merge: "manual"` → status `ready`.
+     ("too many base refreshes"). With `mergeHook` set, the merge is `git merge --no-ff --no-commit <sha>` (conflicts
+     handled as above); then `mergeHook` runs in the main checkout with env `SHIPYARD_FEATURE` and `SHIPYARD_BRANCH`
+     (e.g. to assign migration numbers; files it changes and `git add`s become part of the merge commit), and the
+     foreman commits with the usual message; that commit is its own (`base` sha re-recorded, no tamper alert). A hook
+     exiting non-zero (or a failed commit) → `git merge --abort`, a `merge-hook-failed` event with the output tail, and
+     `todo` with that output as feedback, spending no attempt. Otherwise run `postMerge`. Status `merged`. `merge: "manual"` → status `ready`.
    - **Fail** → attempts++, `lastFeedback` = failed findings + cheating; back to `todo`; at
      `maxAttempts` → `stuck`.
    - **Compound.** A non-null `lesson` is appended to `lessonsFile` as one dated bullet under a

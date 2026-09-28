@@ -405,6 +405,33 @@ test('prepare runs in the worktree before each build; postMerge gets the merged 
   assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), ['prepare a a', 'post a ship/a']);
 });
 
+test('mergeHook runs on the staged merge with SHIPYARD_FEATURE/BRANCH; its staged rename is part of the merge commit, no alert', (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { priority: 2 })], config: { maxParallel: 1,
+    mergeHook: 'test "$SHIPYARD_BRANCH" = "ship/$SHIPYARD_FEATURE" && git mv "$SHIPYARD_FEATURE.txt" "0001-$SHIPYARD_FEATURE.txt"' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('b').status], ['merged', 'merged']);
+  const head = s.git('log', '--merges', '-1', '--format=%s%n%P', 'main').split('\n');
+  assert.equal(head[0], 'shipyard: merge b: Feature b');
+  assert.equal(head[1].split(' ').length, 2, 'a real merge commit');
+  assert.equal(s.git('show', '--first-parent', '--name-status', '--format=', 'main').trim(), 'A\t0001-b.txt');
+  assert.deepEqual(s.git('ls-tree', '--name-only', 'main').split('\n').filter((f) => /\.txt$/.test(f)), ['0001-a.txt', '0001-b.txt']);
+  assert.doesNotMatch(r.stdout + s.log(), /"alert"|ALERT/);
+  assert.equal(s.git('status', '--porcelain', '--untracked-files=no'), '');
+});
+
+test('a failing mergeHook aborts the merge: main unchanged, feature back to todo with the hook output, attempts unchanged', (t) => {
+  const s = setup(t, { features: [F('a')], config: { mergeHook: 'git mv a.txt 0001-a.txt; echo "migration 0001 is taken"; exit 4' } });
+  const main0 = s.git('rev-parse', 'main');
+  s.cli('run', '--once');
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['todo', 0]);
+  assert.match(s.feature('a').lastFeedback, /exited 4[\s\S]*migration 0001 is taken/);
+  assert.match(s.log(), /"event":"merge-hook-failed","detail":"mergeHook .*exited 4:\\nmigration 0001 is taken/);
+  assert.equal(s.git('rev-parse', 'main'), main0);
+  assert.equal(existsSync(join(s.repo, '.git/MERGE_HEAD')), false, 'merge --abort ran');
+  assert.equal(s.git('status', '--porcelain', '--untracked-files=no'), '');
+});
+
 test('a failing prepare fails the attempt before the builder runs', (t) => {
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
   const cfg = JSON.parse(readFileSync(join(s.repo, '.shipyard/config.json'), 'utf8'));
