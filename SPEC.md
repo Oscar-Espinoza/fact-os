@@ -31,8 +31,8 @@ and one dashboard across projects.
   "budgetUsdPerRun": 15,        // passed as --max-budget-usd to each claude -p call
   "budgetUsdTotal": 100,        // stop launching once costs reported during this `shipyard run` reach it; null = unlimited
   "timeoutMin": 60,             // per claude/test/postMerge child; the whole process group is killed
-  "builder":   { "model": "opus", "effort": "medium", "permissionMode": "bypassPermissions" },
-  "evaluator": { "model": "opus", "effort": "high",   "permissionMode": "bypassPermissions" },
+  "builder":   { "model": "opus", "effort": "medium", "permissionMode": "auto" },
+  "evaluator": { "model": "opus", "effort": "high",   "permissionMode": "auto" },
   "test": "npm test",           // run in the feature worktree after build; exit 0 = pass
   "merge": "auto",              // "auto": foreman merges; "manual": status becomes "ready" and stops there
   "briefFiles": [],             // extra files whose contents are appended to builder AND evaluator prompts

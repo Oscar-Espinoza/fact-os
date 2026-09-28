@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { withLock, mutate, writeJsonAtomic, paths } from '../lib/state.js';
+import { withLock, mutate, writeJsonAtomic, paths, DEFAULT_CONFIG } from '../lib/state.js';
 
 const STATE = new URL('../lib/state.js', import.meta.url).href;
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'shipyard-state-')); mkdirSync(join(d, '.shipyard')); return d; };
@@ -76,4 +76,9 @@ test('stale-lock takeover does not delete a lock another process took in the mea
   t.after(() => { fs.readFileSync = real; syncBuiltinESMExports(); });
   await assert.rejects(withLock(root, () => 1, { timeoutMs: 300 }), /lock/i);
   assert.equal(readFileSync(lock, 'utf8'), String(live.pid), 'the live holder keeps its lock');
+});
+
+test('builder and evaluator default to permissionMode "auto"', () => {
+  assert.equal(DEFAULT_CONFIG.builder.permissionMode, 'auto');
+  assert.equal(DEFAULT_CONFIG.evaluator.permissionMode, 'auto');
 });

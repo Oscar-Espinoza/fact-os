@@ -89,18 +89,19 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
 
 ## Permission mode
 
-Default `permissionMode` is `bypassPermissions` for both roles. `claude --help` (2.1.283) lists
+Default `permissionMode` is `auto` for both roles. `claude --help` (2.1.283) lists
 `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. With `-p` nobody answers
 prompts: `manual`/`acceptEdits` would block or deny the Bash calls a builder needs (tests, `git commit`),
-`dontAsk` denies anything not pre-allowed, `plan` cannot edit. `auto` works headless but a classifier may
-deny steps mid-build and it can be disabled by settings. `bypassPermissions` is the one mode that runs a
-full build unattended. It gives the agent your user's full rights, contained only by working in a
-worktree; switch to `auto` in `config.json` if you prefer the classifier's guard rails.
+`dontAsk` denies anything not pre-allowed, `plan` cannot edit. `auto` works headless with a classifier
+guarding each step; it may deny steps mid-build and
+it can be disabled by settings. `bypassPermissions` runs a full build with no classifier, giving the agent
+your user's full rights contained only by working in a worktree; set it in `config.json` only if you
+accept that.
 
 ## Threat model
 
-Shipyard is not a sandbox. Builders and evaluators run as your user; with `bypassPermissions` they can do
-anything you can.
+Shipyard is not a sandbox. Builders and evaluators run as your user; under `auto` a classifier screens each
+step, and with `bypassPermissions` they can do anything you can.
 - `--settings` deny rules (they hold even under `bypassPermissions`) cover `Edit` (every file-writing tool)
   under `//<root>/.shipyard/**` and `//<root>/.git/**` (so `.git/hooks` and `.git/config` too), plus the
   Bash prefixes `git update-ref`, `git push`, `git branch -f` and `git config`. They are prefix rules:
@@ -110,7 +111,7 @@ anything you can.
   feature-branch commit or carries one of a feature branch's blobs (e.g. `git commit-tree` of the branch's
   tree, or `git -C <root> commit` of its files). A commit whose content differs from every feature branch
   (e.g. rewritten by hand) is not caught.
-- For real repos, `permissionMode: "auto"` (the classifier) is the recommended guard.
+- For real repos, keep the default `permissionMode: "auto"` (the classifier) as a guard.
 
 ## Claude output
 
