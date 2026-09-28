@@ -1,0 +1,10 @@
+{
+  "name": "shipyard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Plan → build → evaluate → merge → compound loop over a feature list using headless Claude Code",
+  "bin": { "shipyard": "bin/shipyard" },
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test" }
+}
