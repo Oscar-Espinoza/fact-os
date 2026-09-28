@@ -143,3 +143,52 @@ test('acceptance checks are the ones from launch, even if features.json is edite
   assert.equal(prompts.length, 4);
   for (const p of prompts) { assert.match(p, /- a\.txt exists/); assert.doesNotMatch(p, /nothing to check/); }
 });
+
+test('budgetUsdTotal counts only this run\'s spend and stops launching; null means unlimited', (t) => {
+  const s = setup(t, { features: [F('a', { costUsd: 100 }), F('b', { priority: 2, costUsd: 100 })],
+    config: { maxParallel: 1, budgetUsdTotal: 0.015 } });
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.feature('a').status, 'merged', 'earlier runs\' costs do not count');
+  assert.equal(s.feature('b').status, 'todo');
+  assert.equal(s.calls('build', 'b').length, 0);
+  assert.match(s.log(), /"budget"/);
+  const cfg = join(s.repo, '.shipyard/config.json');
+  writeFileSync(cfg, JSON.stringify({ ...JSON.parse(readFileSync(cfg, 'utf8')), budgetUsdTotal: null }));
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(s.feature('b').status, 'merged');
+});
+
+test('a run that hits --max-budget-usd is reported as "budget exhausted"', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 }, scenario: { a: 'budget' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.match(s.feature('a').lastFeedback, /budget exhausted/);
+});
+
+test('timeoutMin kills the whole process group of a hung child', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, timeoutMin: 0.01 }, scenario: { a: 'hang' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.match(s.feature('a').lastFeedback, /timed out after 0\.01 min/);
+  assert.equal(s.pids().length, 2);
+  for (const pid of s.pids()) assert.equal(alive(pid), false, `pid ${pid} still running`);
+});
+
+test('SIGINT stops children (whole group) and returns in-flight features to todo; a second SIGINT force-exits', async (t) => {
+  const s = setup(t, { features: [F('a')], scenario: { a: 'hang' } });
+  let run = s.start();
+  assert.ok(await until(() => s.pids().length === 2), run.out());
+  run.cp.kill('SIGINT');
+  assert.equal(await run.exit, 2, run.out());
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['todo', 0]);
+  for (const pid of s.pids()) assert.equal(alive(pid), false, `pid ${pid} still running`);
+
+  writeFileSync(s.env.FAKE_PIDS, '');
+  s.env.FAKE_SCENARIO = JSON.stringify({ a: 'hang,ignore-term' });
+  run = s.start();
+  assert.ok(await until(() => s.pids().length === 2), run.out());
+  run.cp.kill('SIGINT');
+  await sleep(500);
+  assert.equal(run.cp.exitCode, null, 'waits for a child that ignores SIGTERM');
+  run.cp.kill('SIGINT');
+  assert.notEqual(await run.exit, 0);
+  assert.ok(await until(() => s.pids().every((p) => !alive(p)), 2000), 'force exit kills the group');
+});

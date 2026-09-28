@@ -80,7 +80,7 @@ test('end to end: parallel builds, eval retry, human wait/resume, onMock, dash',
   assert.match(ev.prompt, /a\.txt/, 'evaluator sees the diff');
   assert.match(ev.prompt, /hard-coded results/);
   const args = ba.args.join(' ');
-  for (const flag of ['-p', '--output-format json', '--permission-mode bypassPermissions', '--max-budget-usd 5', '--model opus'])
+  for (const flag of ['-p', '--output-format json', '--permission-mode bypassPermissions', '--max-budget-usd 15', '--model opus'])
     assert.ok(args.includes(flag), flag);
   const settings = JSON.parse(ba.args[ba.args.indexOf('--settings') + 1]);
   assert.match(JSON.stringify(settings.hooks), /PostToolUse.*hook/);
