@@ -28,8 +28,9 @@ and one dashboard across projects.
   "branchPrefix": "ship/",
   "maxParallel": 3,
   "maxAttempts": 2,
-  "budgetUsdPerRun": 5,         // passed as --max-budget-usd to each claude -p call
-  "budgetUsdTotal": 100,        // foreman stops when the sum of reported costs reaches this
+  "budgetUsdPerRun": 15,        // passed as --max-budget-usd to each claude -p call
+  "budgetUsdTotal": 100,        // stop launching once costs reported during this `shipyard run` reach it; null = unlimited
+  "timeoutMin": 60,             // per claude/test/postMerge child; the whole process group is killed
   "builder":   { "model": "opus", "effort": "medium", "permissionMode": "bypassPermissions" },
   "evaluator": { "model": "opus", "effort": "high",   "permissionMode": "bypassPermissions" },
   "test": "npm test",           // run in the feature worktree after build; exit 0 = pass
@@ -51,6 +52,7 @@ Feature {
   status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"
   onMock?: boolean                // built while a human task it needs is open
   attempts: number, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
+  pid?, pidStart?, foremanPid?    // current child: pid, /proc/<pid>/stat start time, foreman that spawned it
 }
 ```
 `.shipyard/human.json` — `{ "tasks": [HumanTask] }`
@@ -61,6 +63,7 @@ HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
 `.shipyard/log.jsonl` — one JSON line per event (`{ts, feature, event, detail}`).
 `.shipyard/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
 `.shipyard/runs/<feature>/<attempt>-{build,eval}.json` — raw `claude -p --output-format json` results.
+`.shipyard/.foreman` — pid of the running foreman (one per repo).
 
 ## Readiness rule (pure function, heavily tested)
 
@@ -74,34 +77,47 @@ by `shipyard doctor` / at load and those features are never ready.
 ## Foreman loop — `shipyard run [--watch] [--once] [--max-features N]`
 
 Each tick:
-1. Load state. Any feature left in `building|testing|evaluating` by a dead foreman goes back to `todo`
-   (its worktree is kept and reused).
+1. Load state. A feature left in `building|testing|evaluating` by a dead foreman becomes `merged` if its
+   branch tip is reachable from `base` but not on its first-parent line; is left alone while its recorded
+   child is alive (same pid and start time; EPERM = dead; without /proc, dead once its foreman is dead), at
+   most `timeoutMin`; otherwise goes back to `todo` (worktree kept and reused; the child is not killed).
 2. Launch ready features until `maxParallel` are in flight.
 3. Per feature (concurrently):
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
      previous evaluator feedback, lessons file, briefFiles, and the rule "commit your work; do not
      weaken or delete tests to make them pass; do not stub behavior the acceptance checks require".
-     Hook settings are passed via `--settings` so activity is logged (see Hooks).
+     Hook settings and deny rules are passed via `--settings` (see Hooks). Afterwards the worktree must be
+     clean and the branch must have commits beyond `base`, else the attempt fails with "commit your work"
+     (plus `git status --porcelain`, 40 lines); the branch sha is recorded and only that sha is tested,
+     evaluated and merged.
    - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++.
    - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the diff
-     `base...branch`, the acceptance list and the test output, and must answer with a JSON object
+     `base...<sha>` (`--text --no-ext-diff --no-textconv`), the acceptance list as read at launch and
+     the test output, and must answer with a JSON object
      `{ "pass": boolean, "findings": [{ "check": string, "ok": boolean, "evidence": string }],
         "cheating": string[], "lesson": string|null }`. It is told explicitly to look for
      pass-through implementations, tests that cannot fail, skipped/deleted tests, and hard-coded
-     results. Unparseable output counts as a fail.
+     results. Unparseable output, no findings, or `pass: true` with a failed finding or cheating counts as a fail.
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
-     becomes `ready` and a log event explains why), `git merge --no-ff <branch>`; on conflict,
+     becomes `ready` and a log event explains why; "clean" = no tracked changes outside `.shipyard/`),
+     `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to
+     start leaves the feature `ready` without costing an attempt); on conflict,
      `git merge --abort`, status `todo` with feedback "rebase on <base>", attempt++. Then run
      `postMerge`. Status `merged`. `merge: "manual"` → status `ready`.
    - **Fail** → attempts++, `lastFeedback` = failed findings + cheating; back to `todo`; at
      `maxAttempts` → `stuck`.
    - **Compound.** A non-null `lesson` is appended to `lessonsFile` as one dated bullet under a
-     `## Shipyard lessons` heading (created if missing), deduplicated by exact text.
+     `## Shipyard lessons` heading (created if missing), deduplicated by exact text, and committed on
+     `base` (that file only) when the main checkout is on `base` and the file had no local edits.
+   - **Tamper checks.** If `config.json` changes on disk, or `base` moves other than by the foreman's own
+     merges/lesson commits so that it reaches a feature-branch commit the foreman did not merge, log an
+     `alert`, launch and merge nothing more, exit 2. Other `base` moves are logged and re-recorded.
 4. Stop conditions: nothing in flight and nothing ready → if `--watch` and some feature is
    waiting-on-human, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s);
    otherwise exit printing a summary. Also stop launching when `budgetUsdTotal` is reached, or on
-   SIGINT/SIGTERM (finish nothing new; mark in-flight features back to `todo` on exit).
+   SIGINT/SIGTERM (SIGTERM to each child's process group; in-flight features back to `todo` without
+   spending an attempt; a second signal SIGKILLs the groups and exits at once).
    Exit code 0 when all features are `merged`/`ready`, 2 when stopped with stuck or waiting features.
 
 The `claude` binary is `process.env.SHIPYARD_CLAUDE || "claude"` so tests can substitute a fake.
@@ -128,7 +144,8 @@ The `claude` binary is `process.env.SHIPYARD_CLAUDE || "claude"` so tests can su
     (transitively), with steps and buttons "I did my part" (`POST /api/human/done`) and
     "Mark done" on `ready` features in manual-merge projects (`POST /api/feature/merged`).
   POST bodies are JSON `{project, id}`; `project` must be one of the discovered paths (no arbitrary
-  paths). Requests with an `Origin` header other than the dash's own origin are rejected.
+  paths). Requests with an `Origin` header other than the dash's own origin, or an unexpected `Host`
+  header (DNS rebinding), are rejected.
 
 ## Skills copied by init
 
@@ -143,7 +160,10 @@ The `claude` binary is `process.env.SHIPYARD_CLAUDE || "claude"` so tests can su
 
 The builder and evaluator are launched with
 `--settings '{"hooks":{"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"shipyard hook"}]}],"Stop":[...same]}}'`
-and env `SHIPYARD_FEATURE=<id>`. `summary` is the tool name plus the first 120 chars of the
+and env `SHIPYARD_FEATURE=<id>`; the command is `"<node>" "<shipyard>/bin/shipyard" hook` so it works
+before `shipyard` is on PATH. The same `--settings` carries deny rules for `Edit` under
+`<root>/.shipyard/` and `<root>/.git/` and for `git update-ref|push|branch -f|config` (see README,
+Threat model). `summary` is the tool name plus the first 120 chars of the
 command/file path.
 
 ## Done-condition (what "finished" means for this build)
