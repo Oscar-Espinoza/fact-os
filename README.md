@@ -78,8 +78,7 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   feature's `branch`) that the foreman did not merge, the foreman logs an `alert`, launches and merges
   nothing more, and exits 2. Any other move of `base` (your own commits) logs a `base-moved` notice, is
   re-recorded, and the run continues.
-  `claude` gets `--settings` deny rules for `Edit` under `<root>/.shipyard/` and `<root>/.git/` and for
-  `git update-ref`/`git push` (deny rules apply even under `bypassPermissions`).
+  `claude` gets `--settings` deny rules (see Threat model).
 - Lessons are committed on `base` (only that file) when the main checkout is on `base` and the lessons
   file had no local edits; otherwise they are appended uncommitted.
 - State files are written atomically (temp + rename) under an `O_EXCL` lock that is stale once its pid is
@@ -96,6 +95,19 @@ prompts: `manual`/`acceptEdits` would block or deny the Bash calls a builder nee
 deny steps mid-build and it can be disabled by settings. `bypassPermissions` is the one mode that runs a
 full build unattended. It gives the agent your user's full rights, contained only by working in a
 worktree; switch to `auto` in `config.json` if you prefer the classifier's guard rails.
+
+## Threat model
+
+Shipyard is not a sandbox. Builders and evaluators run as your user; with `bypassPermissions` they can do
+anything you can.
+- `--settings` deny rules (they hold even under `bypassPermissions`) cover `Edit` (every file-writing tool)
+  under `//<root>/.shipyard/**` and `//<root>/.git/**` (so `.git/hooks` and `.git/config` too), plus the
+  Bash prefixes `git update-ref`, `git push`, `git branch -f` and `git config`. They are prefix rules:
+  other Bash commands (`sh -c`, `echo > .git/hooks/…`, `git -C . branch -f`, …) can still write
+  `.shipyard/features.json`, `.git/hooks`, `.git/config`, or move `base`.
+- Moves of `base` are caught by the tamper check at launch and merge time, but only when `base` then
+  reaches a feature-branch commit; a commit built from scratch and put on `base` is not.
+- For real repos, `permissionMode: "auto"` (the classifier) is the recommended guard.
 
 ## Claude output
 
