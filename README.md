@@ -44,7 +44,8 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?,
-  status, onMock?, attempts, lastFeedback?, costUsd?, pid?, updatedAt}]}` (`pid`: its current child); status is
+  status, onMock?, attempts, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
+  child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
   `todo|building|testing|evaluating|ready|merged|stuck`.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
@@ -66,7 +67,9 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   the whole group gets SIGTERM and in-flight features go back to `todo` without spending an attempt; a
   second Ctrl-C SIGKILLs the groups and exits at once. One foreman per repo (`.shipyard/.foreman`).
   Features left in flight by a dead foreman are marked `merged` if their branch is already merged into
-  `base`, left alone while their recorded child pid is alive, and otherwise go back to `todo` (worktree reused).
+  `base`, left alone while their recorded child is alive (same pid and start time; `EPERM` counts as dead;
+  without `/proc`, dead once its foreman is dead) for at most `timeoutMin`, and otherwise go back to `todo`
+  (worktree reused; a still-running child is not killed).
 - Merges only when the main checkout is on `base` with no tracked changes outside `.shipyard/`; otherwise
   the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge. A
   conflicting merge is aborted (`git merge --abort`) and costs an attempt.

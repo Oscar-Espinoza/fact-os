@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { procStart } from '../lib/foreman.js';
 
 const BIN = fileURLToPath(new URL('../bin/shipyard', import.meta.url));
 const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.js', import.meta.url));
@@ -198,7 +199,7 @@ test('crash recovery through run(): merged branch → merged, dead child → rel
   t.after(() => sleeper.kill());
   const dead = Number(spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout);
   const s = setup(t, { features: [F('m', { status: 'evaluating' }), F('d', { status: 'building', pid: dead }),
-    F('l', { status: 'testing', pid: sleeper.pid })] });
+    F('l', { status: 'testing', pid: sleeper.pid, pidStart: procStart(sleeper.pid), foremanPid: dead })] });
   s.git('checkout', '-qb', 'ship/m'); // m was merged, then the foreman died before recording it
   writeFileSync(join(s.repo, 'm.txt'), 'm\n');
   s.git('add', 'm.txt'); s.git('commit', '-qm', 'build m');
@@ -213,4 +214,23 @@ test('crash recovery through run(): merged branch → merged, dead child → rel
   sleeper.kill();
   assert.equal(await run.exit, 0, run.out());
   assert.equal(s.feature('l').status, 'merged');
+});
+
+test('recovery does not wait on a pid that is not ours (pid 1 left in features.json across a reboot)', (t) => {
+  const s = setup(t, { features: [F('a', { status: 'building', pid: 1 })] });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+});
+
+test('waiting for a previous foreman\'s live child is capped by timeoutMin; the feature then goes back to todo', (t) => {
+  const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+  t.after(() => sleeper.kill());
+  const s = setup(t, { features: [F('a', { status: 'testing', pid: sleeper.pid, pidStart: procStart(sleeper.pid), foremanPid: 1 })],
+    config: { timeoutMin: 0.01 } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(s.log(), /"a","event":"recovered".*timeoutMin/);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(alive(sleeper.pid), true, 'a process Shipyard did not start is not killed');
 });

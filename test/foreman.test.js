@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
-  waitForChange, stamp } from '../lib/foreman.js';
+  waitForChange, stamp, childAlive, procStart } from '../lib/foreman.js';
 
 const verdict = (o = {}) => JSON.stringify({ pass: true, findings: [{ check: 'c1', ok: true, evidence: 'e' }], cheating: [], lesson: null, ...o });
 
@@ -87,4 +88,22 @@ test('appendLesson: creates heading once, dedupes by exact text, keeps later sec
   s = readFileSync(file, 'utf8');
   assert.ok(s.indexOf('- 2026-01-03: B') < s.indexOf('## Other'), s);
   assert.match(s, /## Other\n\ntext\n$/);
+});
+
+test('childAlive: a foreign pid (EPERM), a reused pid or a missing start time is not our child (bug: pid 1 waited on forever)', (t) => {
+  const dead = Number(spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout);
+  const kid = spawn('sleep', ['30'], { stdio: 'ignore' });
+  t.after(() => kid.kill());
+  // Without /proc: dead once the recorded foreman is dead, otherwise by pid.
+  assert.equal(childAlive({ pid: kid.pid, foremanPid: dead }, { proc: false }), false);
+  assert.equal(childAlive({ pid: kid.pid, foremanPid: process.pid }, { proc: false }), true);
+  assert.equal(childAlive({ pid: dead, foremanPid: process.pid }, { proc: false }), false);
+  if (!existsSync('/proc/self/stat')) return;
+  assert.equal(childAlive({ pid: 1 }), false, 'pid 1 exists but has no recorded start time');
+  assert.equal(childAlive({ pid: 1, pidStart: procStart(1), foremanPid: process.pid }), false, 'EPERM: not our user');
+  const start = procStart(kid.pid);
+  assert.match(start, /^\d+$/);
+  assert.equal(childAlive({ pid: kid.pid, pidStart: start }), true);
+  assert.equal(childAlive({ pid: kid.pid, pidStart: String(Number(start) + 1) }), false, 'same pid, other process');
+  assert.equal(childAlive({ pid: dead, pidStart: start }), false);
 });
