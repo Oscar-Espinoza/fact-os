@@ -48,7 +48,7 @@ if (mode === 'build') {
     }
     commit(`${id}.txt`, `built ${id} at ${Date.now()}\n`);
     if (has('dirty')) writeFileSync('leftover.txt', 'not committed\n');
-    if (has('move-base')) git('update-ref', 'refs/heads/main', 'HEAD');
+    if (has('move-base')) git('update-ref', 'refs/heads/main', git('commit-tree', 'HEAD^{tree}', '-p', 'main', '-m', 'sneaky'));
   }
 } else {
   if (has('move-branch')) commit('evil.txt', 'committed during evaluation\n');

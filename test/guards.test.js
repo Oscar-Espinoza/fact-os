@@ -114,3 +114,32 @@ test('a conflicting merge is aborted and the feature goes back with "rebase on m
   assert.equal(s.git('status', '--porcelain', '--untracked-files=no'), '');
   assert.equal(readFileSync(join(s.repo, 'a.txt'), 'utf8'), 'main version\n');
 });
+
+test('base moved by someone other than Shipyard: alert, nothing more is launched or merged, exit 2', (t) => {
+  const lesson = { pass: true, findings: [{ check: 'ok', ok: true, evidence: 'e' }], cheating: [], lesson: 'Keep it small' };
+  const s = setup(t, { features: [F('z', { priority: 0 }), F('a'), F('b', { priority: 2 })], config: { maxParallel: 1 },
+    scenario: { a: 'move-base' }, verdicts: { z: [lesson] } });
+  const r = s.cli('run');
+  assert.equal(r.status, 2, r.stdout);
+  assert.equal(s.feature('z').status, 'merged', 'its own merge and lesson commit do not trip the alert');
+  assert.equal(s.feature('a').status, 'todo');
+  assert.equal(s.feature('a').attempts, 0);
+  assert.match(s.log(), /"alert".*main moved/);
+  assert.equal(s.calls('build', 'b').length, 0, 'nothing launched after the alert');
+});
+
+test('config.json changed during the run: alert and exit 2 before merging', (t) => {
+  const s = setup(t, { features: [F('a')], scenario: { a: 'config' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.notEqual(s.feature('a').status, 'merged');
+  assert.match(s.log(), /"alert".*config\.json/);
+});
+
+test('acceptance checks are the ones from launch, even if features.json is edited mid-run', (t) => {
+  const fail1 = { pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'no' }], cheating: [], lesson: null };
+  const s = setup(t, { features: [F('a')], scenario: { a: 'acceptance' }, verdicts: { a: [fail1] } });
+  s.cli('run');
+  const prompts = [...s.calls('build', 'a'), ...s.calls('eval', 'a')].map((c) => c.prompt);
+  assert.equal(prompts.length, 4);
+  for (const p of prompts) { assert.match(p, /- a\.txt exists/); assert.doesNotMatch(p, /nothing to check/); }
+});

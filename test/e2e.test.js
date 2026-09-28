@@ -82,7 +82,10 @@ test('end to end: parallel builds, eval retry, human wait/resume, onMock, dash',
   const args = ba.args.join(' ');
   for (const flag of ['-p', '--output-format json', '--permission-mode bypassPermissions', '--max-budget-usd 5', '--model opus'])
     assert.ok(args.includes(flag), flag);
-  assert.match(ba.args[ba.args.indexOf('--settings') + 1], /PostToolUse.*hook/);
+  const settings = JSON.parse(ba.args[ba.args.indexOf('--settings') + 1]);
+  assert.match(JSON.stringify(settings.hooks), /PostToolUse.*hook/);
+  assert.deepEqual(settings.permissions.deny, [`Edit(/${repo}/.shipyard/**)`, `Edit(/${repo}/.git/**)`,
+    'Bash(git update-ref *)', 'Bash(git push *)']);
   assert.ok(existsSync(join(repo, '.shipyard/runs/c/2-eval.json')));
 
   assert.equal(git('status', '--porcelain', '--untracked-files=no'), '');
