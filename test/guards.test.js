@@ -373,3 +373,26 @@ test('a prepared branch with no commits of its own is fast-forwarded to the curr
   assert.equal(s.feature('a').status, 'merged');
   assert.equal(s.git('merge-base', '--is-ancestor', moved, 'ship/a'), '', 'the build started from the moved base');
 });
+
+test('prepare runs in the worktree before each build; postMerge gets the merged feature id and branch', (t) => {
+  const s = setup(t, { features: [F('a')], config: {} });
+  const log = join(s.repo, '.shipyard', 'hooks.log');
+  const cfg = JSON.parse(readFileSync(join(s.repo, '.shipyard/config.json'), 'utf8'));
+  cfg.prepare = `echo "prepare $SHIPYARD_FEATURE $(basename "$PWD")" >> ${log}`;
+  cfg.postMerge = `echo "post $SHIPYARD_FEATURE $SHIPYARD_BRANCH" >> ${log}`;
+  writeFileSync(join(s.repo, '.shipyard/config.json'), JSON.stringify(cfg));
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), ['prepare a a', 'post a ship/a']);
+});
+
+test('a failing prepare fails the attempt before the builder runs', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  const cfg = JSON.parse(readFileSync(join(s.repo, '.shipyard/config.json'), 'utf8'));
+  cfg.prepare = 'echo no database; exit 3';
+  writeFileSync(join(s.repo, '.shipyard/config.json'), JSON.stringify(cfg));
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.feature('a').status, 'stuck');
+  assert.match(s.feature('a').lastFeedback, /prepare .* exited 3[\s\S]*no database/);
+  assert.equal(s.calls('build', 'a').length, 0);
+});

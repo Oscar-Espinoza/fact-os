@@ -40,7 +40,7 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `maxAttempts` (2), `budgetUsdPerRun` (null = no cap; a positive number is passed as `--max-budget-usd`; hitting it gives the feedback
   "budget exhausted"), `budgetUsdTotal` (null = unlimited; stop launching once the cost reported **during the current
   `shipyard run`** reaches it — earlier runs' `costUsd` do not count; `null` = unlimited), `timeoutMin` (null = no timeout;
-  per `claude`/test/`postMerge` child), `builder`/`evaluator` `{model, effort, permissionMode}`,
+  per `claude`/test/`prepare` (null; a shell command run in the feature worktree before every build, e.g. install and provision databases; must be idempotent; a failure fails the attempt) and `postMerge` (it gets `SHIPYARD_FEATURE` and `SHIPYARD_BRANCH`) child), `builder`/`evaluator` `{model, effort, permissionMode}`,
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?,
