@@ -52,6 +52,7 @@ Feature {
   status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"
   onMock?: boolean                // built while a human task it needs is open
   attempts: number, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
+  sha?: string                    // evaluated commit, recorded when the feature becomes ready or merged
   pid?, pidStart?, foremanPid?    // current child: pid, /proc/<pid>/stat start time, foreman that spawned it
 }
 ```
@@ -111,8 +112,11 @@ Each tick:
      `## Shipyard lessons` heading (created if missing), deduplicated by exact text, and committed on
      `base` (that file only) when the main checkout is on `base` and the file had no local edits.
    - **Tamper checks.** If `config.json` changes on disk, or `base` moves other than by the foreman's own
-     merges/lesson commits so that it reaches a feature-branch commit the foreman did not merge, log an
-     `alert`, launch and merge nothing more, exit 2. Other `base` moves are logged and re-recorded.
+     merges/lesson commits so that it reaches a feature-branch commit, or its new objects
+     (`git rev-list --objects <newBase> ^<recordedBase>`) include a non-empty blob that is also in a feature
+     branch, log an `alert`, launch and merge nothing more, exit 2. Commits reachable from a `ready` or
+     `merged` feature's recorded `sha` do not count, so merging a `ready` branch by hand is fine. Other
+     `base` moves are logged and re-recorded.
 4. Stop conditions: nothing in flight and nothing ready → if `--watch` and some feature is
    waiting-on-human, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s);
    otherwise exit printing a summary. Also stop launching when `budgetUsdTotal` is reached, or on

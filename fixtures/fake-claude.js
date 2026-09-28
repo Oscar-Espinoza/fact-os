@@ -49,6 +49,14 @@ if (mode === 'build') {
     commit(`${id}.txt`, `built ${id} at ${Date.now()}\n`);
     if (has('dirty')) writeFileSync('leftover.txt', 'not committed\n');
     if (has('move-base')) { git('update-ref', 'refs/heads/main', 'HEAD'); commit(`${id}-2.txt`, 'more\n'); } // base gets its unevaluated commit
+    if (has('synthetic-base')) { // a commit built from the branch's tree, put on base without a feature-branch parent
+      const c = git('commit-tree', 'HEAD^{tree}', '-p', 'main', '-m', 'looks like the user');
+      git('-c', 'a.b=1', 'update-ref', 'refs/heads/main', c);
+    }
+    if (has('root-commit')) { // the same file committed straight onto base in the main checkout
+      writeFileSync(join(root(), `${id}.txt`), readFileSync(`${id}.txt`));
+      git('-C', root(), 'add', `${id}.txt`); git('-C', root(), 'commit', '-qm', 'looks like the user too');
+    }
     if (has('user-commit')) git('-C', root(), 'commit', '-q', '--allow-empty', '-m', 'the user\'s own work on main');
   }
 } else {

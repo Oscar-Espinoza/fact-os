@@ -42,8 +42,8 @@ function setup(t, { features, config = {}, scenario = {}, verdicts = {} }) {
     log: () => read(sy('log.jsonl')),
     calls: (mode, id) => read(env.FAKE_LOG).split('\n').filter(Boolean).map(JSON.parse).filter((c) => c.mode === mode && c.id === id),
     pids: () => read(env.FAKE_PIDS).split('\n').filter(Boolean).map(Number),
-    start: () => {
-      const cp = spawn(process.execPath, [BIN, 'run'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    start: (...a) => {
+      const cp = spawn(process.execPath, [BIN, 'run', ...a], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
       let out = ''; cp.stdout.on('data', (d) => { out += d; }); cp.stderr.on('data', (d) => { out += d; });
       t.after(() => cp.exitCode === null && cp.kill('SIGKILL'));
       return { cp, exit: new Promise((r) => cp.on('exit', (code) => r(code))), out: () => out };
@@ -254,4 +254,29 @@ test('crash recovery: an in-flight branch with no commits yet (tip on base\'s fi
   assert.match(s.log(), /"e","event":"recovered","detail":"left in flight/);
   assert.equal(s.calls('build', 'e').length, 1, 'rebuilt, not taken as already merged');
   assert.equal(s.feature('e').status, 'merged');
+});
+
+test('merge "manual": merging a ready branch by hand while run --watch waits on a human task is not an alert', async (t) => {
+  const s = setup(t, { features: [F('a'), F('k', { priority: 2 })], config: { merge: 'manual' } });
+  writeFileSync(join(s.repo, '.shipyard/human.json'), JSON.stringify({ tasks: [
+    { id: 'h', title: 'Get keys', steps: ['ask'], unblocks: ['k'], mockable: false, status: 'open' }] }));
+  const run = s.start('--watch');
+  assert.ok(await until(() => s.feature('a').status === 'ready' && /"waiting"/.test(s.log())), run.out());
+  assert.equal(s.feature('a').sha, s.git('rev-parse', 'ship/a'), 'the evaluated sha is recorded');
+  s.git('merge', '-q', '--no-ff', '-m', 'merge a by hand', 'ship/a');
+  assert.equal(s.cli('done', 'h').status, 0);
+  assert.equal(await run.exit, 0, run.out());
+  assert.doesNotMatch(s.log(), /"alert"/);
+  assert.equal(s.feature('k').status, 'ready');
+});
+
+test('a synthetic commit on base carrying an unmerged feature branch\'s blobs is an alert (commit-tree, git -C <root> commit)', (t) => {
+  for (const flag of ['synthetic-base', 'root-commit']) {
+    const s = setup(t, { features: [F('a'), F('b', { priority: 2 })], config: { maxParallel: 1 }, scenario: { a: flag } });
+    const r = s.cli('run');
+    assert.equal(r.status, 2, `${flag}: ${r.stdout}`);
+    assert.match(s.log(), /"alert".*main moved.*blob/, flag);
+    assert.notEqual(s.feature('a').status, 'merged', flag);
+    assert.equal(s.calls('build', 'b').length, 0, `${flag}: nothing launched after the alert`);
+  }
 });
