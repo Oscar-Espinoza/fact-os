@@ -49,9 +49,16 @@ test('cycles, self-deps and unknown deps are reported and never ready', () => {
   assert.match(errs, /u.*unknown dep.*ghost/);
 });
 
-test('cycle members are bad even when a cycle member is merged-looking elsewhere (dependents of a cycle are not ready)', () => {
-  const fs = [F('a', { deps: ['b'] }), F('b', { deps: ['a'] }), F('c', { deps: ['a'] })];
-  assert.deepEqual(analyze(fs, [], 'auto').ready, []);
+test('a todo feature in a cycle is never ready, even when its dep in the cycle is merged (bug: no cycle check)', () => {
+  const r = analyze([F('a', { deps: ['b'], status: 'merged' }), F('b', { deps: ['a'] })], [], 'auto');
+  assert.deepEqual(r.ready, []);
+  assert.ok(r.bad.has('b'));
+});
+
+test('ids that are not slugs are bad and never ready (bug: path traversal through the worktree path)', () => {
+  const r = analyze([F('../evil'), F('a b'), F(''), F('ok')], [], 'auto');
+  assert.deepEqual(r.ready, ['ok']);
+  for (const id of ['../evil', 'a b', '']) assert.ok(r.bad.has(id), id);
 });
 
 test('duplicate ids and unknown unblocks are reported', () => {

@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig } from '../lib/state.js';
-import { analyze, validate } from '../lib/ready.js';
+import { analyze, validate, SLUG } from '../lib/ready.js';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const USAGE = `usage: shipyard <command>
@@ -91,7 +91,7 @@ function doctor() {
   const strs = (x) => Array.isArray(x) && x.every(str);
   for (const f of features) {
     const bad = (m) => problems.push(`feature ${f?.id ?? '?'}: ${m}`);
-    if (!str(f?.id) || !/^[a-z0-9][a-z0-9._-]*$/i.test(f.id)) bad('id must be a slug');
+    if (!str(f?.id) || !SLUG.test(f.id)) bad('id must be a slug');
     if (!str(f?.title)) bad('title required');
     if (!strs(f?.acceptance) || !f.acceptance.length) bad('needs at least one acceptance check');
     if (f?.surface !== undefined && !SURF.includes(f.surface)) bad(`surface must be one of ${SURF.join('|')}`);
