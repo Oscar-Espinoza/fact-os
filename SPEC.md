@@ -81,7 +81,9 @@ Each tick:
 1. Load state. A feature left in `building|testing|evaluating` by a dead foreman becomes `merged` if its
    branch tip is reachable from `base` but not on its first-parent line; is left alone while its recorded
    child is alive (same pid and start time; EPERM = dead; without /proc, dead once its foreman is dead), at
-   most `timeoutMin`; otherwise goes back to `todo` (worktree kept and reused; the child is not killed).
+   most `timeoutMin`, after which it becomes `stuck` with feedback "previous child still running (pid N)"
+   (the child is not killed, and relaunching would put two processes in one worktree); otherwise goes back
+   to `todo` (worktree kept and reused).
 2. Launch ready features until `maxParallel` are in flight.
 3. Per feature (concurrently):
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from

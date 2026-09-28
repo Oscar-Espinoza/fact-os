@@ -68,8 +68,9 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   second Ctrl-C SIGKILLs the groups and exits at once. One foreman per repo (`.shipyard/.foreman`).
   Features left in flight by a dead foreman are marked `merged` if their branch is already merged into
   `base`, left alone while their recorded child is alive (same pid and start time; `EPERM` counts as dead;
-  without `/proc`, dead once its foreman is dead) for at most `timeoutMin`, and otherwise go back to `todo`
-  (worktree reused; a still-running child is not killed).
+  without `/proc`, dead once its foreman is dead) for at most `timeoutMin`; a child still running after that
+  is not killed and its feature becomes `stuck` ("previous child still running (pid N)"), so two processes
+  never write one worktree. The rest go back to `todo` (worktree reused).
 - Merges only when the main checkout is on `base` with no tracked changes outside `.shipyard/`; otherwise
   the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge. A
   conflicting merge is aborted (`git merge --abort`) and costs an attempt.
@@ -93,8 +94,7 @@ Default `permissionMode` is `auto` for both roles. `claude --help` (2.1.283) lis
 `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. With `-p` nobody answers
 prompts: `manual`/`acceptEdits` would block or deny the Bash calls a builder needs (tests, `git commit`),
 `dontAsk` denies anything not pre-allowed, `plan` cannot edit. `auto` works headless with a classifier
-guarding each step; it may deny steps mid-build and
-it can be disabled by settings. `bypassPermissions` runs a full build with no classifier, giving the agent
+guarding each step; it may deny steps mid-build and it can be disabled by settings. `bypassPermissions` runs a full build with no classifier, giving the agent
 your user's full rights contained only by working in a worktree; set it in `config.json` only if you
 accept that.
 

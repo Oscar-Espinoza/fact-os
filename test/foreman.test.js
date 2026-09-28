@@ -54,6 +54,14 @@ test('recoverInFlight resets only in-flight statuses and keeps attempts', () => 
   assert.ok(fs.every((f) => f.attempts === 1));
 });
 
+test('recoverInFlight: a merged branch wins; an overdue live child makes the feature stuck with its pid', () => {
+  const fs = [{ id: 'm', status: 'testing', pid: 7 }, { id: 'o', status: 'building', pid: 8 }, { id: 'd', status: 'evaluating', pid: 9 }];
+  const r = recoverInFlight(fs, { merged: (f) => f.id === 'm', overdue: (f) => f.id !== 'd' });
+  assert.deepEqual([r.merged, r.stuck, r.todo], [['m'], ['o'], ['d']]);
+  assert.deepEqual(fs.map((f) => f.status), ['merged', 'stuck', 'todo']);
+  assert.equal(fs[1].lastFeedback, 'previous child still running (pid 8)');
+});
+
 test('waitForChange returns at once when the files changed after the caller\'s stamp (bug: missed wakeup)', async (t) => {
   const d = mkdtempSync(join(tmpdir(), 'shipyard-wait-')); t.after(() => rmSync(d, { recursive: true, force: true }));
   const P = { features: join(d, 'features.json'), human: join(d, 'human.json') };

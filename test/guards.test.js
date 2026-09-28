@@ -234,15 +234,16 @@ test('recovery does not wait on a pid that is not ours (pid 1 left in features.j
   assert.equal(s.feature('a').status, 'merged');
 });
 
-test('waiting for a previous foreman\'s live child is capped by timeoutMin; the feature then goes back to todo', (t) => {
+test('waiting for a previous foreman\'s live child is capped by timeoutMin; the feature is then stuck, not relaunched', (t) => {
   const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
   t.after(() => sleeper.kill());
   const s = setup(t, { features: [F('a', { status: 'testing', pid: sleeper.pid, pidStart: procStart(sleeper.pid), foremanPid: 1 })],
     config: { timeoutMin: 0.01 } });
   const r = s.cli('run');
-  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(s.log(), /"a","event":"recovered".*timeoutMin/);
-  assert.equal(s.feature('a').status, 'merged');
+  assert.deepEqual([s.feature('a').status, s.feature('a').lastFeedback], ['stuck', `previous child still running (pid ${sleeper.pid})`]);
+  assert.equal(s.calls('build', 'a').length, 0, 'no second process in the same worktree');
   assert.equal(alive(sleeper.pid), true, 'a process Shipyard did not start is not killed');
 });
 
