@@ -129,6 +129,16 @@ test('base moved by someone other than Shipyard: alert, nothing more is launched
   assert.equal(s.calls('build', 'b').length, 0, 'nothing launched after the alert');
 });
 
+test('the user\'s own commit on base mid-run is a notice, not an alert: base is re-recorded and the run goes on', (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { priority: 2 })], config: { maxParallel: 1 }, scenario: { a: 'user-commit' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('b').status], ['merged', 'merged']);
+  assert.match(s.log(), /"base-moved".*no feature-branch commits/);
+  assert.doesNotMatch(s.log(), /"alert"/);
+  assert.match(s.git('log', '--format=%s', 'main'), /the user's own work on main/);
+});
+
 test('config.json changed during the run: alert and exit 2 before merging', (t) => {
   const s = setup(t, { features: [F('a')], scenario: { a: 'config' } });
   assert.equal(s.cli('run').status, 2);

@@ -48,7 +48,8 @@ if (mode === 'build') {
     }
     commit(`${id}.txt`, `built ${id} at ${Date.now()}\n`);
     if (has('dirty')) writeFileSync('leftover.txt', 'not committed\n');
-    if (has('move-base')) git('update-ref', 'refs/heads/main', git('commit-tree', 'HEAD^{tree}', '-p', 'main', '-m', 'sneaky'));
+    if (has('move-base')) { git('update-ref', 'refs/heads/main', 'HEAD'); commit(`${id}-2.txt`, 'more\n'); } // base gets its unevaluated commit
+    if (has('user-commit')) git('-C', root(), 'commit', '-q', '--allow-empty', '-m', 'the user\'s own work on main');
   }
 } else {
   if (has('move-branch')) commit('evil.txt', 'committed during evaluation\n');

@@ -73,8 +73,11 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
 - Merges only when the main checkout is on `base` with no tracked changes outside `.shipyard/`; otherwise
   the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge. A
   conflicting merge is aborted (`git merge --abort`) and costs an attempt.
-- Tamper checks: if `base` moves other than by Shipyard's own merges and lesson commits, or `config.json`
-  changes on disk during a run, the foreman logs an `alert`, launches and merges nothing more, and exits 2.
+- Tamper checks: if `config.json` changes on disk during a run, or `base` moves other than by Shipyard's
+  own merges and lesson commits so that it now reaches a commit of a feature branch (`branchPrefix*` or a
+  feature's `branch`) that the foreman did not merge, the foreman logs an `alert`, launches and merges
+  nothing more, and exits 2. Any other move of `base` (your own commits) logs a `base-moved` notice, is
+  re-recorded, and the run continues.
   `claude` gets `--settings` deny rules for `Edit` under `<root>/.shipyard/` and `<root>/.git/` and for
   `git update-ref`/`git push` (deny rules apply even under `bypassPermissions`).
 - Lessons are committed on `base` (only that file) when the main checkout is on `base` and the lessons
