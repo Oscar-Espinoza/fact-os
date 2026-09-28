@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson } from '../lib/foreman.js';
+import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
+  waitForChange, stamp } from '../lib/foreman.js';
 
 const verdict = (o = {}) => JSON.stringify({ pass: true, findings: [{ check: 'c1', ok: true, evidence: 'e' }], cheating: [], lesson: null, ...o });
 
@@ -47,9 +48,19 @@ test('applyFailure: attempts increment, feedback kept, stuck at maxAttempts', ()
 
 test('recoverInFlight resets only in-flight statuses and keeps attempts', () => {
   const fs = ['building', 'testing', 'evaluating', 'todo', 'ready', 'merged', 'stuck'].map((s) => ({ id: s, status: s, attempts: 1 }));
-  assert.deepEqual(recoverInFlight(fs), ['building', 'testing', 'evaluating']);
+  assert.deepEqual(recoverInFlight(fs).todo, ['building', 'testing', 'evaluating']);
   assert.deepEqual(fs.map((f) => f.status), ['todo', 'todo', 'todo', 'todo', 'ready', 'merged', 'stuck']);
   assert.ok(fs.every((f) => f.attempts === 1));
+});
+
+test('waitForChange returns at once when the files changed after the caller\'s stamp (bug: missed wakeup)', async (t) => {
+  const d = mkdtempSync(join(tmpdir(), 'shipyard-wait-')); t.after(() => rmSync(d, { recursive: true, force: true }));
+  const P = { features: join(d, 'features.json'), human: join(d, 'human.json') };
+  writeFileSync(P.features, '{}');
+  const before = stamp(P);
+  writeFileSync(P.human, '{}'); // e.g. `shipyard done` lands between load() and the wait
+  const r = await Promise.race([waitForChange(P, before, () => false).then(() => 'woke'), new Promise((r) => setTimeout(r, 1000, 'slept'))]);
+  assert.equal(r, 'woke');
 });
 
 test('feedbackFromVerdict lists failed findings and cheating, not passing findings', () => {

@@ -192,3 +192,25 @@ test('SIGINT stops children (whole group) and returns in-flight features to todo
   assert.notEqual(await run.exit, 0);
   assert.ok(await until(() => s.pids().every((p) => !alive(p)), 2000), 'force exit kills the group');
 });
+
+test('crash recovery through run(): merged branch → merged, dead child → relaunched, live child → waited for', async (t) => {
+  const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+  t.after(() => sleeper.kill());
+  const dead = Number(spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout);
+  const s = setup(t, { features: [F('m', { status: 'evaluating' }), F('d', { status: 'building', pid: dead }),
+    F('l', { status: 'testing', pid: sleeper.pid })] });
+  s.git('checkout', '-qb', 'ship/m'); // m was merged, then the foreman died before recording it
+  writeFileSync(join(s.repo, 'm.txt'), 'm\n');
+  s.git('add', 'm.txt'); s.git('commit', '-qm', 'build m');
+  s.git('checkout', '-q', 'main'); s.git('merge', '-q', '--no-ff', '-m', 'merge m', 'ship/m');
+  const run = s.start();
+  assert.ok(await until(() => s.feature('d').status === 'merged'), run.out());
+  await sleep(300);
+  assert.equal(s.feature('m').status, 'merged');
+  assert.equal(s.calls('build', 'm').length, 0, 'an already merged feature is not rebuilt');
+  assert.equal(s.feature('l').status, 'testing');
+  assert.equal(s.calls('build', 'l').length, 0, 'not relaunched while its child is alive');
+  sleeper.kill();
+  assert.equal(await run.exit, 0, run.out());
+  assert.equal(s.feature('l').status, 'merged');
+});
