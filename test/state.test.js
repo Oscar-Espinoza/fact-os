@@ -25,9 +25,9 @@ test('readers never observe a partially written file (bug: writeFileSync in plac
   const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = paths(root).features;
   writeJsonAtomic(file, { features: [] });
-  const big = JSON.stringify({ features: Array.from({ length: 3000 }, (_, i) => ({ id: 'f' + i, title: 'x'.repeat(40) })) });
   const script = `import { writeJsonAtomic } from ${JSON.stringify(STATE)};
-    for (let i = 0; i < 150; i++) writeJsonAtomic(${JSON.stringify(file)}, ${big});`;
+    const big = { features: Array.from({ length: 3000 }, (_, i) => ({ id: 'f' + i, title: 'x'.repeat(40) })) };
+    for (let i = 0; i < 150; i++) writeJsonAtomic(${JSON.stringify(file)}, big);`;
   const cp = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'inherit' });
   let done = false, reads = 0; cp.on('exit', () => { done = true; });
   while (!done) { JSON.parse(readFileSync(file, 'utf8')); reads++; await new Promise(setImmediate); }
