@@ -44,8 +44,11 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null), `refreshBeforeTest`
   (false; true merges the current `base` into the feature branch after the build and before the test, so two features
-  that pass alone can't break `base` together — see below).
-- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?,
+  that pass alone can't break `base` together — see below), `maxRefreshes` (5), `groupBy` (null; `"idPrefix:<n>"` puts
+  each feature in the conflict group named by its id's first n chars, e.g. `"idPrefix:3"`: `F05-02-x` → `F05`; a
+  feature's own `group` wins). Two features of one group are never in flight together: the foreman launches the
+  next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target.
+- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
   `todo|building|testing|evaluating|ready|merged|stuck`.
@@ -82,7 +85,7 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   and the foreman itself merges `base` into the feature's (clean) worktree: if that is clean the next build
   re-runs the tests on top; if it conflicts, the merge is left in progress and the next build resolves and
   commits it (that merge commit counts as the builder's commit). Neither costs an attempt; they are counted
-  in `refreshes`, and after 5 the feature is `stuck` ("too many base refreshes"). With `refreshBeforeTest: true` the
+  in `refreshes`, and after `maxRefreshes` (5) the feature is `stuck` ("too many base refreshes"). With `refreshBeforeTest: true` the
   same refresh runs before the test whenever `base` has commits the branch lacks: a clean merge goes straight on to
   test, evaluate (diff still `base...sha`) and merge that merge commit, without counting as a refresh; a conflict
   goes back to `todo` exactly as above.

@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
-  waitForChange, stamp, childAlive, procStart } from '../lib/foreman.js';
+  waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.js';
 
 const verdict = (o = {}) => JSON.stringify({ pass: true, findings: [{ check: 'c1', ok: true, evidence: 'e' }], cheating: [], lesson: null, ...o });
 
@@ -114,4 +114,12 @@ test('childAlive: a foreign pid (EPERM), a reused pid or a missing start time is
   assert.equal(childAlive({ pid: kid.pid, pidStart: start }), true);
   assert.equal(childAlive({ pid: kid.pid, pidStart: String(Number(start) + 1) }), false, 'same pid, other process');
   assert.equal(childAlive({ pid: dead, pidStart: start }), false);
+});
+
+test('groupOf: explicit group wins; idPrefix:<n> defaults to the first n chars of the id; null or unknown groupBy means no group', () => {
+  assert.equal(groupOf({ id: 'F05-02-x' }, 'idPrefix:3'), 'F05');
+  assert.equal(groupOf({ id: 'F05-02-x', group: 'db' }, 'idPrefix:3'), 'db');
+  assert.equal(groupOf({ id: 'F05-02-x', group: 'db' }, null), 'db');
+  assert.equal(groupOf({ id: 'F05-02-x' }, null), null);
+  assert.equal(groupOf({ id: 'F05-02-x' }, 'bogus'), null);
 });

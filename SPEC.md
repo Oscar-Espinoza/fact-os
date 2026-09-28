@@ -38,7 +38,9 @@ and one dashboard across projects.
   "briefFiles": [],             // extra files whose contents are appended to builder AND evaluator prompts
   "lessonsFile": "CLAUDE.md",   // where compounded lessons are appended
   "postMerge": null,            // optional shell command run in the main checkout after a merge
-  "refreshBeforeTest": false    // true: merge the recorded base sha into the feature branch before its test (see Test)
+  "refreshBeforeTest": false,   // true: merge the recorded base sha into the feature branch before its test (see Test)
+  "maxRefreshes": 5,            // base refreshes after merge conflicts before a feature is stuck
+  "groupBy": null               // conflict groups: null = only explicit `group`s; "idPrefix:<n>" = a feature's group defaults to its id's first n chars
 }
 ```
 `.shipyard/features.json` — `{ "features": [Feature] }`
@@ -50,6 +52,7 @@ Feature {
   deps: string[]                  // feature ids
   priority: number                // lower = sooner
   branch?: string                 // existing branch to continue/evaluate instead of starting fresh
+  group?: string                  // conflict group: never in flight together with another feature of the same group
   status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"
   onMock?: boolean                // built while a human task it needs is open
   attempts: number, refreshes?: number /* base refreshes after merge conflicts */, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
@@ -88,7 +91,10 @@ Each tick:
    to `todo` (worktree kept and reused).
 2. Under `merge: "auto"`, if any feature is `parked` and the main checkout is now clean and on `base`, merge
    each one's recorded `sha` if its branch still points to it (else back to `todo`), then reload.
-   Launch ready features until `maxParallel` are in flight.
+   Launch ready features, in readiness order, until `maxParallel` are in flight (a ceiling, not a target). A feature
+   whose conflict group (`group`, else per `groupBy`; none when both are unset) already has a feature in flight
+   (`building|testing|evaluating`, including a previous foreman's live orphan) is skipped for the next-best ready
+   feature of another group, so features touching the same hot files never run at the same time.
 3. Per feature (concurrently):
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
@@ -106,7 +112,7 @@ Each tick:
      foreman's merge commit) becomes the recorded sha that is tested, evaluated (`base...<sha>` still shows only the
      feature's own changes) and merged; this does not count in `refreshes`. Conflicted → the same as the refresh after
      a merge conflict: merge left in progress, `todo` with the conflict feedback, no attempt spent, `refreshes++`
-     (at 5, the merge is aborted and the feature is `stuck`). So the test always runs on "current base + this feature".
+     (at `maxRefreshes`, the merge is aborted and the feature is `stuck`). So the test always runs on "current base + this feature".
    - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++.
    - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the diff
      `base...<sha>` (`--text --no-ext-diff --no-textconv`), the acceptance list as read at launch and
@@ -125,7 +131,7 @@ Each tick:
      left in progress, `todo` with feedback "the foreman started merging <base> into your branch and it
      conflicts in: <files>. Resolve the conflicts preserving both sides' intent, run the tests, and commit the
      merge (git add + git commit). Do not abort it and do not start another merge or rebase." Neither spends
-     an attempt; `refreshes++` instead, and a conflict with `refreshes` already at 5 makes the feature `stuck`
+     an attempt; `refreshes++` instead, and a conflict with `refreshes` already at `maxRefreshes` makes the feature `stuck`
      ("too many base refreshes"). Otherwise run `postMerge`. Status `merged`. `merge: "manual"` → status `ready`.
    - **Fail** → attempts++, `lastFeedback` = failed findings + cheating; back to `todo`; at
      `maxAttempts` → `stuck`.

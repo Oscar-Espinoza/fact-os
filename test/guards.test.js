@@ -162,6 +162,25 @@ test('after 5 base refreshes a conflicting feature is stuck with "too many base 
   assert.equal(existsSync(join(s.repo, '.git/MERGE_HEAD')), false, 'merge --abort ran');
 });
 
+test('maxRefreshes from config replaces the fixed 5: at maxRefreshes 1, one prior refresh makes a conflict stuck', (t) => {
+  const s = setup(t, { features: [F('a', { branch: 'ship/a', refreshes: 1 })], config: { maxRefreshes: 1 } });
+  conflict(s, 'a', { branch: 'from a\n', main: 'from main\n' });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').refreshes], ['stuck', 1]);
+  assert.match(s.feature('a').lastFeedback, /too many base refreshes/);
+});
+
+test('conflict groups (groupBy idPrefix): two ready features of one group never run together; another group fills the slot', (t) => {
+  const s = setup(t, { features: [F('x-1'), F('x-2'), F('y-1')], config: { maxParallel: 3, groupBy: 'idPrefix:1' } });
+  s.env.FAKE_DELAY_MS = '400';
+  assert.equal(s.cli('run').status, 0);
+  const [x1b, x1e, x2b, y1b] = [s.calls('build', 'x-1')[0], s.calls('eval', 'x-1')[0], s.calls('build', 'x-2')[0], s.calls('build', 'y-1')[0]];
+  assert.ok(x1b.t0 < y1b.t1 && y1b.t0 < x1b.t1, 'x-1 and y-1 (different groups) built concurrently');
+  assert.ok(x2b.t0 > x1e.t1, 'x-2 started only after x-1 finished');
+  assert.match(s.log(), /"feature":"x-1","event":"merged"[\s\S]*"feature":"x-2","event":"launch"/);
+  for (const id of ['x-1', 'x-2', 'y-1']) assert.equal(s.feature(id).status, 'merged');
+});
+
 test('merge "auto": a feature parked as ready by a dirty checkout is merged once the checkout is clean, then its dependents launch', async (t) => {
   const s = setup(t, { features: [F('a'), F('b', { deps: ['a'] })], config: { maxParallel: 1 } });
   writeFileSync(join(s.repo, 'README.md'), 'local edit\n');
