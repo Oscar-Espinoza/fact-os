@@ -44,7 +44,7 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?,
-  status, onMock?, attempts, refreshes?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
+  status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
   `todo|building|testing|evaluating|ready|merged|stuck`.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
@@ -72,7 +72,10 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   is not killed and its feature becomes `stuck` ("previous child still running (pid N)"), so two processes
   never write one worktree. The rest go back to `todo` (worktree reused).
 - Merges only when the main checkout is on `base` with no tracked changes outside `.shipyard/`; otherwise
-  the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge.
+  the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge. Under
+  `merge: "auto"` a feature parked that way (`parked: true`) is merged on a later tick once the checkout is
+  clean and on `base`, if its branch still points to the evaluated `sha` (else it goes back to `todo`);
+  `run --watch` polls for that.
 - Builders never merge, rebase, pull or switch branches. A conflicting merge is aborted (`git merge --abort`)
   and the foreman itself merges `base` into the feature's (clean) worktree: if that is clean the next build
   re-runs the tests on top; if it conflicts, the merge is left in progress and the next build resolves and

@@ -162,6 +162,34 @@ test('after 5 base refreshes a conflicting feature is stuck with "too many base 
   assert.equal(existsSync(join(s.repo, '.git/MERGE_HEAD')), false, 'merge --abort ran');
 });
 
+test('merge "auto": a feature parked as ready by a dirty checkout is merged once the checkout is clean, then its dependents launch', async (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { deps: ['a'] })], config: { maxParallel: 1 } });
+  writeFileSync(join(s.repo, 'README.md'), 'local edit\n');
+  const run = s.start('--watch');
+  assert.ok(await until(() => s.feature('a').status === 'ready' && /merge-skipped/.test(s.log())), run.out());
+  await sleep(300);
+  assert.equal(s.calls('build', 'b').length, 0);
+  s.git('checkout', '-q', 'README.md');
+  assert.equal(await run.exit, 0, run.out());
+  assert.deepEqual([s.feature('a').status, s.feature('b').status], ['merged', 'merged']);
+  assert.equal(s.calls('build', 'a').length, 1, 'merged as evaluated, not rebuilt');
+  assert.equal(s.git('merge-base', '--is-ancestor', s.feature('a').sha, 'main'), '');
+});
+
+test('merge "auto": a parked ready feature whose branch moved goes back to todo and is rebuilt', (t) => {
+  const s = setup(t, { features: [F('a')] });
+  writeFileSync(join(s.repo, 'README.md'), 'local edit\n');
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(s.feature('a').status, 'ready');
+  const wt = wtOf(s, 'a');
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'moved after evaluation'], { cwd: wt });
+  s.git('checkout', '-q', 'README.md');
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(s.calls('build', 'a').length, 2);
+  assert.match(s.log(), /moved after evaluation|moved since it was evaluated/);
+});
+
 test('base moved by someone other than Shipyard: alert, nothing more is launched or merged, exit 2', (t) => {
   const lesson = { pass: true, findings: [{ check: 'ok', ok: true, evidence: 'e' }], cheating: [], lesson: 'Keep it small' };
   const s = setup(t, { features: [F('z', { priority: 0 }), F('a'), F('b', { priority: 2 })], config: { maxParallel: 1 },

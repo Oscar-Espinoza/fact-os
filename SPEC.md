@@ -53,6 +53,7 @@ Feature {
   onMock?: boolean                // built while a human task it needs is open
   attempts: number, refreshes?: number /* base refreshes after merge conflicts */, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
   sha?: string                    // evaluated commit, recorded when the feature becomes ready or merged
+  parked?: boolean                // ready only because the main checkout was dirty or off base (merge-skipped)
   pid?, pidStart?, foremanPid?    // current child: pid, /proc/<pid>/stat start time, foreman that spawned it
 }
 ```
@@ -84,7 +85,9 @@ Each tick:
    most `timeoutMin`, after which it becomes `stuck` with feedback "previous child still running (pid N)"
    (the child is not killed, and relaunching would put two processes in one worktree); otherwise goes back
    to `todo` (worktree kept and reused).
-2. Launch ready features until `maxParallel` are in flight.
+2. Under `merge: "auto"`, if any feature is `parked` and the main checkout is now clean and on `base`, merge
+   each one's recorded `sha` if its branch still points to it (else back to `todo`), then reload.
+   Launch ready features until `maxParallel` are in flight.
 3. Per feature (concurrently):
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
@@ -106,7 +109,7 @@ Each tick:
      pass-through implementations, tests that cannot fail, skipped/deleted tests, and hard-coded
      results. Unparseable output, no findings, or `pass: true` with a failed finding or cheating counts as a fail.
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
-     becomes `ready` and a log event explains why; "clean" = no tracked changes outside `.shipyard/`),
+     becomes `ready` with `parked: true` and a log event explains why; "clean" = no tracked changes outside `.shipyard/`),
      `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to
      start leaves the feature `ready` without costing an attempt); on conflict, `git merge --abort`, then a
      **base refresh**: the foreman runs `git merge --no-edit <recorded base sha>` in the feature's worktree
@@ -130,7 +133,8 @@ Each tick:
      `base` that reach a feature branch through a base refresh (they are reachable from the recorded base). Other
      `base` moves are logged and re-recorded.
 4. Stop conditions: nothing in flight and nothing ready → if `--watch` and some feature is
-   waiting-on-human, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s);
+   waiting-on-human, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s), and
+   while some feature is `parked`, re-check every poll;
    otherwise exit printing a summary. Also stop launching when `budgetUsdTotal` is reached, or on
    SIGINT/SIGTERM (SIGTERM to each child's process group; in-flight features back to `todo` without
    spending an attempt; a second signal SIGKILLs the groups and exits at once).
