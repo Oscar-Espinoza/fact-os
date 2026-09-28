@@ -234,3 +234,13 @@ test('waiting for a previous foreman\'s live child is capped by timeoutMin; the 
   assert.equal(s.feature('a').status, 'merged');
   assert.equal(alive(sleeper.pid), true, 'a process Shipyard did not start is not killed');
 });
+
+test('crash recovery: an in-flight branch with no commits yet (tip on base\'s first-parent line) goes back to todo, not merged', (t) => {
+  const s = setup(t, { features: [F('e', { status: 'building', branch: 'ship/e' })] });
+  s.git('branch', 'ship/e'); // the builder died before its first commit
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(s.log(), /"e","event":"recovered","detail":"left in flight/);
+  assert.equal(s.calls('build', 'e').length, 1, 'rebuilt, not taken as already merged');
+  assert.equal(s.feature('e').status, 'merged');
+});
