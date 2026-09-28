@@ -1,0 +1,56 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { withLock, mutate, writeJsonAtomic, paths } from '../lib/state.js';
+
+const STATE = new URL('../lib/state.js', import.meta.url).href;
+const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'shipyard-state-')); mkdirSync(join(d, '.shipyard')); return d; };
+const exited = (cp) => new Promise((r) => cp.on('exit', (code) => r(code)));
+
+test('two concurrent writer processes lose no update (bug: read-modify-write without lock)', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeJsonAtomic(paths(root).features, { features: [], n: 0 });
+  const script = `import { mutate } from ${JSON.stringify(STATE)};
+    for (let i = 0; i < 60; i++) await mutate(${JSON.stringify(root)}, 'features', (d) => { d.n++; });`;
+  const kids = [0, 1].map(() => spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'inherit' }));
+  assert.deepEqual(await Promise.all(kids.map(exited)), [0, 0]);
+  assert.equal(JSON.parse(readFileSync(paths(root).features, 'utf8')).n, 120);
+  assert.ok(!existsSync(paths(root).lock), 'lock released');
+});
+
+test('readers never observe a partially written file (bug: writeFileSync in place)', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = paths(root).features;
+  writeJsonAtomic(file, { features: [] });
+  const big = JSON.stringify({ features: Array.from({ length: 3000 }, (_, i) => ({ id: 'f' + i, title: 'x'.repeat(40) })) });
+  const script = `import { writeJsonAtomic } from ${JSON.stringify(STATE)};
+    for (let i = 0; i < 150; i++) writeJsonAtomic(${JSON.stringify(file)}, ${big});`;
+  const cp = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'inherit' });
+  let done = false, reads = 0; cp.on('exit', () => { done = true; });
+  while (!done) { JSON.parse(readFileSync(file, 'utf8')); reads++; await new Promise(setImmediate); }
+  assert.ok(reads > 10);
+  assert.deepEqual(readdirSync(join(root, '.shipyard')).filter((f) => f.includes('.tmp')), [], 'no temp files left');
+});
+
+test('a lock held by a live pid blocks; a lock left by a dead pid is taken over', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const holder = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)']);
+  t.after(() => holder.kill());
+  writeFileSync(paths(root).lock, String(holder.pid));
+  await assert.rejects(withLock(root, () => 1, { timeoutMs: 300 }), /lock/i);
+  holder.kill(); await exited(holder);
+  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
+  writeFileSync(paths(root).lock, dead);
+  assert.equal(await withLock(root, () => 42, { timeoutMs: 2000 }), 42);
+  assert.ok(!existsSync(paths(root).lock));
+});
+
+test('mutate returns fn result and releases lock when fn throws', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  await assert.rejects(mutate(root, 'human', () => { throw new Error('boom'); }), /boom/);
+  assert.ok(!existsSync(paths(root).lock));
+  assert.equal(await mutate(root, 'human', (d) => { d.tasks.push({ id: 'h' }); return d.tasks.length; }), 1);
+});
