@@ -40,7 +40,7 @@ test('serves the page and /api/state for discovered projects, skipping worktrees
 });
 
 test('POST with a project that was not discovered is rejected and changes nothing', async () => {
-  for (const project of ['/etc', join(root, 'shop-worktrees/pay'), join(root, 'shop/../shop'), 42]) {
+  for (const project of ['/etc', join(root, 'shop-worktrees/pay'), root + '/shop/../shop', root + '/shop/', 42]) {
     const r = await post('/api/human/done', { project, id: 'stripe' });
     assert.equal(r.status, 400, String(project));
   }
