@@ -28,9 +28,9 @@ and one dashboard across projects.
   "branchPrefix": "ship/",
   "maxParallel": 3,
   "maxAttempts": 2,
-  "budgetUsdPerRun": 15,        // passed as --max-budget-usd to each claude -p call
-  "budgetUsdTotal": 100,        // stop launching once costs reported during this `shipyard run` reach it; null = unlimited
-  "timeoutMin": 60,             // per claude/test/postMerge child; the whole process group is killed
+  "budgetUsdPerRun": null,      // null = no cap; a positive number is passed as --max-budget-usd to each claude -p call
+  "budgetUsdTotal": null,       // stop launching once costs reported during this `shipyard run` reach it; null = unlimited
+  "timeoutMin": null,           // null = no timeout; otherwise per claude/test/postMerge child, and the whole process group is killed
   "builder":   { "model": "opus", "effort": "medium", "permissionMode": "auto" },
   "evaluator": { "model": "opus", "effort": "high",   "permissionMode": "auto" },
   "test": "npm test",           // run in the feature worktree after build; exit 0 = pass
@@ -89,7 +89,9 @@ Each tick:
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
      previous evaluator feedback, lessons file, briefFiles, and the rule "commit your work; do not
-     weaken or delete tests to make them pass; do not stub behavior the acceptance checks require".
+     weaken or delete tests to make them pass; do not stub behavior the acceptance checks require", plus: the builder may
+     run parallel subagents on disjoint files; only it commits, and nobody merges, rebases, pulls or switches branches.
+     A branch with no commits of its own is first fast-forwarded to `base` (ff-only, clean worktree only).
      Hook settings and deny rules are passed via `--settings` (see Hooks). Afterwards the worktree must be
      clean and the branch must have commits beyond `base`, else the attempt fails with "commit your work"
      (plus `git status --porcelain`, 40 lines); the branch sha is recorded and only that sha is tested,

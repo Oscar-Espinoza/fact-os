@@ -106,7 +106,9 @@ test('merge is skipped (feature ready) when the main checkout is dirty or on ano
 
 test('a conflicting merge is aborted and the feature goes back with "rebase on main"', (t) => {
   const s = setup(t, { features: [F('a', { branch: 'ship/a' })], config: { maxAttempts: 1 } });
-  s.git('branch', 'ship/a');
+  s.git('checkout', '-qb', 'ship/a'); writeFileSync(join(s.repo, 'own.txt'), 'own\n');
+  s.git('add', 'own.txt'); s.git('commit', '-qm', 'branch has its own commit, so it is not fast-forwarded');
+  s.git('checkout', '-q', 'main');
   writeFileSync(join(s.repo, 'a.txt'), 'main version\n');
   s.git('add', 'a.txt'); s.git('commit', '-qm', 'main changes a.txt');
   assert.equal(s.cli('run').status, 2);
@@ -280,4 +282,23 @@ test('a synthetic commit on base carrying an unmerged feature branch\'s blobs is
     assert.notEqual(s.feature('a').status, 'merged', flag);
     assert.equal(s.calls('build', 'b').length, 0, `${flag}: nothing launched after the alert`);
   }
+});
+
+test('--max-budget-usd is passed only when budgetUsdPerRun is a positive number', async () => {
+  const { claudeArgs } = await import('../lib/foreman.js');
+  const base = { builder: { model: 'opus' } };
+  assert.ok(!claudeArgs({ ...base, budgetUsdPerRun: null }, 'builder', '/r').includes('--max-budget-usd'));
+  const a = claudeArgs({ ...base, budgetUsdPerRun: 7 }, 'builder', '/r');
+  assert.equal(a[a.indexOf('--max-budget-usd') + 1], '7');
+});
+
+test('a prepared branch with no commits of its own is fast-forwarded to the current base before building', (t) => {
+  const s = setup(t, { features: [F('a', { branch: 'ship/a' })], config: { maxAttempts: 1 } });
+  s.git('branch', 'ship/a');
+  writeFileSync(join(s.repo, 'a.txt'), 'main version\n');
+  s.git('add', 'a.txt'); s.git('commit', '-qm', 'main moved after the branch was prepared');
+  const moved = s.git('rev-parse', 'main');
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(s.git('merge-base', '--is-ancestor', moved, 'ship/a'), '', 'the build started from the moved base');
 });

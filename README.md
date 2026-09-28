@@ -37,9 +37,9 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
 ## Files (`.shipyard/` in the main checkout)
 
 - `config.json` — `base`, `worktreesDir` (`../<repo>-worktrees`), `branchPrefix` (`ship/`), `maxParallel` (3),
-  `maxAttempts` (2), `budgetUsdPerRun` (15, passed as `--max-budget-usd`; hitting it gives the feedback
-  "budget exhausted"), `budgetUsdTotal` (100; stop launching once the cost reported **during the current
-  `shipyard run`** reaches it — earlier runs' `costUsd` do not count; `null` = unlimited), `timeoutMin` (60,
+  `maxAttempts` (2), `budgetUsdPerRun` (null = no cap; a positive number is passed as `--max-budget-usd`; hitting it gives the feedback
+  "budget exhausted"), `budgetUsdTotal` (null = unlimited; stop launching once the cost reported **during the current
+  `shipyard run`** reaches it — earlier runs' `costUsd` do not count; `null` = unlimited), `timeoutMin` (null = no timeout;
   per `claude`/test/`postMerge` child), `builder`/`evaluator` `{model, effort, permissionMode}`,
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null).
