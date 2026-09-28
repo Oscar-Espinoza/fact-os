@@ -61,6 +61,7 @@ test('a builder that leaves no commit, or uncommitted changes, is failed with "c
     assert.match(s.feature(id).lastFeedback, /commit your work/, id);
     assert.equal(s.calls('eval', id).length, 0, `${id} was not evaluated`);
   }
+  assert.match(s.feature('dirty').lastFeedback, /\n\?\? leftover\.txt/, 'names the uncommitted files (git status --porcelain)');
   assert.equal(s.git('log', '--merges', '--oneline'), '');
 });
 
