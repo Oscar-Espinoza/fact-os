@@ -1,13 +1,15 @@
 # fact-os — spec and done-condition
 
-A small, dependency-free tool that runs a plan → build → evaluate → merge → compound loop over a
+A small tool with no runtime dependencies that runs a plan → build → evaluate → merge → compound loop over a
 project's feature list using headless Claude Code (`claude -p`). One foreman process, N builders in
 separate git worktrees, a separate evaluator per feature, a human inbox for what only the owner can do,
 and one dashboard across projects.
 
 ## Constraints
 
-- Node >= 22, ESM, **no npm dependencies** (node:* built-ins only). Tests use `node:test`.
+- TypeScript on Bun >= 1.4, ESM, strict types (`lib/types.ts` holds the shapes below), **zero runtime dependencies**
+  (node:* built-ins only, run by Bun). Dev dependencies: `typescript`, `@types/bun`. Tests use `node:test` + `node:assert`
+  and run with `bun test`; `bun run typecheck` (`tsc --noEmit`) must be clean.
 - Lives in `~/Projects/fact-os`; installed by symlinking `bin/fact-os` to `~/.local/bin/fact-os`.
 - It is not a Claude Code plugin. `fact-os init` copies two project skills into the target repo's
   `.claude/skills/` (`intake`, `ship`). Everything else is the CLI.
@@ -38,6 +40,7 @@ and one dashboard across projects.
   "briefFiles": [],             // extra files whose contents are appended to builder AND evaluator prompts
   "lessonsFile": "CLAUDE.md",   // where compounded lessons are appended
   "postMerge": null,            // optional shell command run in the main checkout after a merge
+  "prepare": null,              // optional shell command run in the feature worktree before every build (idempotent)
   "refreshBeforeTest": false,   // true: merge the recorded base sha into the feature branch before its test (see Test)
   "maxRefreshes": 5,            // base refreshes after merge conflicts before a feature is stuck
   "mergeHook": null,            // optional shell command run in the main checkout on the staged merge, before its commit (see Pass)
@@ -199,7 +202,7 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
 
 The builder and evaluator are launched with
 `--settings '{"hooks":{"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"fact-os hook"}]}],"Stop":[...same]}}'`
-and env `FACTOS_FEATURE=<id>`; the command is `"<node>" "<fact-os>/bin/fact-os" hook` so it works
+and env `FACTOS_FEATURE=<id>`; the command is `"<bun>" "<fact-os>/bin/fact-os" hook` so it works
 before `fact-os` is on PATH. The same `--settings` carries deny rules for `Edit` under
 `<root>/.fact-os/` and `<root>/.git/` and for `git update-ref|push|branch -f|config` (see README,
 Threat model). `summary` is the tool name plus the first 120 chars of the
@@ -207,16 +210,16 @@ command/file path.
 
 ## Done-condition (what "finished" means for this build)
 
-1. `node --test` passes, and each test answers "what realistic bug would this catch". Required coverage:
+1. `bun test` passes, and each test answers "what realistic bug would this catch". Required coverage:
    readiness rule (deps, manual vs auto merge, mockable vs blocking human tasks, cycles, ordering);
    state transitions incl. attempts → stuck and crash recovery; atomic write + lock (two concurrent
    writers, no lost update); evaluator output parsing (valid, invalid → fail); lessons dedupe;
    dash POST validation (unknown project rejected, foreign Origin rejected, done unblocks).
-2. An end-to-end test in a temp git repo with a fake `claude` (a node script that commits a file and,
+2. An end-to-end test in a temp git repo with a fake `claude` (a Bun script, `fixtures/fake-claude.ts`, that commits a file and,
    in evaluator mode, returns a scripted verdict) shows: two independent features built in parallel
    and merged; one feature failing evaluation once then passing; one feature blocked by a
    non-mockable human task that `run --watch` waits on and resumes after `fact-os done`; a mockable
    one built `onMock`. The fake is selected via `FACTOS_CLAUDE`.
 3. `fact-os dash` serves the page and `/api/state` against that temp repo (tested via fetch).
 4. README.md: install, commands, file formats, and the safety limits above. Under 150 lines.
-5. No npm dependencies; total source (excluding tests) aims for under ~1200 lines.
+5. No runtime dependencies; total source (excluding tests) aims for under ~1200 lines.

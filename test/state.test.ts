@@ -1,16 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
-import { withLock, mutate, writeJsonAtomic, paths, DEFAULT_CONFIG, envVar } from '../lib/state.js';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { withLock, mutate, writeJsonAtomic, paths, DEFAULT_CONFIG, envVar } from '../lib/state.ts';
+import type { HumanTask } from '../lib/types.ts';
 
-const STATE = new URL('../lib/state.js', import.meta.url).href;
+const STATE = new URL('../lib/state.ts', import.meta.url).href;
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'fact-os-state-')); mkdirSync(join(d, '.fact-os')); return d; };
-const exited = (cp) => new Promise((r) => cp.on('exit', (code) => r(code)));
+const exited = (cp: ChildProcess) => new Promise<number | null>((r) => cp.on('exit', (code) => r(code)));
 
 test('two concurrent writer processes lose no update (bug: read-modify-write without lock)', async (t) => {
   const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -54,7 +53,7 @@ test('mutate returns fn result and releases lock when fn throws', async (t) => {
   const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
   await assert.rejects(mutate(root, 'human', () => { throw new Error('boom'); }), /boom/);
   assert.ok(!existsSync(paths(root).lock));
-  assert.equal(await mutate(root, 'human', (d) => { d.tasks.push({ id: 'h' }); return d.tasks.length; }), 1);
+  assert.equal(await mutate(root, 'human', (d) => { d.tasks.push({ id: 'h' } as HumanTask); return d.tasks.length; }), 1);
 });
 
 test('stale-lock takeover does not delete a lock another process took in the meantime (bug: unlink after read)', async (t) => {
@@ -65,16 +64,10 @@ test('stale-lock takeover does not delete a lock another process took in the mea
   const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
   writeFileSync(lock, dead);
   // Right after we read the dead pid, another process removes the stale lock and takes it.
-  const real = fs.readFileSync;
   let raced = false;
-  fs.readFileSync = function (f, ...a) {
-    const r = real.call(this, f, ...a);
-    if (f === lock && !raced) { raced = true; fs.unlinkSync(lock); fs.writeFileSync(lock, String(live.pid)); }
-    return r;
-  };
-  syncBuiltinESMExports();
-  t.after(() => { fs.readFileSync = real; syncBuiltinESMExports(); });
-  await assert.rejects(withLock(root, () => 1, { timeoutMs: 300 }), /lock/i);
+  const beforeTakeover = () => { if (!raced) { raced = true; unlinkSync(lock); writeFileSync(lock, String(live.pid)); } };
+  await assert.rejects(withLock(root, () => 1, { timeoutMs: 300, beforeTakeover }), /lock/i);
+  assert.ok(raced, 'the race was injected');
   assert.equal(readFileSync(lock, 'utf8'), String(live.pid), 'the live holder keeps its lock');
 });
 

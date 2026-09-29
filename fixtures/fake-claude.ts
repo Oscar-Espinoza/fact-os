@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Fake `claude -p --output-format json` for the end-to-end tests. Builder mode commits a file;
 // evaluator mode answers with the next scripted verdict from $FAKE_VERDICTS (default: pass).
 // $FAKE_SCENARIO = {"<feature id>": "flag,flag"} makes it misbehave (see the flags below;
@@ -6,31 +6,32 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
+import type { FeaturesFile, Verdict } from '../lib/types.ts';
 
 const prompt = readFileSync(0, 'utf8');
-const id = process.env.FACTOS_FEATURE;
-const log = process.env.FAKE_LOG;
+const id = process.env.FACTOS_FEATURE as string;
+const log = process.env.FAKE_LOG as string;
 const mode = prompt.startsWith('You are the builder') ? 'build' : 'eval';
-const flags = (JSON.parse(process.env.FAKE_SCENARIO || '{}')[id] || '').split(',');
-const has = (f) => flags.includes(mode === 'build' ? f : `eval:${f}`);
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+const flags = ((JSON.parse(process.env.FAKE_SCENARIO || '{}') as Record<string, string>)[id] || '').split(',');
+const has = (f: string) => flags.includes(mode === 'build' ? f : `eval:${f}`);
+const git = (...a: string[]) => execFileSync('git', a, { encoding: 'utf8' }).trim();
 const root = () => dirname(git('rev-parse', '--path-format=absolute', '--git-common-dir'));
-const commit = (file, text) => { writeFileSync(file, text); git('add', file); git('commit', '-qm', `${mode} ${id}: ${file}`); };
+const commit = (file: string, text: string) => { writeFileSync(file, text); git('add', file); git('commit', '-qm', `${mode} ${id}: ${file}`); };
 const t0 = Date.now();
 
 if (has('hang')) { // never answers; leaves a grandchild in its process group
   if (has('ignore-term')) process.on('SIGTERM', () => {});
   const kid = spawn('sleep', ['30'], { stdio: 'ignore' });
-  appendFileSync(process.env.FAKE_PIDS, `${process.pid}\n${kid.pid}\n`);
+  appendFileSync(process.env.FAKE_PIDS as string, `${process.pid}\n${kid.pid}\n`);
   setInterval(() => {}, 1000);
   await new Promise(() => {});
 }
 await new Promise((r) => setTimeout(r, Number(process.env.FAKE_DELAY_MS ?? 400)));
-let result = 'done', extra = {};
+let result = 'done', extra: Record<string, unknown> = {};
 if (mode === 'build') {
   if (has('acceptance')) { // rewrite its own acceptance checks in features.json
-    const file = join(root(), '.fact-os/features.json'), d = JSON.parse(readFileSync(file, 'utf8'));
-    d.features.find((f) => f.id === id).acceptance = ['nothing to check'];
+    const file = join(root(), '.fact-os/features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
+    d.features.find((f) => f.id === id)!.acceptance = ['nothing to check'];
     writeFileSync(file, JSON.stringify(d));
   }
   if (has('config')) { // loosen the foreman's config
@@ -74,9 +75,9 @@ if (mode === 'build') {
   }
 } else {
   if (has('move-branch')) commit('evil.txt', 'committed during evaluation\n');
-  const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+  const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { mode: string; id: string }) : [];
   const n = past.filter((e) => e.mode === 'eval' && e.id === id).length;
-  const scripted = JSON.parse(readFileSync(process.env.FAKE_VERDICTS, 'utf8'))[id]?.[n];
+  const scripted = (JSON.parse(readFileSync(process.env.FAKE_VERDICTS as string, 'utf8')) as Record<string, Partial<Verdict>[]>)[id]?.[n];
   result = 'Verdict:\n```json\n' + JSON.stringify(scripted ?? { pass: true,
     findings: [{ check: 'works', ok: true, evidence: 'fake' }], cheating: [], lesson: null }) + '\n```';
 }

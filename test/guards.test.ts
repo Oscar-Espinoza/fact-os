@@ -1,26 +1,29 @@
-// End-to-end scenarios where the builder, the evaluator or the checkout misbehave. Uses fixtures/fake-claude.js.
-import { test } from 'node:test';
+// End-to-end scenarios where the builder, the evaluator or the checkout misbehave. Uses fixtures/fake-claude.ts.
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { procStart } from '../lib/foreman.js';
+import { procStart } from '../lib/foreman.ts';
+import type { Config, Feature, FeaturesFile, Verdict } from '../lib/types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
-const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.js', import.meta.url));
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const F = (id, o = {}) => ({ id, title: `Feature ${id}`, description: `Build ${id}`, acceptance: [`${id}.txt exists`],
+const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.ts', import.meta.url));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: `Feature ${id}`, description: `Build ${id}`, acceptance: [`${id}.txt exists`],
   surface: 'any', deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '', ...o });
 
-function setup(t, { features, config = {}, scenario = {}, verdicts = {} }) {
+interface FakeCall { mode: string; id: string; t0: number; t1: number; prompt: string; args: string[] }
+function setup(t: TestContext, { features, config = {}, scenario = {}, verdicts = {} }:
+  { features: Feature[]; config?: Partial<Config>; scenario?: Record<string, string>; verdicts?: Record<string, Partial<Verdict>[]> }) {
   const base = mkdtempSync(join(tmpdir(), 'fact-os-guard-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const repo = join(base, 'app');
   mkdirSync(repo);
-  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
   writeFileSync(join(repo, 'README.md'), '# app\n');
@@ -29,28 +32,28 @@ function setup(t, { features, config = {}, scenario = {}, verdicts = {} }) {
   const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100', FAKE_DELAY_MS: '50',
     FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json'), FAKE_PIDS: join(base, 'pids'),
     FAKE_SCENARIO: JSON.stringify(scenario) };
-  const cli = (...a) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000 });
+  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000 });
   assert.equal(cli('init', '--test', 'true').status, 0);
-  const sy = (f) => join(repo, '.fact-os', f);
+  const sy = (f: string) => join(repo, '.fact-os', f);
   writeFileSync(sy('config.json'), JSON.stringify({ ...JSON.parse(readFileSync(sy('config.json'), 'utf8')), ...config }));
   writeFileSync(sy('features.json'), JSON.stringify({ features }));
   writeFileSync(env.FAKE_VERDICTS, JSON.stringify(verdicts));
-  const read = (f) => (existsSync(f) ? readFileSync(f, 'utf8') : '');
+  const read = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8') : '');
   return {
     repo, env, git, cli,
-    feature: (id) => JSON.parse(read(sy('features.json'))).features.find((f) => f.id === id),
+    feature: (id: string) => (JSON.parse(read(sy('features.json'))) as FeaturesFile).features.find((f) => f.id === id)!,
     log: () => read(sy('log.jsonl')),
-    calls: (mode, id) => read(env.FAKE_LOG).split('\n').filter(Boolean).map(JSON.parse).filter((c) => c.mode === mode && c.id === id),
+    calls: (mode: string, id: string) => read(env.FAKE_LOG).split('\n').filter(Boolean).map((l) => JSON.parse(l) as FakeCall).filter((c) => c.mode === mode && c.id === id),
     pids: () => read(env.FAKE_PIDS).split('\n').filter(Boolean).map(Number),
-    start: (...a) => {
+    start: (...a: string[]) => {
       const cp = spawn(process.execPath, [BIN, 'run', ...a], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
       let out = ''; cp.stdout.on('data', (d) => { out += d; }); cp.stderr.on('data', (d) => { out += d; });
       t.after(() => cp.exitCode === null && cp.kill('SIGKILL'));
-      return { cp, exit: new Promise((r) => cp.on('exit', (code) => r(code))), out: () => out };
+      return { cp, exit: new Promise<number | null>((r) => cp.on('exit', (code) => r(code))), out: () => out };
     },
   };
 }
-const until = async (cond, ms = 10000) => { for (const end = Date.now() + ms; !cond() && Date.now() < end;) await sleep(50); return cond(); };
+const until = async (cond: () => unknown, ms = 10000) => { for (const end = Date.now() + ms; !cond() && Date.now() < end;) await sleep(50); return cond(); };
 
 test('a builder that leaves no commit, or uncommitted changes, is failed with "commit your work" (exit 2)', (t) => {
   const s = setup(t, { features: [F('noop'), F('dirty')], config: { maxAttempts: 1 }, scenario: { noop: 'noop', dirty: 'dirty' } });
@@ -58,10 +61,10 @@ test('a builder that leaves no commit, or uncommitted changes, is failed with "c
   assert.equal(r.status, 2, r.stdout + r.stderr);
   for (const id of ['noop', 'dirty']) {
     assert.equal(s.feature(id).status, 'stuck', id);
-    assert.match(s.feature(id).lastFeedback, /commit your work/, id);
+    assert.match(s.feature(id).lastFeedback!, /commit your work/, id);
     assert.equal(s.calls('eval', id).length, 0, `${id} was not evaluated`);
   }
-  assert.match(s.feature('dirty').lastFeedback, /\n\?\? leftover\.txt/, 'names the uncommitted files (git status --porcelain)');
+  assert.match(s.feature('dirty').lastFeedback!, /\n\?\? leftover\.txt/, 'names the uncommitted files (git status --porcelain)');
   assert.equal(s.git('log', '--merges', '--oneline'), '');
 });
 
@@ -69,7 +72,7 @@ test('the evaluated commit is merged; a branch that moves during evaluation is r
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 }, scenario: { a: 'eval:move-branch' } });
   assert.equal(s.cli('run').status, 2);
   assert.equal(s.feature('a').attempts, 1);
-  assert.match(s.feature('a').lastFeedback, /moved/);
+  assert.match(s.feature('a').lastFeedback!, /moved/);
   assert.equal(existsSync(join(s.repo, 'evil.txt')), false);
   assert.equal(s.git('log', '--merges', '--oneline'), '');
 });
@@ -106,8 +109,9 @@ test('merge is skipped (feature ready) when the main checkout is dirty or on ano
 
 // main gets shared.txt = "base"; branch ship/<id> gets its own commit with `branch` content (+ extra files); main then
 // commits `main` content, so merging the branch into main conflicts.
-function conflict(s, id, { branch, main, extra = {} }) {
-  const w = (f, c) => writeFileSync(join(s.repo, f), c);
+type Setup = ReturnType<typeof setup>;
+function conflict(s: Setup, id: string, { branch, main, extra = {} }: { branch: string; main?: string; extra?: Record<string, string> }) {
+  const w = (f: string, c: string) => writeFileSync(join(s.repo, f), c);
   if (!existsSync(join(s.repo, 'shared.txt'))) { w('shared.txt', 'base\n'); s.git('add', 'shared.txt'); s.git('commit', '-qm', 'shared'); }
   s.git('checkout', '-qb', `ship/${id}`);
   for (const [f, c] of Object.entries({ ...extra, 'shared.txt': branch })) { w(f, c); s.git('add', f); }
@@ -115,7 +119,7 @@ function conflict(s, id, { branch, main, extra = {} }) {
   s.git('checkout', '-q', 'main');
   if (main != null) { w('shared.txt', main); s.git('commit', '-qam', 'main edits shared.txt'); }
 }
-const wtOf = (s, id) => join(s.repo, '..', 'app-worktrees', id);
+const wtOf = (s: Setup, id: string) => join(s.repo, '..', 'app-worktrees', id);
 
 test('a conflicting merge is aborted; the foreman merges main into the worktree conflict-free, and the next attempt merges (attempts unchanged)', (t) => {
   const s = setup(t, { features: [F('a', { branch: 'ship/a' })], config: { maxAttempts: 1 } });
@@ -155,7 +159,7 @@ test('after 5 base refreshes a conflicting feature is stuck with "too many base 
   conflict(s, 'a', { branch: 'from a\n', main: 'from main\n' });
   assert.equal(s.cli('run').status, 2);
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['stuck', 0, 5]);
-  assert.match(s.feature('a').lastFeedback, /too many base refreshes/);
+  assert.match(s.feature('a').lastFeedback!, /too many base refreshes/);
   const wt = wtOf(s, 'a');
   assert.equal(spawnSync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: wt }).status, 1, 'no merge started in the worktree');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: wt, encoding: 'utf8' }), '');
@@ -167,7 +171,7 @@ test('maxRefreshes from config replaces the fixed 5: at maxRefreshes 1, one prio
   conflict(s, 'a', { branch: 'from a\n', main: 'from main\n' });
   assert.equal(s.cli('run').status, 2);
   assert.deepEqual([s.feature('a').status, s.feature('a').refreshes], ['stuck', 1]);
-  assert.match(s.feature('a').lastFeedback, /too many base refreshes/);
+  assert.match(s.feature('a').lastFeedback!, /too many base refreshes/);
 });
 
 test('conflict groups (groupBy idPrefix): two ready features of one group never run together; another group fills the slot', (t) => {
@@ -192,7 +196,7 @@ test('merge "auto": a feature parked as ready by a dirty checkout is merged once
   assert.equal(await run.exit, 0, run.out());
   assert.deepEqual([s.feature('a').status, s.feature('b').status], ['merged', 'merged']);
   assert.equal(s.calls('build', 'a').length, 1, 'merged as evaluated, not rebuilt');
-  assert.equal(s.git('merge-base', '--is-ancestor', s.feature('a').sha, 'main'), '');
+  assert.equal(s.git('merge-base', '--is-ancestor', s.feature('a').sha!, 'main'), '');
 });
 
 test('merge "auto": a parked ready feature whose branch moved goes back to todo and is rebuilt', (t) => {
@@ -265,13 +269,13 @@ test('budgetUsdTotal counts only this run\'s spend and stops launching; null mea
 test('a run that hits --max-budget-usd is reported as "budget exhausted"', (t) => {
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 }, scenario: { a: 'budget' } });
   assert.equal(s.cli('run').status, 2);
-  assert.match(s.feature('a').lastFeedback, /budget exhausted/);
+  assert.match(s.feature('a').lastFeedback!, /budget exhausted/);
 });
 
 test('timeoutMin kills the whole process group of a hung child', (t) => {
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, timeoutMin: 0.01 }, scenario: { a: 'hang' } });
   assert.equal(s.cli('run').status, 2);
-  assert.match(s.feature('a').lastFeedback, /timed out after 0\.01 min/);
+  assert.match(s.feature('a').lastFeedback!, /timed out after 0\.01 min/);
   assert.equal(s.pids().length, 2);
   for (const pid of s.pids()) assert.equal(alive(pid), false, `pid ${pid} still running`);
 });
@@ -302,7 +306,7 @@ test('crash recovery through run(): merged branch → merged, dead child → rel
   t.after(() => sleeper.kill());
   const dead = Number(spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout);
   const s = setup(t, { features: [F('m', { status: 'evaluating' }), F('d', { status: 'building', pid: dead }),
-    F('l', { status: 'testing', pid: sleeper.pid, pidStart: procStart(sleeper.pid), foremanPid: dead })] });
+    F('l', { status: 'testing', pid: sleeper.pid, pidStart: procStart(sleeper.pid!)!, foremanPid: dead })] });
   s.git('checkout', '-qb', 'ship/m'); // m was merged, then the foreman died before recording it
   writeFileSync(join(s.repo, 'm.txt'), 'm\n');
   s.git('add', 'm.txt'); s.git('commit', '-qm', 'build m');
@@ -329,14 +333,14 @@ test('recovery does not wait on a pid that is not ours (pid 1 left in features.j
 test('waiting for a previous foreman\'s live child is capped by timeoutMin; the feature is then stuck, not relaunched', (t) => {
   const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
   t.after(() => sleeper.kill());
-  const s = setup(t, { features: [F('a', { status: 'testing', pid: sleeper.pid, pidStart: procStart(sleeper.pid), foremanPid: 1 })],
+  const s = setup(t, { features: [F('a', { status: 'testing', pid: sleeper.pid, pidStart: procStart(sleeper.pid!)!, foremanPid: 1 })],
     config: { timeoutMin: 0.01 } });
   const r = s.cli('run');
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(s.log(), /"a","event":"recovered".*timeoutMin/);
   assert.deepEqual([s.feature('a').status, s.feature('a').lastFeedback], ['stuck', `previous child still running (pid ${sleeper.pid})`]);
   assert.equal(s.calls('build', 'a').length, 0, 'no second process in the same worktree');
-  assert.equal(alive(sleeper.pid), true, 'a process Shipyard did not start is not killed');
+  assert.equal(alive(sleeper.pid!), true, 'a process Shipyard did not start is not killed');
 });
 
 test('crash recovery: an in-flight branch with no commits yet (tip on base\'s first-parent line) goes back to todo, not merged', (t) => {
@@ -375,8 +379,8 @@ test('a synthetic commit on base carrying an unmerged feature branch\'s blobs is
 });
 
 test('--max-budget-usd is passed only when budgetUsdPerRun is a positive number', async () => {
-  const { claudeArgs } = await import('../lib/foreman.js');
-  const base = { builder: { model: 'opus' } };
+  const { claudeArgs } = await import('../lib/foreman.ts');
+  const base = { builder: { model: 'opus' } } as Config; // only the fields claudeArgs reads here
   assert.ok(!claudeArgs({ ...base, budgetUsdPerRun: null }, 'builder', '/r').includes('--max-budget-usd'));
   const a = claudeArgs({ ...base, budgetUsdPerRun: 7 }, 'builder', '/r');
   assert.equal(a[a.indexOf('--max-budget-usd') + 1], '7');
@@ -425,7 +429,7 @@ test('a failing mergeHook aborts the merge: main unchanged, feature back to todo
   const main0 = s.git('rev-parse', 'main');
   s.cli('run', '--once');
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['todo', 0]);
-  assert.match(s.feature('a').lastFeedback, /exited 4[\s\S]*migration 0001 is taken/);
+  assert.match(s.feature('a').lastFeedback!, /exited 4[\s\S]*migration 0001 is taken/);
   assert.match(s.log(), /"event":"merge-hook-failed","detail":"mergeHook .*exited 4:\\nmigration 0001 is taken/);
   assert.equal(s.git('rev-parse', 'main'), main0);
   assert.equal(existsSync(join(s.repo, '.git/MERGE_HEAD')), false, 'merge --abort ran');
@@ -439,7 +443,7 @@ test('a failing prepare fails the attempt before the builder runs', (t) => {
   writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify(cfg));
   assert.equal(s.cli('run').status, 2);
   assert.equal(s.feature('a').status, 'stuck');
-  assert.match(s.feature('a').lastFeedback, /prepare .* exited 3[\s\S]*no database/);
+  assert.match(s.feature('a').lastFeedback!, /prepare .* exited 3[\s\S]*no database/);
   assert.equal(s.calls('build', 'a').length, 0);
 });
 
@@ -476,6 +480,6 @@ test('refreshBeforeTest defaults to false: the test runs on the branch as built,
   assert.equal(JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8')).refreshBeforeTest, false);
   assert.equal(s.cli('run').status, 2);
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
-  assert.match(s.feature('a').lastFeedback, /test command `test -f base-a\.txt` exited 1/);
+  assert.match(s.feature('a').lastFeedback!, /test command `test -f base-a\.txt` exited 1/);
   assert.equal(s.calls('eval', 'a').length, 0);
 });

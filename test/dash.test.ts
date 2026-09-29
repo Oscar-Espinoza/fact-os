@@ -4,20 +4,24 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
-import { startDash } from '../lib/dash.js';
+import type { Server } from 'node:http';
+import { startDash, type ProjectState, type OpenTask } from '../lib/dash.ts';
+import type { Feature, HumanTask, MergeMode } from '../lib/types.ts';
 
-let root, dash;
-const F = (id, o = {}) => ({ id, title: id, description: '', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
+let root: string, dash: { server: Server; url: string };
+type DashState = { projects: ProjectState[]; human: OpenTask[] };
+const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: id, description: '', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
   status: 'todo', attempts: 0, updatedAt: '', ...o });
-function project(dir, { merge = 'auto', features = [], tasks = [], gitFile = false }) {
+function project(dir: string, { merge = 'auto', features = [], tasks = [], gitFile = false }:
+  { merge?: MergeMode; features?: Feature[]; tasks?: HumanTask[]; gitFile?: boolean }) {
   mkdirSync(join(dir, '.fact-os'), { recursive: true });
   if (gitFile) writeFileSync(join(dir, '.git'), 'gitdir: /elsewhere\n'); else mkdirSync(join(dir, '.git'), { recursive: true });
   writeFileSync(join(dir, '.fact-os/config.json'), JSON.stringify({ merge }));
   writeFileSync(join(dir, '.fact-os/features.json'), JSON.stringify({ features }));
   writeFileSync(join(dir, '.fact-os/human.json'), JSON.stringify({ tasks }));
 }
-const humanOf = (p) => JSON.parse(readFileSync(join(root, p, '.fact-os/human.json'), 'utf8')).tasks;
-const post = (path, body, headers = {}) => fetch(dash.url + path, { method: 'POST',
+const humanOf = (p: string): HumanTask[] => JSON.parse(readFileSync(join(root, p, '.fact-os/human.json'), 'utf8')).tasks;
+const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(dash.url + path, { method: 'POST',
   headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
 
 before(async () => {
@@ -34,9 +38,9 @@ test('serves the page and /api/state for discovered projects, skipping worktrees
   const html = await (await fetch(dash.url + '/')).text();
   assert.match(html, /Only you/);
   assert.match(html, /\/api\/state/);
-  const s = await (await fetch(dash.url + '/api/state')).json();
+  const s = await (await fetch(dash.url + '/api/state')).json() as DashState;
   assert.deepEqual(s.projects.map((p) => p.path).sort(), [join(root, 'group/blog'), join(root, 'shop')]);
-  const t = s.human.find((h) => h.id === 'stripe');
+  const t = s.human.find((h) => h.id === 'stripe')!;
   assert.equal(t.reach, 2); // pay directly, cart transitively
 });
 
@@ -59,8 +63,8 @@ test('"I did my part" marks the task done and unblocks its feature', async () =>
   assert.equal(r.status, 200);
   assert.equal(humanOf('shop')[0].status, 'done');
   assert.ok(humanOf('shop')[0].doneAt);
-  const s = await (await fetch(dash.url + '/api/state')).json();
-  assert.deepEqual(s.projects.find((p) => p.name === 'shop').ready, ['pay']);
+  const s = await (await fetch(dash.url + '/api/state')).json() as DashState;
+  assert.deepEqual(s.projects.find((p) => p.name === 'shop')!.ready, ['pay']);
   assert.equal((await post('/api/human/done', { project: join(root, 'shop'), id: 'nope' })).status, 404);
 });
 
@@ -72,7 +76,7 @@ test('"Mark done" only applies to ready features in manual-merge projects', asyn
 });
 
 test('a request with a foreign Host header is rejected (DNS rebinding)', async () => {
-  const status = (host) => new Promise((res, rej) => request(dash.url + '/api/state', { headers: { host } }, (r) => { r.resume(); res(r.statusCode); })
+  const status = (host: string) => new Promise<number | undefined>((res, rej) => request(dash.url + '/api/state', { headers: { host } }, (r) => { r.resume(); res(r.statusCode); })
     .on('error', rej).end());
   assert.equal(await status('evil.example:' + new URL(dash.url).port), 403);
   assert.equal(await status(new URL(dash.url).host), 200);

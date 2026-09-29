@@ -3,20 +3,23 @@
 Runs a plan → build → evaluate → merge → compound loop over a project's feature list with headless
 Claude Code (`claude -p`): one foreman, up to N builders in separate git worktrees, a fresh evaluator per
 feature, a human inbox for what only you can do, and one dashboard across projects.
-Node >= 22, no npm dependencies. The contract is [SPEC.md](SPEC.md).
+TypeScript on Bun >= 1.4 (node:* built-ins only), zero runtime dependencies. The contract is [SPEC.md](SPEC.md).
 
 Formerly Shipyard. Projects set up before the rename keep working: their `.shipyard/` dir is used until a
 `.fact-os/` dir exists, `SHIPYARD_*` env vars are read when the `FACTOS_*` one is unset, and children get both.
-The name itself lives in one constant, `NAME` in `lib/state.js`.
+The name itself lives in one constant, `NAME` in `lib/state.ts`.
 
 ## Install
 
 ```sh
+cd ~/Projects/fact-os && bun install   # dev deps only: typescript, @types/bun
 ln -s ~/Projects/fact-os/bin/fact-os ~/.local/bin/fact-os
 cd ~/Projects/myapp && fact-os init --test "pnpm test"   # then run the intake skill in Claude Code
 ```
 
-Tests: `node --test` (the end-to-end test uses `fixtures/fake-claude.js` via `FACTOS_CLAUDE`, never the real `claude`).
+Tests: `bun test` (`node:test` style; the end-to-end tests use `fixtures/fake-claude.ts` via `FACTOS_CLAUDE`, never the real
+`claude`). Types: `bun run typecheck` (`tsc --noEmit`, strict; the shapes are in `lib/types.ts`). `bin/fact-os` only
+imports `lib/cli.ts`, since tsc skips extensionless files.
 
 ## Commands
 
@@ -140,4 +143,4 @@ step, and with `bypassPermissions` they can do anything you can.
 `claude -p --output-format json` prints one object; fact-os reads `result` (text), `is_error` and
 `total_cost_usd` (falling back to `cost_usd`), and `structured_output` if present. Field names were checked
 against the installed 2.1.283 binary, not by running a prompt. Hooks are passed with `--settings` as
-`"<node>" "<fact-os>/bin/fact-os" hook` so they work before `fact-os` is on PATH.
+`"<bun>" "<fact-os>/bin/fact-os" hook` so they work before `fact-os` is on PATH.

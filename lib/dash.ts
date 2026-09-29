@@ -1,16 +1,24 @@
 // Dashboard: one page across every project under --root, bound to 127.0.0.1.
-import { createServer } from 'node:http';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { readdirSync, existsSync, statSync } from 'node:fs';
 import { join, basename, resolve } from 'node:path';
-import { paths, load, STATE_DIRS, NAME, mutate, log, tailLines } from './state.js';
-import { analyze, taskReach } from './ready.js';
+import { paths, load, STATE_DIRS, NAME, mutate, log, tailLines, errMsg } from './state.ts';
+import { analyze, taskReach } from './ready.ts';
+import type { ActivityEvent, Feature, HumanTask, MergeMode } from './types.ts';
 
-const tryJson = (s) => { try { return JSON.parse(s); } catch { return undefined; } };
-const isWorktree = (dir) => { try { return statSync(join(dir, '.git')).isFile(); } catch { return false; } };
+export interface ProjectState {
+  path: string; name: string; merge?: MergeMode; branchPrefix?: string; error?: string; features: Feature[]; tasks: HumanTask[];
+  ready: string[]; waiting: string[]; activity: ActivityEvent[];
+}
+export type OpenTask = HumanTask & { project: string; projectName: string; reach: number };
 
-export function discover(root, maxDepth = 3) {
-  const found = [];
-  const walk = (dir, depth) => {
+const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { return undefined; } };
+const isWorktree = (dir: string) => { try { return statSync(join(dir, '.git')).isFile(); } catch { return false; } };
+
+export function discover(root: string, maxDepth = 3): string[] {
+  const found: string[] = [];
+  const walk = (dir: string, depth: number): void => {
     if (STATE_DIRS.some((d) => existsSync(join(dir, d, 'features.json'))) && !isWorktree(dir)) found.push(dir);
     if (depth >= maxDepth) return;
     let entries;
@@ -21,43 +29,43 @@ export function discover(root, maxDepth = 3) {
   return found.sort();
 }
 
-function projectState(dir) {
+function projectState(dir: string): ProjectState {
   try {
     const { config, features, tasks } = load(dir);
     const a = analyze(features, tasks, config.merge);
     return { path: dir, name: basename(dir), merge: config.merge, branchPrefix: config.branchPrefix, features, tasks,
-      ready: a.ready, waiting: a.waiting, activity: tailLines(paths(dir).activity, 20).map(tryJson).filter(Boolean) };
+      ready: a.ready, waiting: a.waiting, activity: tailLines(paths(dir).activity, 20).map(tryJson).filter(Boolean) as ActivityEvent[] };
   } catch (e) {
-    return { path: dir, name: basename(dir), error: e.message, features: [], tasks: [], ready: [], waiting: [], activity: [] };
+    return { path: dir, name: basename(dir), error: errMsg(e), features: [], tasks: [], ready: [], waiting: [], activity: [] };
   }
 }
 
-export function state(root) {
+export function state(root: string): { projects: ProjectState[]; human: OpenTask[] } {
   const projects = discover(root).map(projectState);
   const human = projects.flatMap((p) => p.tasks.filter((t) => t.status === 'open')
-    .map((t) => ({ ...t, project: p.path, projectName: p.name, reach: taskReach(t, p.features) })))
+    .map((t): OpenTask => ({ ...t, project: p.path, projectName: p.name, reach: taskReach(t, p.features) })))
     .sort((a, b) => b.reach - a.reach || a.id.localeCompare(b.id));
   return { projects, human };
 }
 
-export function startDash({ root = process.cwd(), port = 7420 } = {}) {
+export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{ server: Server; url: string }> {
   root = resolve(root);
   const server = createServer(async (req, res) => {
-    const send = (code, body, type = 'application/json') => {
+    const send = (code: number, body: unknown, type = 'application/json') => {
       res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
-      res.end(type === 'application/json' ? JSON.stringify(body) : body);
+      res.end(type === 'application/json' ? JSON.stringify(body) : (body as string));
     };
     try {
-      const p = server.address().port;
+      const p = (server.address() as AddressInfo).port;
       const hosts = [`127.0.0.1:${p}`, `localhost:${p}`];
       if (req.headers.origin && !hosts.map((h) => `http://${h}`).includes(req.headers.origin)) return send(403, { error: 'foreign origin' });
-      if (!hosts.includes(req.headers.host)) return send(403, { error: 'unexpected host' }); // DNS rebinding
+      if (!hosts.includes(req.headers.host!)) return send(403, { error: 'unexpected host' }); // DNS rebinding
       if (req.method === 'GET' && req.url === '/') return send(200, PAGE, 'text/html; charset=utf-8');
       if (req.method === 'GET' && req.url === '/api/state') return send(200, state(root));
-      if (req.method !== 'POST' || !['/api/human/done', '/api/feature/merged'].includes(req.url)) return send(404, { error: 'not found' });
+      if (req.method !== 'POST' || !['/api/human/done', '/api/feature/merged'].includes(req.url!)) return send(404, { error: 'not found' });
       let body = '';
       for await (const c of req) { body += c; if (body.length > 10000) return send(413, { error: 'body too large' }); }
-      const { project, id } = tryJson(body) || {};
+      const { project, id } = (tryJson(body) || {}) as { project?: unknown; id?: unknown };
       if (typeof project !== 'string' || !discover(root).includes(project)) return send(400, { error: 'unknown project' });
       if (typeof id !== 'string') return send(400, { error: 'id must be a string' });
       if (req.url === '/api/human/done') {
@@ -81,12 +89,12 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}) {
       if (code === 200) log(project, id, 'merged', 'marked merged from the dashboard');
       return send(code, code === 200 ? { ok: true } : { error: code === 404 ? `unknown feature ${id}` : `${id} is not ready` });
     } catch (e) {
-      send(500, { error: e.message });
+      send(500, { error: errMsg(e) });
     }
   });
   return new Promise((res, rej) => {
     server.once('error', rej);
-    server.listen(port, '127.0.0.1', () => res({ server, url: `http://127.0.0.1:${server.address().port}` }));
+    server.listen(port, '127.0.0.1', () => res({ server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` }));
   });
 }
 

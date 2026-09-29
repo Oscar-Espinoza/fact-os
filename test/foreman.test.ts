@@ -5,7 +5,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
-  waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.js';
+  waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
+import type { Feature } from '../lib/types.ts';
+
+// Only the fields these pure helpers read; the rest of a Feature doesn't matter to them.
+const feat = (o: Partial<Feature>) => o as Feature;
 
 const verdict = (o = {}) => JSON.stringify({ pass: true, findings: [{ check: 'c1', ok: true, evidence: 'e' }], cheating: [], lesson: null, ...o });
 
@@ -40,7 +44,7 @@ test('parseClaudeOutput reads result and cost (total_cost_usd, falling back to c
 });
 
 test('applyFailure: attempts increment, feedback kept, stuck at maxAttempts', () => {
-  const f = { id: 'a', status: 'evaluating', attempts: 0 };
+  const f = feat({ id: 'a', status: 'evaluating', attempts: 0 });
   applyFailure(f, 'fb1', 2);
   assert.deepEqual([f.status, f.attempts, f.lastFeedback], ['todo', 1, 'fb1']);
   applyFailure(f, 'fb2', 2);
@@ -48,14 +52,14 @@ test('applyFailure: attempts increment, feedback kept, stuck at maxAttempts', ()
 });
 
 test('recoverInFlight resets only in-flight statuses and keeps attempts', () => {
-  const fs = ['building', 'testing', 'evaluating', 'todo', 'ready', 'merged', 'stuck'].map((s) => ({ id: s, status: s, attempts: 1 }));
+  const fs = (['building', 'testing', 'evaluating', 'todo', 'ready', 'merged', 'stuck'] as const).map((s) => feat({ id: s, status: s, attempts: 1 }));
   assert.deepEqual(recoverInFlight(fs).todo, ['building', 'testing', 'evaluating']);
   assert.deepEqual(fs.map((f) => f.status), ['todo', 'todo', 'todo', 'todo', 'ready', 'merged', 'stuck']);
   assert.ok(fs.every((f) => f.attempts === 1));
 });
 
 test('recoverInFlight: a merged branch wins; an overdue live child makes the feature stuck with its pid', () => {
-  const fs = [{ id: 'm', status: 'testing', pid: 7 }, { id: 'o', status: 'building', pid: 8 }, { id: 'd', status: 'evaluating', pid: 9 }];
+  const fs = [feat({ id: 'm', status: 'testing', pid: 7 }), feat({ id: 'o', status: 'building', pid: 8 }), feat({ id: 'd', status: 'evaluating', pid: 9 })];
   const r = recoverInFlight(fs, { merged: (f) => f.id === 'm', overdue: (f) => f.id !== 'd' });
   assert.deepEqual([r.merged, r.stuck, r.todo], [['m'], ['o'], ['d']]);
   assert.deepEqual(fs.map((f) => f.status), ['merged', 'stuck', 'todo']);
@@ -88,8 +92,8 @@ test('appendLesson: creates heading once, dedupes by exact text, keeps later sec
   assert.equal(appendLesson(file, 'Run the linter', '2026-02-02'), false);
   assert.equal(appendLesson(file, 'Multi\nline  lesson', '2026-01-01'), true);
   let s = readFileSync(file, 'utf8');
-  assert.equal(s.match(/## fact-os lessons/g).length, 1);
-  assert.equal(s.match(/Run the linter/g).length, 1);
+  assert.equal(s.match(/## fact-os lessons/g)!.length, 1);
+  assert.equal(s.match(/Run the linter/g)!.length, 1);
   assert.match(s, /- 2026-01-01: Multi line lesson/);
   writeFileSync(file, '# Proj\n\n## Shipyard lessons\n\n- 2026-01-01: A\n\n## Other\n\ntext\n');
   appendLesson(file, 'B', '2026-01-03');
@@ -108,8 +112,8 @@ test('childAlive: a foreign pid (EPERM), a reused pid or a missing start time is
   assert.equal(childAlive({ pid: dead, foremanPid: process.pid }, { proc: false }), false);
   if (!existsSync('/proc/self/stat')) return;
   assert.equal(childAlive({ pid: 1 }), false, 'pid 1 exists but has no recorded start time');
-  assert.equal(childAlive({ pid: 1, pidStart: procStart(1), foremanPid: process.pid }), false, 'EPERM: not our user');
-  const start = procStart(kid.pid);
+  assert.equal(childAlive({ pid: 1, pidStart: procStart(1)!, foremanPid: process.pid }), false, 'EPERM: not our user');
+  const start = procStart(kid.pid!)!;
   assert.match(start, /^\d+$/);
   assert.equal(childAlive({ pid: kid.pid, pidStart: start }), true);
   assert.equal(childAlive({ pid: kid.pid, pidStart: String(Number(start) + 1) }), false, 'same pid, other process');

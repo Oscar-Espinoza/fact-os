@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { analyze, validate } from '../lib/ready.js';
+import { analyze, validate } from '../lib/ready.ts';
+import type { Feature, HumanTask } from '../lib/types.ts';
 
-const F = (id, o = {}) => ({ id, title: id, description: '', acceptance: ['works'], surface: 'any',
+const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: id, description: '', acceptance: ['works'], surface: 'any',
   deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '2026-01-01T00:00:00Z', ...o });
-const T = (id, unblocks, o = {}) => ({ id, title: id, steps: [], unblocks, mockable: false, status: 'open', ...o });
+const T = (id: string, unblocks: string[], o: Partial<HumanTask> = {}): HumanTask => ({ id, title: id, steps: [], unblocks, mockable: false, status: 'open', ...o });
 
 test('ready only when every dep is merged (bug: checking direct deps exist instead of their status)', () => {
   const fs = [F('a', { status: 'merged' }), F('b', { deps: ['a'] }), F('c', { deps: ['b'] }), F('d', { deps: ['a', 'c'] })];
@@ -18,7 +19,7 @@ test('manual merge treats "ready" deps as satisfied; auto merge does not', () =>
 });
 
 test('only todo features are ready (bug: relaunching building/stuck/merged features)', () => {
-  const fs = ['building', 'testing', 'evaluating', 'ready', 'merged', 'stuck'].map((s) => F(s, { status: s }));
+  const fs = (['building', 'testing', 'evaluating', 'ready', 'merged', 'stuck'] as const).map((s) => F(s, { status: s }));
   assert.deepEqual(analyze(fs, [], 'manual').ready, []);
 });
 
