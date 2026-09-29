@@ -8,7 +8,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { procStart } from '../lib/foreman.js';
 
-const BIN = fileURLToPath(new URL('../bin/shipyard', import.meta.url));
+const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.js', import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -16,7 +16,7 @@ const F = (id, o = {}) => ({ id, title: `Feature ${id}`, description: `Build ${i
   surface: 'any', deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '', ...o });
 
 function setup(t, { features, config = {}, scenario = {}, verdicts = {} }) {
-  const base = mkdtempSync(join(tmpdir(), 'shipyard-guard-'));
+  const base = mkdtempSync(join(tmpdir(), 'fact-os-guard-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const repo = join(base, 'app');
   mkdirSync(repo);
@@ -26,12 +26,12 @@ function setup(t, { features, config = {}, scenario = {}, verdicts = {} }) {
   writeFileSync(join(repo, 'README.md'), '# app\n');
   git('add', '.'); git('commit', '-qm', 'init');
   chmodSync(FAKE, 0o755);
-  const env = { ...process.env, SHIPYARD_CLAUDE: FAKE, SHIPYARD_POLL_MS: '100', FAKE_DELAY_MS: '50',
+  const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100', FAKE_DELAY_MS: '50',
     FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json'), FAKE_PIDS: join(base, 'pids'),
     FAKE_SCENARIO: JSON.stringify(scenario) };
   const cli = (...a) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000 });
   assert.equal(cli('init', '--test', 'true').status, 0);
-  const sy = (f) => join(repo, '.shipyard', f);
+  const sy = (f) => join(repo, '.fact-os', f);
   writeFileSync(sy('config.json'), JSON.stringify({ ...JSON.parse(readFileSync(sy('config.json'), 'utf8')), ...config }));
   writeFileSync(sy('features.json'), JSON.stringify({ features }));
   writeFileSync(env.FAKE_VERDICTS, JSON.stringify(verdicts));
@@ -256,7 +256,7 @@ test('budgetUsdTotal counts only this run\'s spend and stops launching; null mea
   assert.equal(s.feature('b').status, 'todo');
   assert.equal(s.calls('build', 'b').length, 0);
   assert.match(s.log(), /"budget"/);
-  const cfg = join(s.repo, '.shipyard/config.json');
+  const cfg = join(s.repo, '.fact-os/config.json');
   writeFileSync(cfg, JSON.stringify({ ...JSON.parse(readFileSync(cfg, 'utf8')), budgetUsdTotal: null }));
   assert.equal(s.cli('run').status, 0);
   assert.equal(s.feature('b').status, 'merged');
@@ -351,7 +351,7 @@ test('crash recovery: an in-flight branch with no commits yet (tip on base\'s fi
 
 test('merge "manual": merging a ready branch by hand while run --watch waits on a human task is not an alert', async (t) => {
   const s = setup(t, { features: [F('a'), F('k', { priority: 2 })], config: { merge: 'manual' } });
-  writeFileSync(join(s.repo, '.shipyard/human.json'), JSON.stringify({ tasks: [
+  writeFileSync(join(s.repo, '.fact-os/human.json'), JSON.stringify({ tasks: [
     { id: 'h', title: 'Get keys', steps: ['ask'], unblocks: ['k'], mockable: false, status: 'open' }] }));
   const run = s.start('--watch');
   assert.ok(await until(() => s.feature('a').status === 'ready' && /"waiting"/.test(s.log())), run.out());
@@ -395,11 +395,11 @@ test('a prepared branch with no commits of its own is fast-forwarded to the curr
 
 test('prepare runs in the worktree before each build; postMerge gets the merged feature id and branch', (t) => {
   const s = setup(t, { features: [F('a')], config: {} });
-  const log = join(s.repo, '.shipyard', 'hooks.log');
-  const cfg = JSON.parse(readFileSync(join(s.repo, '.shipyard/config.json'), 'utf8'));
+  const log = join(s.repo, '.fact-os', 'hooks.log');
+  const cfg = JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8'));
   cfg.prepare = `echo "prepare $SHIPYARD_FEATURE $(basename "$PWD")" >> ${log}`;
   cfg.postMerge = `echo "post $SHIPYARD_FEATURE $SHIPYARD_BRANCH" >> ${log}`;
-  writeFileSync(join(s.repo, '.shipyard/config.json'), JSON.stringify(cfg));
+  writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify(cfg));
   assert.equal(s.cli('run').status, 0);
   assert.equal(s.feature('a').status, 'merged');
   assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), ['prepare a a', 'post a ship/a']);
@@ -412,7 +412,7 @@ test('mergeHook runs on the staged merge with SHIPYARD_FEATURE/BRANCH; its stage
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual([s.feature('a').status, s.feature('b').status], ['merged', 'merged']);
   const head = s.git('log', '--merges', '-1', '--format=%s%n%P', 'main').split('\n');
-  assert.equal(head[0], 'shipyard: merge b: Feature b');
+  assert.equal(head[0], 'fact-os: merge b: Feature b');
   assert.equal(head[1].split(' ').length, 2, 'a real merge commit');
   assert.equal(s.git('show', '--first-parent', '--name-status', '--format=', 'main').trim(), 'A\t0001-b.txt');
   assert.deepEqual(s.git('ls-tree', '--name-only', 'main').split('\n').filter((f) => /\.txt$/.test(f)), ['0001-a.txt', '0001-b.txt']);
@@ -434,9 +434,9 @@ test('a failing mergeHook aborts the merge: main unchanged, feature back to todo
 
 test('a failing prepare fails the attempt before the builder runs', (t) => {
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
-  const cfg = JSON.parse(readFileSync(join(s.repo, '.shipyard/config.json'), 'utf8'));
+  const cfg = JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8'));
   cfg.prepare = 'echo no database; exit 3';
-  writeFileSync(join(s.repo, '.shipyard/config.json'), JSON.stringify(cfg));
+  writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify(cfg));
   assert.equal(s.cli('run').status, 2);
   assert.equal(s.feature('a').status, 'stuck');
   assert.match(s.feature('a').lastFeedback, /prepare .* exited 3[\s\S]*no database/);
@@ -473,7 +473,7 @@ test('refreshBeforeTest: a conflicting base move sends the feature back to todo 
 
 test('refreshBeforeTest defaults to false: the test runs on the branch as built, without the moved base', (t) => {
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, test: 'test -f base-a.txt' }, scenario: { a: 'base-file' } });
-  assert.equal(JSON.parse(readFileSync(join(s.repo, '.shipyard/config.json'), 'utf8')).refreshBeforeTest, false);
+  assert.equal(JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8')).refreshBeforeTest, false);
   assert.equal(s.cli('run').status, 2);
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
   assert.match(s.feature('a').lastFeedback, /test command `test -f base-a\.txt` exited 1/);

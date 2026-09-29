@@ -10,18 +10,18 @@ let root, dash;
 const F = (id, o = {}) => ({ id, title: id, description: '', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
   status: 'todo', attempts: 0, updatedAt: '', ...o });
 function project(dir, { merge = 'auto', features = [], tasks = [], gitFile = false }) {
-  mkdirSync(join(dir, '.shipyard'), { recursive: true });
+  mkdirSync(join(dir, '.fact-os'), { recursive: true });
   if (gitFile) writeFileSync(join(dir, '.git'), 'gitdir: /elsewhere\n'); else mkdirSync(join(dir, '.git'), { recursive: true });
-  writeFileSync(join(dir, '.shipyard/config.json'), JSON.stringify({ merge }));
-  writeFileSync(join(dir, '.shipyard/features.json'), JSON.stringify({ features }));
-  writeFileSync(join(dir, '.shipyard/human.json'), JSON.stringify({ tasks }));
+  writeFileSync(join(dir, '.fact-os/config.json'), JSON.stringify({ merge }));
+  writeFileSync(join(dir, '.fact-os/features.json'), JSON.stringify({ features }));
+  writeFileSync(join(dir, '.fact-os/human.json'), JSON.stringify({ tasks }));
 }
-const humanOf = (p) => JSON.parse(readFileSync(join(root, p, '.shipyard/human.json'), 'utf8')).tasks;
+const humanOf = (p) => JSON.parse(readFileSync(join(root, p, '.fact-os/human.json'), 'utf8')).tasks;
 const post = (path, body, headers = {}) => fetch(dash.url + path, { method: 'POST',
   headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
 
 before(async () => {
-  root = mkdtempSync(join(tmpdir(), 'shipyard-dash-'));
+  root = mkdtempSync(join(tmpdir(), 'fact-os-dash-'));
   project(join(root, 'shop'), { features: [F('pay'), F('cart', { deps: ['pay'] })],
     tasks: [{ id: 'stripe', title: 'Create Stripe account', steps: ['sign up'], unblocks: ['pay'], mockable: false, status: 'open' }] });
   project(join(root, 'group/blog'), { merge: 'manual', features: [F('post', { status: 'ready' })] });
@@ -67,7 +67,7 @@ test('"I did my part" marks the task done and unblocks its feature', async () =>
 test('"Mark done" only applies to ready features in manual-merge projects', async () => {
   assert.equal((await post('/api/feature/merged', { project: join(root, 'shop'), id: 'pay' })).status, 409);
   assert.equal((await post('/api/feature/merged', { project: join(root, 'group/blog'), id: 'post' })).status, 200);
-  const fs = JSON.parse(readFileSync(join(root, 'group/blog/.shipyard/features.json'), 'utf8')).features;
+  const fs = JSON.parse(readFileSync(join(root, 'group/blog/.fact-os/features.json'), 'utf8')).features;
   assert.equal(fs[0].status, 'merged');
 });
 

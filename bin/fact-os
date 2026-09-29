@@ -4,12 +4,12 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig } from '../lib/state.js';
+import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, NAME } from '../lib/state.js';
 import { analyze, validate, SLUG } from '../lib/ready.js';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
-const USAGE = `usage: shipyard <command>
-  init [--test "<cmd>"]           set up .shipyard/ and project skills in this repo
+const USAGE = `usage: ${NAME} <command>
+  init [--test "<cmd>"]           set up .${NAME}/ and project skills in this repo
   run [--watch] [--once] [--max-features N]
   status                          features and open human tasks
   done <human-task-id>            mark a human task done
@@ -47,7 +47,7 @@ function init(test) {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['.shipyard/runs/', '.shipyard/*.jsonl', '.shipyard/.lock', '.shipyard/.foreman']
+  const add = ['runs/', '*.jsonl', '.lock', '.foreman'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');
@@ -68,7 +68,7 @@ function status() {
 
 async function done(id) {
   const root = needRoot();
-  if (!id) throw new Error('usage: shipyard done <human-task-id>');
+  if (!id) throw new Error(`usage: ${NAME} done <human-task-id>`);
   const ok = await mutate(root, 'human', (d) => {
     const t = d.tasks.find((x) => x.id === id);
     if (t && t.status !== 'done') Object.assign(t, { status: 'done', doneAt: new Date().toISOString() });
@@ -108,7 +108,7 @@ function doctor() {
   }
   if (!['auto', 'manual'].includes(config.merge)) problems.push('config.merge must be "auto" or "manual"');
   if (!problems.length) problems.push(...validate(features, tasks));
-  const claude = process.env.SHIPYARD_CLAUDE || 'claude';
+  const claude = envVar('CLAUDE') || 'claude';
   for (const [what, cmd] of [['claude', claude], ['git', 'git'], ['test command', String(config.test || '').trim().split(/\s+/)[0]]])
     if (!resolves(cmd)) problems.push(`${what}: "${cmd}" not found on PATH`);
   for (const p of problems) console.log(`✗ ${p}`);
@@ -127,7 +127,7 @@ async function hook() {
     const ti = p.tool_input || {}, tool = p.tool_name || p.hook_event_name || 'event';
     const detail = String(ti.command ?? ti.file_path ?? ti.path ?? ti.pattern ?? ti.url ?? '').replace(/\s+/g, ' ').slice(0, 120);
     const line = JSON.stringify({ ts: new Date().toISOString(), session: p.session_id ?? null,
-      feature: process.env.SHIPYARD_FEATURE || null, tool, summary: `${tool} ${detail}`.trim() }) + '\n';
+      feature: envVar('FEATURE') || null, tool, summary: `${tool} ${detail}`.trim() }) + '\n';
     const file = paths(root).activity;
     await withLock(root, () => {
       appendFileSync(file, line);
@@ -157,13 +157,13 @@ try {
     case 'dash': {
       const { startDash } = await import('../lib/dash.js');
       const { url } = await startDash({ root: resolve(o.root || process.cwd()), port: Number(o.port ?? 7420) });
-      console.log(`shipyard dash: ${url}`);
+      console.log(`${NAME} dash: ${url}`);
       break;
     }
     default: console.log(USAGE); process.exitCode = argv[0] && !['-h', '--help', 'help'].includes(argv[0]) ? 1 : 0;
   }
 } catch (e) {
   if (argv[0] === 'hook') process.exit(0);
-  console.error(`shipyard: ${e.message}`);
+  console.error(`${NAME}: ${e.message}`);
   process.exitCode = 1;
 }

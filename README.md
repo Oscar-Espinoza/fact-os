@@ -1,30 +1,34 @@
-# Shipyard
+# fact-os
 
 Runs a plan → build → evaluate → merge → compound loop over a project's feature list with headless
 Claude Code (`claude -p`): one foreman, up to N builders in separate git worktrees, a fresh evaluator per
 feature, a human inbox for what only you can do, and one dashboard across projects.
 Node >= 22, no npm dependencies. The contract is [SPEC.md](SPEC.md).
 
+Formerly Shipyard. Projects set up before the rename keep working: their `.shipyard/` dir is used until a
+`.fact-os/` dir exists, `SHIPYARD_*` env vars are read when the `FACTOS_*` one is unset, and children get both.
+The name itself lives in one constant, `NAME` in `lib/state.js`.
+
 ## Install
 
 ```sh
-ln -s ~/Projects/shipyard/bin/shipyard ~/.local/bin/shipyard
-cd ~/Projects/myapp && shipyard init --test "pnpm test"   # then run the intake skill in Claude Code
+ln -s ~/Projects/fact-os/bin/fact-os ~/.local/bin/fact-os
+cd ~/Projects/myapp && fact-os init --test "pnpm test"   # then run the intake skill in Claude Code
 ```
 
-Tests: `node --test` (the end-to-end test uses `fixtures/fake-claude.js` via `SHIPYARD_CLAUDE`, never the real `claude`).
+Tests: `node --test` (the end-to-end test uses `fixtures/fake-claude.js` via `FACTOS_CLAUDE`, never the real `claude`).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `shipyard init [--test "<cmd>"]` | Creates `.shipyard/` (config, empty features/human), copies `intake` and `ship` skills into `.claude/skills/`, adds runtime files to `.git/info/exclude`. Idempotent, never overwrites. |
-| `shipyard run [--watch] [--once] [--max-features N]` | The foreman loop. `--watch` keeps waiting (polls `features.json`/`human.json` mtimes every 5s) while features are blocked on you. `--once` launches one batch and exits when it finishes. Exit 0 when every feature is `merged`/`ready`, 2 otherwise. |
-| `shipyard status` | Feature table (status, attempts, cost, deps, next/onMock/waiting) and open human tasks. |
-| `shipyard done <task-id>` | Marks a human task done; a watching foreman picks it up. |
-| `shipyard doctor` | Validates the files (schema, duplicate ids, unknown deps, cycles) and that `claude`, `git` and the test command resolve. Exit 1 on problems. |
-| `shipyard dash [--root DIR] [--port 7420]` | Dashboard on `127.0.0.1` for every `.shipyard/features.json` up to depth 3 under `--root` (worktrees skipped). "Agents" and "Only you" views; refreshes every 2s. |
-| `shipyard hook` | Internal: Claude Code hook that appends a line to `activity.jsonl`. Never prints, never exits non-zero. |
+| `fact-os init [--test "<cmd>"]` | Creates `.fact-os/` (config, empty features/human), copies `intake` and `ship` skills into `.claude/skills/`, adds runtime files to `.git/info/exclude`. Idempotent, never overwrites. |
+| `fact-os run [--watch] [--once] [--max-features N]` | The foreman loop. `--watch` keeps waiting (polls `features.json`/`human.json` mtimes every 5s) while features are blocked on you. `--once` launches one batch and exits when it finishes. Exit 0 when every feature is `merged`/`ready`, 2 otherwise. |
+| `fact-os status` | Feature table (status, attempts, cost, deps, next/onMock/waiting) and open human tasks. |
+| `fact-os done <task-id>` | Marks a human task done; a watching foreman picks it up. |
+| `fact-os doctor` | Validates the files (schema, duplicate ids, unknown deps, cycles) and that `claude`, `git` and the test command resolve. Exit 1 on problems. |
+| `fact-os dash [--root DIR] [--port 7420]` | Dashboard on `127.0.0.1` for every `.fact-os/features.json` up to depth 3 under `--root` (worktrees skipped). "Agents" and "Only you" views; refreshes every 2s. |
+| `fact-os hook` | Internal: Claude Code hook that appends a line to `activity.jsonl`. Never prints, never exits non-zero. |
 
 Per feature the foreman: creates/reuses worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`)
 from `base` → runs the builder → fails the attempt with "commit your work" if the worktree is dirty or the
@@ -34,13 +38,13 @@ read at launch and the test output → merges that sha with `git merge --no-ff` 
 moved meanwhile) or stops at `ready` (manual) → appends the evaluator's lesson to `lessonsFile`. Failures increment `attempts` and
 feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
 
-## Files (`.shipyard/` in the main checkout)
+## Files (`.fact-os/` in the main checkout)
 
 - `config.json` — `base`, `worktreesDir` (`../<repo>-worktrees`), `branchPrefix` (`ship/`), `maxParallel` (3),
   `maxAttempts` (2), `budgetUsdPerRun` (null = no cap; a positive number is passed as `--max-budget-usd`; hitting it gives the feedback
   "budget exhausted"), `budgetUsdTotal` (null = unlimited; stop launching once the cost reported **during the current
-  `shipyard run`** reaches it — earlier runs' `costUsd` do not count; `null` = unlimited), `timeoutMin` (null = no timeout;
-  per `claude`/test/`prepare` (null; a shell command run in the feature worktree before every build, e.g. install and provision databases; must be idempotent; a failure fails the attempt) and `postMerge` (it gets `SHIPYARD_FEATURE` and `SHIPYARD_BRANCH`) child), `builder`/`evaluator` `{model, effort, permissionMode}`,
+  `fact-os run`** reaches it — earlier runs' `costUsd` do not count; `null` = unlimited), `timeoutMin` (null = no timeout;
+  per `claude`/test/`prepare` (null; a shell command run in the feature worktree before every build, e.g. install and provision databases; must be idempotent; a failure fails the attempt) and `postMerge` (it gets `FACTOS_FEATURE` and `FACTOS_BRANCH`) child), `builder`/`evaluator` `{model, effort, permissionMode}`,
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null), `refreshBeforeTest`
   (false; true merges the current `base` into the feature branch after the build and before the test, so two features
@@ -49,7 +53,7 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   feature's own `group` wins; two features of one group are never in flight together: the foreman launches the
   next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target), `mergeHook` (null;
   a shell command run in the main checkout on the staged `git merge --no-ff --no-commit`, with
-  `SHIPYARD_FEATURE`/`SHIPYARD_BRANCH`, e.g. to renumber migrations: what it `git add`s joins the merge commit; a
+  `FACTOS_FEATURE`/`FACTOS_BRANCH`, e.g. to renumber migrations: what it `git add`s joins the merge commit; a
   non-zero exit aborts the merge and sends the feature back to `todo` with the hook's output as feedback, costing no attempt).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
@@ -70,16 +74,16 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
 ## Safety limits
 
 - Never pushes, never force-deletes branches, never runs `git reset --hard` or `git clean`, never deletes
-  worktrees. Only touches the repo, its worktrees dir and `~/.local/state/shipyard/`.
+  worktrees. Only touches the repo, its worktrees dir and `~/.local/state/fact-os/`.
 - Only kills processes it started. Each child runs in its own process group; on timeout or SIGINT/SIGTERM
   the whole group gets SIGTERM and in-flight features go back to `todo` without spending an attempt; a
-  second Ctrl-C SIGKILLs the groups and exits at once. One foreman per repo (`.shipyard/.foreman`).
+  second Ctrl-C SIGKILLs the groups and exits at once. One foreman per repo (`.fact-os/.foreman`).
   Features left in flight by a dead foreman are marked `merged` if their branch is already merged into
   `base`, left alone while their recorded child is alive (same pid and start time; `EPERM` counts as dead;
   without `/proc`, dead once its foreman is dead) for at most `timeoutMin`; a child still running after that
   is not killed and its feature becomes `stuck` ("previous child still running (pid N)"), so two processes
   never write one worktree. The rest go back to `todo` (worktree reused).
-- Merges only when the main checkout is on `base` with no tracked changes outside `.shipyard/`; otherwise
+- Merges only when the main checkout is on `base` with no tracked changes outside `.fact-os/`; otherwise
   the feature stays `ready` and `log.jsonl` says why, as it does when git refuses to start the merge. Under
   `merge: "auto"` a feature parked that way (`parked: true`) is merged on a later tick once the checkout is
   clean and on `base`, if its branch still points to the evaluated `sha` (else it goes back to `todo`);
@@ -92,7 +96,7 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
   same refresh runs before the test whenever `base` has commits the branch lacks: a clean merge goes straight on to
   test, evaluate (diff still `base...sha`) and merge that merge commit, without counting as a refresh; a conflict
   goes back to `todo` exactly as above.
-- Tamper checks: if `config.json` changes on disk during a run, or `base` moves other than by Shipyard's
+- Tamper checks: if `config.json` changes on disk during a run, or `base` moves other than by fact-os's
   own merges and lesson commits so that it now reaches a commit of a feature branch (`branchPrefix*` or a
   feature's `branch`), or carries a (non-empty) blob that is also in one, the foreman logs an `alert`,
   launches and merges nothing more, and exits 2. Commits reachable from the evaluated `sha` recorded for a
@@ -102,7 +106,7 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
 - Lessons are committed on `base` (only that file) when the main checkout is on `base` and the lessons
   file had no local edits; otherwise they are appended uncommitted.
 - State files are written atomically (temp + rename) under an `O_EXCL` lock that is stale once its pid is
-  dead, so the dashboard, `shipyard done`, hooks and the foreman can write concurrently.
+  dead, so the dashboard, `fact-os done`, hooks and the foreman can write concurrently.
 - The dashboard binds to 127.0.0.1, accepts POSTs only for discovered project paths (exact match), and
   rejects any `Origin` other than its own and any unexpected `Host` (DNS rebinding).
 
@@ -118,13 +122,13 @@ accept that.
 
 ## Threat model
 
-Shipyard is not a sandbox. Builders and evaluators run as your user; under `auto` a classifier screens each
+fact-os is not a sandbox. Builders and evaluators run as your user; under `auto` a classifier screens each
 step, and with `bypassPermissions` they can do anything you can.
 - `--settings` deny rules (they hold even under `bypassPermissions`) cover `Edit` (every file-writing tool)
-  under `//<root>/.shipyard/**` and `//<root>/.git/**` (so `.git/hooks` and `.git/config` too), plus the
+  under `//<root>/.fact-os/**` and `//<root>/.git/**` (so `.git/hooks` and `.git/config` too), plus the
   Bash prefixes `git update-ref`, `git push`, `git branch -f` and `git config`. They are prefix rules:
   other Bash commands (`sh -c`, `echo > .git/hooks/…`, `git -C . branch -f`, …) can still write
-  `.shipyard/features.json`, `.git/hooks`, `.git/config`, or move `base`.
+  `.fact-os/features.json`, `.git/hooks`, `.git/config`, or move `base`.
 - Moves of `base` are caught by the tamper check at launch and merge time when `base` then reaches a
   feature-branch commit or carries one of a feature branch's blobs (e.g. `git commit-tree` of the branch's
   tree, or `git -C <root> commit` of its files). A commit whose content differs from every feature branch
@@ -133,7 +137,7 @@ step, and with `bypassPermissions` they can do anything you can.
 
 ## Claude output
 
-`claude -p --output-format json` prints one object; Shipyard reads `result` (text), `is_error` and
+`claude -p --output-format json` prints one object; fact-os reads `result` (text), `is_error` and
 `total_cost_usd` (falling back to `cost_usd`), and `structured_output` if present. Field names were checked
 against the installed 2.1.283 binary, not by running a prompt. Hooks are passed with `--settings` as
-`"<node>" "<shipyard>/bin/shipyard" hook` so they work before `shipyard` is on PATH.
+`"<node>" "<fact-os>/bin/fact-os" hook` so they work before `fact-os` is on PATH.

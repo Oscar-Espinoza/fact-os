@@ -1,4 +1,4 @@
-# Shipyard — spec and done-condition
+# fact-os — spec and done-condition
 
 A small, dependency-free tool that runs a plan → build → evaluate → merge → compound loop over a
 project's feature list using headless Claude Code (`claude -p`). One foreman process, N builders in
@@ -8,19 +8,19 @@ and one dashboard across projects.
 ## Constraints
 
 - Node >= 22, ESM, **no npm dependencies** (node:* built-ins only). Tests use `node:test`.
-- Lives in `~/Projects/shipyard`; installed by symlinking `bin/shipyard` to `~/.local/bin/shipyard`.
-- It is not a Claude Code plugin. `shipyard init` copies two project skills into the target repo's
+- Lives in `~/Projects/fact-os`; installed by symlinking `bin/fact-os` to `~/.local/bin/fact-os`.
+- It is not a Claude Code plugin. `fact-os init` copies two project skills into the target repo's
   `.claude/skills/` (`intake`, `ship`). Everything else is the CLI.
 - It never pushes, never force-deletes branches, never runs `git reset --hard` or `git clean`, never kills
   processes it did not start, and never touches anything outside the project repo, its worktrees dir and
-  `~/.local/state/shipyard/`.
+  `~/.local/state/fact-os/`.
 - All state files are JSON and written atomically (write temp + rename) under a lock file
-  (`.shipyard/.lock`, O_EXCL, stale after its PID is dead). The dashboard and the foreman may write
+  (`.fact-os/.lock`, O_EXCL, stale after its PID is dead). The dashboard and the foreman may write
   concurrently; no write may be lost.
 
 ## Files (per project, in the main checkout)
 
-`.shipyard/config.json`
+`.fact-os/config.json`
 ```json
 {
   "base": "main",
@@ -29,11 +29,11 @@ and one dashboard across projects.
   "maxParallel": 3,
   "maxAttempts": 2,
   "budgetUsdPerRun": null,      // null = no cap; a positive number is passed as --max-budget-usd to each claude -p call
-  "budgetUsdTotal": null,       // stop launching once costs reported during this `shipyard run` reach it; null = unlimited
+  "budgetUsdTotal": null,       // stop launching once costs reported during this `fact-os run` reach it; null = unlimited
   "timeoutMin": null,           // null = no timeout; otherwise per claude/test/postMerge child, and the whole process group is killed
   "builder":   { "model": "opus", "effort": "medium", "permissionMode": "auto" },
   "evaluator": { "model": "opus", "effort": "high",   "permissionMode": "auto" },
-  "test": "npm test",           // run in the feature worktree after build; exit 0 = pass
+  "test": "pnpm test",           // run in the feature worktree after build; exit 0 = pass
   "merge": "auto",              // "auto": foreman merges; "manual": status becomes "ready" and stops there
   "briefFiles": [],             // extra files whose contents are appended to builder AND evaluator prompts
   "lessonsFile": "CLAUDE.md",   // where compounded lessons are appended
@@ -44,7 +44,7 @@ and one dashboard across projects.
   "groupBy": null               // conflict groups: null = only explicit `group`s; "idPrefix:<n>" = a feature's group defaults to its id's first n chars
 }
 ```
-`.shipyard/features.json` — `{ "features": [Feature] }`
+`.fact-os/features.json` — `{ "features": [Feature] }`
 ```
 Feature {
   id: string (slug, unique), title, description,
@@ -62,15 +62,15 @@ Feature {
   pid?, pidStart?, foremanPid?    // current child: pid, /proc/<pid>/stat start time, foreman that spawned it
 }
 ```
-`.shipyard/human.json` — `{ "tasks": [HumanTask] }`
+`.fact-os/human.json` — `{ "tasks": [HumanTask] }`
 ```
 HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
             mockable: boolean, status: "open"|"done", doneAt? }
 ```
-`.shipyard/log.jsonl` — one JSON line per event (`{ts, feature, event, detail}`).
-`.shipyard/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
-`.shipyard/runs/<feature>/<attempt>-{build,eval}.json` — raw `claude -p --output-format json` results.
-`.shipyard/.foreman` — pid of the running foreman (one per repo).
+`.fact-os/log.jsonl` — one JSON line per event (`{ts, feature, event, detail}`).
+`.fact-os/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
+`.fact-os/runs/<feature>/<attempt>-{build,eval}.json` — raw `claude -p --output-format json` results.
+`.fact-os/.foreman` — pid of the running foreman (one per repo).
 
 ## Readiness rule (pure function, heavily tested)
 
@@ -79,9 +79,9 @@ A feature is **ready** when: status is `todo`; every dep is `merged` (or `ready`
 (then the feature is built with `onMock: true`). A feature blocked by an open non-mockable human task
 is **waiting-on-human**. Ready features are ordered by priority, then by how many other features
 transitively depend on them (more first), then id. Dependency cycles and unknown dep ids are reported
-by `shipyard doctor` / at load and those features are never ready.
+by `fact-os doctor` / at load and those features are never ready.
 
-## Foreman loop — `shipyard run [--watch] [--once] [--max-features N]`
+## Foreman loop — `fact-os run [--watch] [--once] [--max-features N]`
 
 Each tick:
 1. Load state. A feature left in `building|testing|evaluating` by a dead foreman becomes `merged` if its
@@ -123,7 +123,7 @@ Each tick:
      pass-through implementations, tests that cannot fail, skipped/deleted tests, and hard-coded
      results. Unparseable output, no findings, or `pass: true` with a failed finding or cheating counts as a fail.
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
-     becomes `ready` with `parked: true` and a log event explains why; "clean" = no tracked changes outside `.shipyard/`),
+     becomes `ready` with `parked: true` and a log event explains why; "clean" = no tracked changes outside `.fact-os/`),
      `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to
      start leaves the feature `ready` without costing an attempt); on conflict, `git merge --abort`, then a
      **base refresh**: the foreman runs `git merge --no-edit <recorded base sha>` in the feature's worktree
@@ -134,7 +134,7 @@ Each tick:
      merge (git add + git commit). Do not abort it and do not start another merge or rebase." Neither spends
      an attempt; `refreshes++` instead, and a conflict with `refreshes` already at `maxRefreshes` makes the feature `stuck`
      ("too many base refreshes"). With `mergeHook` set, the merge is `git merge --no-ff --no-commit <sha>` (conflicts
-     handled as above); then `mergeHook` runs in the main checkout with env `SHIPYARD_FEATURE` and `SHIPYARD_BRANCH`
+     handled as above); then `mergeHook` runs in the main checkout with env `FACTOS_FEATURE` and `FACTOS_BRANCH`
      (e.g. to assign migration numbers; files it changes and `git add`s become part of the merge commit), and the
      foreman commits with the usual message; that commit is its own (`base` sha re-recorded, no tamper alert). A hook
      exiting non-zero (or a failed commit) → `git merge --abort`, a `merge-hook-failed` event with the output tail, and
@@ -142,7 +142,7 @@ Each tick:
    - **Fail** → attempts++, `lastFeedback` = failed findings + cheating; back to `todo`; at
      `maxAttempts` → `stuck`.
    - **Compound.** A non-null `lesson` is appended to `lessonsFile` as one dated bullet under a
-     `## Shipyard lessons` heading (created if missing), deduplicated by exact text, and committed on
+     `## fact-os lessons` heading (created if missing), deduplicated by exact text, and committed on
      `base` (that file only) when the main checkout is on `base` and the file had no local edits.
    - **Tamper checks.** If `config.json` changes on disk, or `base` moves other than by the foreman's own
      merges/lesson commits so that it reaches a feature-branch commit, or its new objects
@@ -159,23 +159,23 @@ Each tick:
    spending an attempt; a second signal SIGKILLs the groups and exits at once).
    Exit code 0 when all features are `merged`/`ready`, 2 when stopped with stuck or waiting features.
 
-The `claude` binary is `process.env.SHIPYARD_CLAUDE || "claude"` so tests can substitute a fake.
+The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can substitute a fake.
 
 ## Other commands
 
-- `shipyard init [--test "<cmd>"]` — creates `.shipyard/` with default config and empty
-  features/human files, copies skills into `.claude/skills/`, adds `.shipyard/runs/`,
-  `.shipyard/*.jsonl` and `.shipyard/.lock` to `.git/info/exclude`. Idempotent; never overwrites.
-- `shipyard status` — table of features and open human tasks.
-- `shipyard done <human-task-id>` — marks a human task done.
-- `shipyard doctor` — validates the files (schema, unknown deps, cycles, duplicate ids) and that
+- `fact-os init [--test "<cmd>"]` — creates `.fact-os/` with default config and empty
+  features/human files, copies skills into `.claude/skills/`, adds `.fact-os/runs/`,
+  `.fact-os/*.jsonl` and `.fact-os/.lock` to `.git/info/exclude`. Idempotent; never overwrites.
+- `fact-os status` — table of features and open human tasks.
+- `fact-os done <human-task-id>` — marks a human task done.
+- `fact-os doctor` — validates the files (schema, unknown deps, cycles, duplicate ids) and that
   `claude`, `git` and the test command's first word resolve.
-- `shipyard hook` — reads a Claude Code hook JSON payload on stdin; finds the project via
+- `fact-os hook` — reads a Claude Code hook JSON payload on stdin; finds the project via
   `git rev-parse --git-common-dir` (works from worktrees) and appends to `activity.jsonl`. The feature
-  id comes from `SHIPYARD_FEATURE` env. Must never exit non-zero or print to stdout (hooks must not
+  id comes from `FACTOS_FEATURE` env. Must never exit non-zero or print to stdout (hooks must not
   break the session).
-- `shipyard dash [--root DIR] [--port 7420]` — HTTP server on 127.0.0.1 only. Discovers every
-  `*/.shipyard/features.json` up to depth 3 under `--root` (default: cwd). One HTML page (inline
+- `fact-os dash [--root DIR] [--port 7420]` — HTTP server on 127.0.0.1 only. Discovers every
+  `*/.fact-os/features.json` up to depth 3 under `--root` (default: cwd). One HTML page (inline
   CSS/JS, light and dark) with two views:
   - **Agents**: per project, features grouped by status, onMock badges, last 20 activity lines;
     refreshes every 2s via `GET /api/state`.
@@ -191,17 +191,17 @@ The `claude` binary is `process.env.SHIPYARD_CLAUDE || "claude"` so tests can su
 - `intake/SKILL.md` — interview the user briefly (at most 5 questions), then write `features.json`
   and `human.json` per the schemas above; every feature needs ≥1 concrete acceptance check; anything
   only the user can do (accounts, credentials, contracts, store hosts, legal) becomes a human task
-  with exact steps and `unblocks`. Run `shipyard doctor` at the end.
-- `ship/SKILL.md` — run `shipyard doctor`, then start `shipyard run --watch` in the background and
-  report `shipyard status`; tells the user how to open `shipyard dash`.
+  with exact steps and `unblocks`. Run `fact-os doctor` at the end.
+- `ship/SKILL.md` — run `fact-os doctor`, then start `fact-os run --watch` in the background and
+  report `fact-os status`; tells the user how to open `fact-os dash`.
 
 ## Hooks
 
 The builder and evaluator are launched with
-`--settings '{"hooks":{"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"shipyard hook"}]}],"Stop":[...same]}}'`
-and env `SHIPYARD_FEATURE=<id>`; the command is `"<node>" "<shipyard>/bin/shipyard" hook` so it works
-before `shipyard` is on PATH. The same `--settings` carries deny rules for `Edit` under
-`<root>/.shipyard/` and `<root>/.git/` and for `git update-ref|push|branch -f|config` (see README,
+`--settings '{"hooks":{"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"fact-os hook"}]}],"Stop":[...same]}}'`
+and env `FACTOS_FEATURE=<id>`; the command is `"<node>" "<fact-os>/bin/fact-os" hook` so it works
+before `fact-os` is on PATH. The same `--settings` carries deny rules for `Edit` under
+`<root>/.fact-os/` and `<root>/.git/` and for `git update-ref|push|branch -f|config` (see README,
 Threat model). `summary` is the tool name plus the first 120 chars of the
 command/file path.
 
@@ -215,8 +215,8 @@ command/file path.
 2. An end-to-end test in a temp git repo with a fake `claude` (a node script that commits a file and,
    in evaluator mode, returns a scripted verdict) shows: two independent features built in parallel
    and merged; one feature failing evaluation once then passing; one feature blocked by a
-   non-mockable human task that `run --watch` waits on and resumes after `shipyard done`; a mockable
-   one built `onMock`. The fake is selected via `SHIPYARD_CLAUDE`.
-3. `shipyard dash` serves the page and `/api/state` against that temp repo (tested via fetch).
+   non-mockable human task that `run --watch` waits on and resumes after `fact-os done`; a mockable
+   one built `onMock`. The fake is selected via `FACTOS_CLAUDE`.
+3. `fact-os dash` serves the page and `/api/state` against that temp repo (tested via fetch).
 4. README.md: install, commands, file formats, and the safety limits above. Under 150 lines.
 5. No npm dependencies; total source (excluding tests) aims for under ~1200 lines.

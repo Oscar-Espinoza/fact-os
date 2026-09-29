@@ -6,10 +6,10 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { withLock, mutate, writeJsonAtomic, paths, DEFAULT_CONFIG } from '../lib/state.js';
+import { withLock, mutate, writeJsonAtomic, paths, DEFAULT_CONFIG, envVar } from '../lib/state.js';
 
 const STATE = new URL('../lib/state.js', import.meta.url).href;
-const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'shipyard-state-')); mkdirSync(join(d, '.shipyard')); return d; };
+const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'fact-os-state-')); mkdirSync(join(d, '.fact-os')); return d; };
 const exited = (cp) => new Promise((r) => cp.on('exit', (code) => r(code)));
 
 test('two concurrent writer processes lose no update (bug: read-modify-write without lock)', async (t) => {
@@ -34,7 +34,7 @@ test('readers never observe a partially written file (bug: writeFileSync in plac
   let done = false, reads = 0; cp.on('exit', () => { done = true; });
   while (!done) { JSON.parse(readFileSync(file, 'utf8')); reads++; await new Promise(setImmediate); }
   assert.ok(reads > 10);
-  assert.deepEqual(readdirSync(join(root, '.shipyard')).filter((f) => f.includes('.tmp')), [], 'no temp files left');
+  assert.deepEqual(readdirSync(join(root, '.fact-os')).filter((f) => f.includes('.tmp')), [], 'no temp files left');
 });
 
 test('a lock held by a live pid blocks; a lock left by a dead pid is taken over', async (t) => {
@@ -81,4 +81,22 @@ test('stale-lock takeover does not delete a lock another process took in the mea
 test('builder and evaluator default to permissionMode "auto"', () => {
   assert.equal(DEFAULT_CONFIG.builder.permissionMode, 'auto');
   assert.equal(DEFAULT_CONFIG.evaluator.permissionMode, 'auto');
+});
+
+test('a project set up before the rename keeps using .shipyard/; .fact-os/ wins once it exists (bug: renamed state lost)', (t) => {
+  const d = mkdtempSync(join(tmpdir(), 'fact-os-legacy-')); t.after(() => rmSync(d, { recursive: true, force: true }));
+  assert.equal(paths(d).name, '.fact-os', 'new projects get .fact-os/');
+  mkdirSync(join(d, '.shipyard'));
+  assert.equal(paths(d).name, '.shipyard');
+  assert.equal(paths(d).features, join(d, '.shipyard', 'features.json'));
+  mkdirSync(join(d, '.fact-os'));
+  assert.equal(paths(d).name, '.fact-os');
+});
+
+test('env reads FACTOS_* first and falls back to SHIPYARD_* (bug: old launch scripts silently ignored)', (t) => {
+  t.after(() => { delete process.env.FACTOS_X; delete process.env.SHIPYARD_X; });
+  process.env.SHIPYARD_X = 'old';
+  assert.equal(envVar('X'), 'old');
+  process.env.FACTOS_X = 'new';
+  assert.equal(envVar('X'), 'new');
 });

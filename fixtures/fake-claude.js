@@ -8,7 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 
 const prompt = readFileSync(0, 'utf8');
-const id = process.env.SHIPYARD_FEATURE;
+const id = process.env.FACTOS_FEATURE;
 const log = process.env.FAKE_LOG;
 const mode = prompt.startsWith('You are the builder') ? 'build' : 'eval';
 const flags = (JSON.parse(process.env.FAKE_SCENARIO || '{}')[id] || '').split(',');
@@ -29,12 +29,12 @@ await new Promise((r) => setTimeout(r, Number(process.env.FAKE_DELAY_MS ?? 400))
 let result = 'done', extra = {};
 if (mode === 'build') {
   if (has('acceptance')) { // rewrite its own acceptance checks in features.json
-    const file = join(root(), '.shipyard/features.json'), d = JSON.parse(readFileSync(file, 'utf8'));
+    const file = join(root(), '.fact-os/features.json'), d = JSON.parse(readFileSync(file, 'utf8'));
     d.features.find((f) => f.id === id).acceptance = ['nothing to check'];
     writeFileSync(file, JSON.stringify(d));
   }
   if (has('config')) { // loosen the foreman's config
-    const file = join(root(), '.shipyard/config.json');
+    const file = join(root(), '.fact-os/config.json');
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), maxAttempts: 99 }));
   }
   if (has('budget')) extra = { subtype: 'error_max_budget_usd', is_error: true, result: '' };

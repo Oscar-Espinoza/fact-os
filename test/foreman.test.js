@@ -63,7 +63,7 @@ test('recoverInFlight: a merged branch wins; an overdue live child makes the fea
 });
 
 test('waitForChange returns at once when the files changed after the caller\'s stamp (bug: missed wakeup)', async (t) => {
-  const d = mkdtempSync(join(tmpdir(), 'shipyard-wait-')); t.after(() => rmSync(d, { recursive: true, force: true }));
+  const d = mkdtempSync(join(tmpdir(), 'fact-os-wait-')); t.after(() => rmSync(d, { recursive: true, force: true }));
   const P = { features: join(d, 'features.json'), human: join(d, 'human.json') };
   writeFileSync(P.features, '{}');
   const before = stamp(P);
@@ -82,13 +82,13 @@ test('feedbackFromVerdict lists failed findings and cheating, not passing findin
 });
 
 test('appendLesson: creates heading once, dedupes by exact text, keeps later sections intact', (t) => {
-  const d = mkdtempSync(join(tmpdir(), 'shipyard-lesson-')); t.after(() => rmSync(d, { recursive: true, force: true }));
+  const d = mkdtempSync(join(tmpdir(), 'fact-os-lesson-')); t.after(() => rmSync(d, { recursive: true, force: true }));
   const file = join(d, 'CLAUDE.md');
   assert.equal(appendLesson(file, 'Run the linter', '2026-01-01'), true);
   assert.equal(appendLesson(file, 'Run the linter', '2026-02-02'), false);
   assert.equal(appendLesson(file, 'Multi\nline  lesson', '2026-01-01'), true);
   let s = readFileSync(file, 'utf8');
-  assert.equal(s.match(/## Shipyard lessons/g).length, 1);
+  assert.equal(s.match(/## fact-os lessons/g).length, 1);
   assert.equal(s.match(/Run the linter/g).length, 1);
   assert.match(s, /- 2026-01-01: Multi line lesson/);
   writeFileSync(file, '# Proj\n\n## Shipyard lessons\n\n- 2026-01-01: A\n\n## Other\n\ntext\n');
