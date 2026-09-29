@@ -12,6 +12,7 @@ The name itself lives in one constant, `NAME` in `lib/state.ts`.
 ## Install
 
 ```sh
+git clone https://github.com/Oscar-Espinoza/fact-os ~/Projects/fact-os
 cd ~/Projects/fact-os && bun install   # dev deps only: typescript, @types/bun
 ln -s ~/Projects/fact-os/bin/fact-os ~/.local/bin/fact-os
 cd ~/Projects/myapp && fact-os init --test "pnpm test"   # then run the intake skill in Claude Code
@@ -144,3 +145,7 @@ step, and with `bypassPermissions` they can do anything you can.
 `total_cost_usd` (falling back to `cost_usd`), and `structured_output` if present. Field names were checked
 against the installed 2.1.283 binary, not by running a prompt. Hooks are passed with `--settings` as
 `"<bun>" "<fact-os>/bin/fact-os" hook` so they work before `fact-os` is on PATH.
+
+## License
+
+MIT

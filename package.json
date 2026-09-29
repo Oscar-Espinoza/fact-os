@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Plan → build → evaluate → merge → compound loop over a feature list using headless Claude Code",
+  "description": "Plan \u2192 build \u2192 evaluate \u2192 merge \u2192 compound loop over a feature list using headless Claude Code",
   "bin": {
     "fact-os": "bin/fact-os"
   },
@@ -17,5 +17,7 @@
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "typescript": "^7.0.2"
-  }
+  },
+  "license": "MIT",
+  "repository": "github:Oscar-Espinoza/fact-os"
 }
