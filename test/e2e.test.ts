@@ -118,3 +118,43 @@ test('end to end: parallel builds, eval retry, human wait/resume, onMock, dash',
   assert.equal(s.projects[0].features.filter((f) => f.status === 'merged').length, 5);
   assert.ok(s.projects[0].activity.length >= 1);
 });
+
+test('run --watch waits while a feature is paused and builds it once resumed from the CLI', { timeout: 30000 }, async (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'fact-os-pause-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const repo = join(base, 'app');
+  mkdirSync(repo);
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
+  writeFileSync(join(repo, 'README.md'), '# app\n');
+  git('add', '.'); git('commit', '-qm', 'init');
+  chmodSync(FAKE, 0o755);
+  const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100', FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json') };
+  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8' });
+  writeFileSync(env.FAKE_VERDICTS, '{}');
+  assert.equal(cli('init', '--test', 'true').status, 0);
+  writeFileSync(join(repo, '.fact-os/features.json'), JSON.stringify({ features: [F('a'), F('b', { status: 'paused' })] }));
+  assert.equal(cli('doctor').status, 0, 'doctor accepts paused');
+  assert.equal(cli('resume', 'a').status, 1, 'resuming a feature that is not paused fails');
+
+  const run = spawn(process.execPath, [BIN, 'run', '--watch'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; run.stdout.on('data', (d) => { out += d; }); run.stderr.on('data', (d) => { out += d; });
+  const exit = new Promise((res) => run.on('exit', res));
+  t.after(() => run.exitCode === null && run.kill());
+  const status = () => Object.fromEntries((JSON.parse(readFileSync(join(repo, '.fact-os/features.json'), 'utf8')) as FeaturesFile).features.map((f) => [f.id, f.status]));
+  for (let i = 0; i < 200 && status().a !== 'merged'; i++) await sleep(100);
+  await sleep(300);
+  assert.deepEqual(status(), { a: 'merged', b: 'paused' }, out);
+  assert.equal(run.exitCode, null, 'run --watch keeps waiting while b is paused');
+
+  const r = cli('resume', 'b');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /resumed b/);
+  assert.equal(await exit, 0, out);
+  assert.equal(status().b, 'merged');
+  const events = readFileSync(join(repo, '.fact-os/log.jsonl'), 'utf8');
+  assert.match(events, /"feature":"b","event":"resumed"/);
+  assert.match(events, /"feature":"b","event":"testing"/);
+  assert.match(events, /"feature":"b","event":"evaluating"/);
+});

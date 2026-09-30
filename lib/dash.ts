@@ -1,20 +1,40 @@
 // Dashboard: one page across every project under --root, bound to 127.0.0.1.
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readdirSync, existsSync, statSync } from 'node:fs';
-import { join, basename, resolve } from 'node:path';
-import { paths, load, STATE_DIRS, NAME, mutate, log, tailLines, errMsg } from './state.ts';
+import { readdirSync, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { join, basename, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { paths, load, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson } from './state.ts';
 import { analyze, taskReach } from './ready.ts';
-import type { ActivityEvent, Feature, HumanTask, MergeMode } from './types.ts';
+import { act, ACTIONS, type Action } from './actions.ts';
+import type { ActivityEvent, Config, Feature, HumanTask, LogEvent, MergeMode, RoleConfig } from './types.ts';
 
+// Median durations (ms) of each pipeline stage, for the dashboard's estimated progress; null = no history yet.
+export interface Estimates { build: number | null; test: number | null; eval: number | null }
 export interface ProjectState {
   path: string; name: string; merge?: MergeMode; branchPrefix?: string; error?: string; features: Feature[]; tasks: HumanTask[];
-  ready: string[]; waiting: string[]; activity: ActivityEvent[];
+  ready: string[]; waiting: string[]; activity: ActivityEvent[]; events: LogEvent[];
+  config?: Pick<Config, 'base' | 'maxParallel' | 'maxAttempts' | 'groupBy'> & { builder: RoleConfig; evaluator: RoleConfig };
+  foreman: { running: boolean; since: string | null };
+  stageSince: Record<string, string>;  // in-flight feature id → ISO start of its current stage
+  estimates: Estimates;
+  hasProjectView: boolean;
+  repoUrl?: string;                    // https://github.com/<owner>/<repo>, from the origin remote
+  stats: Stats;
+}
+export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
+export interface Run {
+  n: number; role: 'build' | 'eval'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
+  pass?: boolean; findings?: { check: string; ok: boolean; note?: string }[]; summary: string;
 }
 export type OpenTask = HumanTask & { project: string; projectName: string; reach: number };
 
 const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { return undefined; } };
 const isWorktree = (dir: string) => { try { return statSync(join(dir, '.git')).isFile(); } catch { return false; } };
+
+const HUMAN = ['start', 'done', 'reopen', 'step', 'wait', 'unwait'] as const;
+// Page scripts, styles and pixel art under lib/dash/ and lib/assets/, served at /dash/* and /assets/*.
+const ASSET_TYPES: Record<string, string> = { js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png' };
 
 export function discover(root: string, maxDepth = 3): string[] {
   const found: string[] = [];
@@ -29,30 +49,173 @@ export function discover(root: string, maxDepth = 3): string[] {
   return found.sort();
 }
 
+const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
+const STAGE_EVENT: Record<string, string> = { building: 'launch', testing: 'testing', evaluating: 'evaluating' };
+const median = (xs: number[]): number | null => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]!; };
+const readLog = (dir: string, n: number) => tailLines(paths(dir).log, n).map(tryJson).filter(Boolean) as LogEvent[];
+
+// Every raw `claude -p` output under <state dir>/runs/<feature>/<n>-(build|eval).json.
+function runFiles(dir: string): { file: string; mtime: number }[] {
+  const runs = paths(dir).runs, files: { file: string; mtime: number }[] = [];
+  try {
+    for (const f of readdirSync(runs, { withFileTypes: true })) if (f.isDirectory())
+      for (const r of readdirSync(join(runs, f.name))) if (/-(build|eval)\.json$/.test(r)) {
+        const file = join(runs, f.name, r);
+        try { files.push({ file, mtime: statSync(file).mtimeMs }); } catch {}
+      }
+  } catch {}
+  return files;
+}
+
+// Build/eval medians come from the last 200 raw `claude -p` outputs (duration_ms); test from testing → evaluating log pairs.
+const estCache = new Map<string, { at: number; est: Estimates }>();
+function estimates(dir: string, events: LogEvent[]): Estimates {
+  const hit = estCache.get(dir);
+  if (hit && Date.now() - hit.at < 60000) return hit.est;
+  const build: number[] = [], evals: number[] = [], tests: number[] = [];
+  const files = runFiles(dir).sort((a, b) => b.mtime - a.mtime).slice(0, 200);
+  for (const { file } of files) {
+    try {
+      const ms = (readJson(file, {}) as { duration_ms?: unknown }).duration_ms;
+      if (typeof ms === 'number' && ms > 0) (file.endsWith('-build.json') ? build : evals).push(ms);
+    } catch {}
+  }
+  const started = new Map<string, number>();
+  for (const e of events) {
+    if (!e.feature) continue;
+    if (e.event === 'testing') started.set(e.feature, Date.parse(e.ts));
+    else if (e.event === 'evaluating' && started.has(e.feature)) { tests.push(Date.parse(e.ts) - started.get(e.feature)!); started.delete(e.feature); }
+  }
+  const est = { build: median(build), test: median(tests), eval: median(evals) };
+  estCache.set(dir, { at: Date.now(), est });
+  return est;
+}
+
+// Merges in the last 48h and run cost by local day (file mtime), cached like estimates.
+const statsCache = new Map<string, { at: number; stats: Stats }>();
+function statsOf(dir: string): Stats {
+  const hit = statsCache.get(dir);
+  if (hit && Date.now() - hit.at < 60000) return hit.stats;
+  const now = Date.now(), midnight = new Date(now).setHours(0, 0, 0, 0), yesterday = new Date(midnight - 12 * 3600000).setHours(0, 0, 0, 0);
+  let costToday = 0, costYesterday = 0;
+  for (const { file, mtime } of runFiles(dir)) {
+    if (mtime < yesterday) continue;
+    const c = (readJson(file, {}) as { total_cost_usd?: unknown }).total_cost_usd;
+    if (typeof c === 'number' && Number.isFinite(c)) mtime >= midnight ? (costToday += c) : (costYesterday += c);
+  }
+  const mergedAt = readLog(dir, 2000).filter((e) => e.event === 'merged' && Date.parse(e.ts) >= now - 48 * 3600000).map((e) => e.ts);
+  const stats = { mergedAt, costToday, costYesterday };
+  statsCache.set(dir, { at: now, stats });
+  return stats;
+}
+
+// https://github.com/<owner>/<repo> from the project's origin remote (.git/config), cached by config mtime.
+const repoCache = new Map<string, { mtime: number; url: string | undefined }>();
+function repoUrl(dir: string): string | undefined {
+  const file = join(dir, '.git', 'config');
+  try {
+    const mtime = statSync(file).mtimeMs, hit = repoCache.get(dir);
+    if (hit && hit.mtime === mtime) return hit.url;
+    const m = /\[remote "origin"\][^\[]*?\burl\s*=\s*(\S+)/.exec(readFileSync(file, 'utf8'));
+    const g = m && /^(?:git@github\.com:|https:\/\/(?:[^@\/]+@)?github\.com\/)([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(m[1]!);
+    const url = g ? `https://github.com/${g[1]}/${g[2]}` : undefined;
+    repoCache.set(dir, { mtime, url });
+    return url;
+  } catch { return undefined; }
+}
+
+// Start of each in-flight feature's current stage: its stage's log event after its last launch, else updatedAt.
+function stageSince(features: Feature[], events: LogEvent[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of features) {
+    const want = STAGE_EVENT[f.status];
+    if (!want) continue;
+    let since: string | null = null;
+    for (const e of events) if (e.feature === f.id) {
+      if (e.event === 'launch') since = want === 'launch' ? e.ts : null;
+      else if (e.event === want) since = e.ts;
+    }
+    out[f.id] = since ?? f.updatedAt;
+  }
+  return out;
+}
+
+function foreman(dir: string): ProjectState['foreman'] {
+  try {
+    const file = paths(dir).foreman, pid = parseInt(readFileSync(file, 'utf8'), 10);
+    return pidAlive(pid) ? { running: true, since: new Date(statSync(file).mtimeMs).toISOString() } : { running: false, since: null };
+  } catch { return { running: false, since: null }; }
+}
+
+const projectViewFile = (dir: string) => join(paths(dir).dir, 'project-view.html');
+
 function projectState(dir: string): ProjectState {
+  const base = { path: dir, name: basename(dir), features: [], tasks: [], ready: [], waiting: [], activity: [], events: [],
+    foreman: foreman(dir), stageSince: {}, estimates: { build: null, test: null, eval: null }, hasProjectView: existsSync(projectViewFile(dir)),
+    stats: { mergedAt: [], costToday: 0, costYesterday: 0 }, ...(repoUrl(dir) ? { repoUrl: repoUrl(dir) } : {}) };
   try {
     const { config, features, tasks } = load(dir);
-    const a = analyze(features, tasks, config.merge);
-    return { path: dir, name: basename(dir), merge: config.merge, branchPrefix: config.branchPrefix, features, tasks,
-      ready: a.ready, waiting: a.waiting, activity: tailLines(paths(dir).activity, 20).map(tryJson).filter(Boolean) as ActivityEvent[] };
+    const a = analyze(features, tasks, config.merge), events = readLog(dir, 2000);
+    return { ...base, merge: config.merge, branchPrefix: config.branchPrefix, features, tasks, ready: a.ready, waiting: a.waiting,
+      activity: tailLines(paths(dir).activity, 200).map(tryJson).filter(Boolean) as ActivityEvent[], events: events.slice(-80),
+      config: { base: config.base, maxParallel: config.maxParallel, maxAttempts: config.maxAttempts, groupBy: config.groupBy,
+        builder: config.builder, evaluator: config.evaluator },
+      stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir) };
   } catch (e) {
-    return { path: dir, name: basename(dir), error: errMsg(e), features: [], tasks: [], ready: [], waiting: [], activity: [] };
+    return { ...base, error: errMsg(e) };
   }
+}
+
+// One feature's runs (last 20), parsed from runs/<id>/<n>-(build|eval).json; build before eval within a try.
+function featureRuns(dir: string, id: string): Run[] {
+  if (!/^[\w.-]+$/.test(id) || id.startsWith('..')) return [];
+  const rd = join(paths(dir).runs, id), out: Run[] = [];
+  let names: string[] = [];
+  try { names = readdirSync(rd); } catch { return []; }
+  for (const name of names) {
+    const m = /^(\d+)-(build|eval)\.json$/.exec(name);
+    if (!m) continue;
+    try {
+      const file = join(rd, name), j = readJson(file, {}) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; result?: unknown };
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+      const role = m[2] as Run['role'], text = typeof j.result === 'string' ? j.result : '';
+      const run: Run = { n: Number(m[1]), role, at: new Date(statSync(file).mtimeMs).toISOString(), ms: num(j.duration_ms), cost: num(j.total_cost_usd),
+        turns: num(j.num_turns), model: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage)[0] ?? null : null, summary: text.slice(0, 400) };
+      if (role === 'eval') {
+        const v = tryJson(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')) as { pass?: unknown; findings?: unknown } | undefined;
+        if (v && typeof v === 'object') {
+          if (typeof v.pass === 'boolean') run.pass = v.pass;
+          if (Array.isArray(v.findings)) run.findings = v.findings.filter((f): f is { check: string; ok: boolean; note?: string } => !!f && typeof f.check === 'string' && typeof f.ok === 'boolean')
+            .map((f) => ({ check: f.check, ok: f.ok, ...(typeof f.note === 'string' ? { note: f.note } : {}) }));
+          if (run.pass !== undefined || run.findings) run.summary = '';
+        }
+      }
+      out.push(run);
+    } catch {}
+  }
+  return out.sort((a, b) => a.n - b.n || (a.role === b.role ? 0 : a.role === 'build' ? -1 : 1)).slice(-20);
+}
+
+// One feature's history for the detail panel.
+export function featureHistory(dir: string, id: string): { log: LogEvent[]; activity: ActivityEvent[]; runs: Run[] } {
+  return { log: readLog(dir, 2000).filter((e) => e.feature === id).slice(-60),
+    activity: (tailLines(paths(dir).activity, 2000).map(tryJson).filter(Boolean) as ActivityEvent[]).filter((a) => a.feature === id).slice(-40),
+    runs: featureRuns(dir, id) };
 }
 
 export function state(root: string): { projects: ProjectState[]; human: OpenTask[] } {
   const projects = discover(root).map(projectState);
-  const human = projects.flatMap((p) => p.tasks.filter((t) => t.status === 'open')
+  const human = projects.flatMap((p) => p.tasks
     .map((t): OpenTask => ({ ...t, project: p.path, projectName: p.name, reach: taskReach(t, p.features) })))
-    .sort((a, b) => b.reach - a.reach || a.id.localeCompare(b.id));
+    .sort((a, b) => b.reach - a.reach || a.id.localeCompare(b.id)); // done ones included; the page filters
   return { projects, human };
 }
 
 export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{ server: Server; url: string }> {
   root = resolve(root);
   const server = createServer(async (req, res) => {
-    const send = (code: number, body: unknown, type = 'application/json') => {
-      res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
+    const send = (code: number, body: unknown, type = 'application/json', headers: Record<string, string> = {}) => {
+      res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...headers });
       res.end(type === 'application/json' ? JSON.stringify(body) : (body as string));
     };
     try {
@@ -60,23 +223,62 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
       const hosts = [`127.0.0.1:${p}`, `localhost:${p}`];
       if (req.headers.origin && !hosts.map((h) => `http://${h}`).includes(req.headers.origin)) return send(403, { error: 'foreign origin' });
       if (!hosts.includes(req.headers.host!)) return send(403, { error: 'unexpected host' }); // DNS rebinding
-      if (req.method === 'GET' && req.url === '/') return send(200, PAGE, 'text/html; charset=utf-8');
-      if (req.method === 'GET' && req.url === '/api/state') return send(200, state(root));
-      if (req.method !== 'POST' || !['/api/human/done', '/api/feature/merged'].includes(req.url!)) return send(404, { error: 'not found' });
+      const url = new URL(req.url!, 'http://x'), q = (k: string) => url.searchParams.get(k) ?? '';
+      if (req.method === 'GET' && url.pathname === '/') return send(200, page(), 'text/html; charset=utf-8');
+      const asset = req.method === 'GET' && /^\/(dash|assets)\/([a-z0-9-]+)\.(js|css|png)$/.exec(url.pathname);
+      if (asset) {
+        const f = join(HERE, asset[1]!, `${asset[2]}.${asset[3]}`);
+        return existsSync(f) ? send(200, readFileSync(f) as unknown as string, ASSET_TYPES[asset[3]!]!) : send(404, { error: 'not found' });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/state') return send(200, state(root));
+      if (req.method === 'GET' && (url.pathname === '/api/feature' || url.pathname === '/project-view')) {
+        if (!discover(root).includes(q('project'))) return send(400, { error: 'unknown project' });
+        if (url.pathname === '/api/feature') return send(200, featureHistory(q('project'), q('id')));
+        const f = projectViewFile(q('project'));
+        // CSP sandbox gives the page an opaque origin even when opened directly, so it can't POST to this API.
+        return existsSync(f) ? send(200, readFileSync(f, 'utf8'), 'text/html; charset=utf-8', { 'content-security-policy': 'sandbox allow-scripts' })
+          : send(404, { error: 'no project view' });
+      }
+      const action = ACTIONS.find((a) => req.url === `/api/feature/${a}`);
+      if (req.method !== 'POST' || (!action && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged'].includes(req.url!))) return send(404, { error: 'not found' });
       let body = '';
       for await (const c of req) { body += c; if (body.length > 10000) return send(413, { error: 'body too large' }); }
-      const { project, id } = (tryJson(body) || {}) as { project?: unknown; id?: unknown };
+      const { project, id, step, on, who } = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown };
       if (typeof project !== 'string' || !discover(root).includes(project)) return send(400, { error: 'unknown project' });
       if (typeof id !== 'string') return send(400, { error: 'id must be a string' });
-      if (req.url === '/api/human/done') {
+      if (action) {
+        const err = (await act(project, action as Action, [id]))[id];
+        return send(err ? (err === 'unknown feature' ? 404 : 409) : 200, err ? { error: `${id}: ${err}` } : { ok: true });
+      }
+      if (req.url!.startsWith('/api/human/')) {
+        const what = req.url!.slice('/api/human/'.length) as (typeof HUMAN)[number];
+        if (what === 'step' && !(Number.isInteger(step) && (step as number) >= 0 && typeof on === 'boolean')) return send(400, { error: 'step must be an index and on a boolean' });
+        const waitee = typeof who === 'string' ? who.trim() : '';
+        if (what === 'wait' && (!waitee || waitee.length > 200)) return send(400, { error: 'who must be a non-empty string of at most 200 characters' });
         const code = await mutate(project, 'human', (d) => {
           const t = d.tasks.find((x) => x.id === id);
           if (!t) return 404;
-          if (t.status !== 'done') Object.assign(t, { status: 'done', doneAt: new Date().toISOString() });
+          const now = new Date().toISOString();
+          if (what === 'done') { if (t.status !== 'done') Object.assign(t, { status: 'done', doneAt: now }); delete t.waitingOn; delete t.waitingSince; }
+          else if (what === 'reopen') { t.status = 'open'; delete t.doneAt; delete t.waitingOn; delete t.waitingSince; }
+          else if (what === 'wait') {
+            if (t.status === 'done') return 409;
+            Object.assign(t, { waitingOn: waitee, waitingSince: now });
+            t.startedAt ??= now;
+          }
+          else if (what === 'unwait') { delete t.waitingOn; delete t.waitingSince; }
+          else if (what === 'start') t.startedAt ??= now;
+          else {
+            if ((step as number) >= t.steps.length) return 400;
+            const set = new Set(t.checked || []);
+            on ? set.add(step as number) : set.delete(step as number);
+            t.checked = [...set].sort((a, b) => a - b);
+            if (on && t.status === 'open') t.startedAt ??= now;
+          }
           return 200;
         });
-        if (code === 200) log(project, null, 'human-done', id);
-        return send(code, code === 200 ? { ok: true } : { error: `unknown human task ${id}` });
+        if (code === 200 && what !== 'step') log(project, null, `human-${what}`, id);
+        return send(code, code === 200 ? { ok: true } : { error: code === 404 ? `unknown human task ${id}` : code === 409 ? `human task ${id} is already done` : 'no such step' });
       }
       if (load(project).config.merge !== 'manual') return send(409, { error: 'this project merges automatically' });
       const code = await mutate(project, 'features', (d) => {
@@ -98,46 +300,5 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
   });
 }
 
-const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${NAME}</title><style>
-:root{--bg:#f7f7f4;--fg:#1c1c1a;--muted:#6b6b66;--card:#fff;--line:#e2e1da;--accent:#2f5dd0;--ok:#2e7d4f;--warn:#a86400;--bad:#b3261e}
-@media (prefers-color-scheme:dark){:root{--bg:#141413;--fg:#ecebe6;--muted:#9a9993;--card:#1d1d1b;--line:#34332f;--accent:#8aa8ff;--ok:#6cc58f;--warn:#e0a34a;--bad:#f08079}}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
-header{display:flex;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
-h1{font-size:16px;margin:0 12px 0 0}h2{font-size:15px;margin:0 0 8px}
-h3{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:10px 0 4px}
-button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;padding:4px 10px;cursor:pointer}
-button.on{border-color:var(--accent);color:var(--accent)}
-main{padding:16px;max-width:1100px;margin:auto}
-section{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin-bottom:16px}
-.f{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:2px 8px;margin:2px}
-.b{font-size:11px;color:var(--warn);margin-left:6px}.muted{color:var(--muted);font-weight:normal}
-.merged{color:var(--ok)}.stuck{color:var(--bad)}ol{margin:4px 0 10px 20px;padding:0}
-pre{font:12px ui-monospace,monospace;color:var(--muted);white-space:pre-wrap;margin:4px 0 0;max-height:240px;overflow:auto}
-</style></head><body>
-<header><h1>${NAME}</h1><button id="t-agents" class="on">Agents</button><button id="t-you">Only you <span id="n"></span></button>
-<span id="err" class="muted"></span></header><main id="main"></main>
-<script>
-const ORDER=['building','testing','evaluating','todo','ready','stuck','merged'];let view='agents',S=null;
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
-async function load(){try{S=await(await fetch('/api/state')).json();err.textContent='';render()}catch(e){err.textContent='offline'}}
-async function post(u,project,id){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({project,id})});
- if(!r.ok)alert((await r.json()).error);load()}
-function agents(){return S.projects.map(p=>{const g={};for(const f of p.features)(g[f.status]??=[]).push(f);
- return '<section><h2>'+esc(p.name)+' <span class="muted">'+esc(p.path)+' · merge '+esc(p.merge)+(p.error?' · '+esc(p.error):'')+'</span></h2>'+
- ORDER.filter(s=>g[s]).map(s=>'<h3>'+s+' ('+g[s].length+')</h3>'+g[s].map(f=>'<span class="f '+s+'" title="'+esc(f.lastFeedback||f.title)+'">'+esc(f.id)+
- (f.onMock?'<span class="b">onMock</span>':'')+(p.waiting.includes(f.id)?'<span class="b">waiting on you</span>':'')+
- (f.attempts?' <span class="muted">×'+f.attempts+'</span>':'')+'</span>').join('')).join('')+
- '<h3>activity</h3><pre>'+(esc(p.activity.map(a=>String(a.ts).slice(11,19)+' '+(a.feature||'-')+' '+a.summary).join('\\n'))||'none')+'</pre></section>'}).join('')
- ||'<p class="muted">No projects with .${NAME}/features.json under this root.</p>'}
-function you(){const t=S.human.map(h=>'<section><h2>'+esc(h.title)+' <span class="muted">'+esc(h.projectName)+' · unblocks '+h.reach+'</span></h2><ol>'+
- (h.steps||[]).map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol><button data-u="/api/human/done" data-p="'+esc(h.project)+'" data-i="'+esc(h.id)+'">I did my part</button></section>');
- const r=S.projects.filter(p=>p.merge==='manual').flatMap(p=>p.features.filter(f=>f.status==='ready').map(f=>'<section><h2>Review and merge '+esc(f.id)+
- ' <span class="muted">'+esc(p.name)+' · '+esc(f.branch||p.branchPrefix+f.id)+'</span></h2><p>'+esc(f.title)+'</p><button data-u="/api/feature/merged" data-p="'+
- esc(p.path)+'" data-i="'+esc(f.id)+'">Mark done</button></section>'));
- n.textContent=t.length+r.length?'('+(t.length+r.length)+')':'';return [...t,...r].join('')||'<p class="muted">Nothing needs you right now.</p>'}
-function render(){const y=you();main.innerHTML=view==='agents'?agents():y}
-document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.u)return post(b.dataset.u,b.dataset.p,b.dataset.i);
- view=b.id==='t-you'?'you':'agents';document.querySelectorAll('header button').forEach(x=>x.classList.toggle('on',x===b));render()});
-load();setInterval(load,2000);
-</script></body></html>`;
+// The page lives in dash.html; re-read on each request so edits show on reload.
+const page = () => readFileSync(join(HERE, 'dash.html'), 'utf8').replaceAll('{{NAME}}', NAME);

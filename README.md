@@ -30,8 +30,9 @@ imports `lib/cli.ts`, since tsc skips extensionless files.
 | `fact-os run [--watch] [--once] [--max-features N]` | The foreman loop. `--watch` keeps waiting (polls `features.json`/`human.json` mtimes every 5s) while features are blocked on you. `--once` launches one batch and exits when it finishes. Exit 0 when every feature is `merged`/`ready`, 2 otherwise. |
 | `fact-os status` | Feature table (status, attempts, cost, deps, next/onMock/waiting) and open human tasks. |
 | `fact-os done <task-id>` | Marks a human task done; a watching foreman picks it up. |
+| `fact-os pause\|resume\|retry <id>...` | Pause `todo`/`stuck` features (they and their dependents never launch; `run --watch` keeps waiting), resume paused ones (fresh attempts if they had run out), retry stuck ones (attempts reset, last feedback kept). |
 | `fact-os doctor` | Validates the files (schema, duplicate ids, unknown deps, cycles) and that `claude`, `git` and the test command resolve. Exit 1 on problems. |
-| `fact-os dash [--root DIR] [--port 7420]` | Dashboard on `127.0.0.1` for every `.fact-os/features.json` up to depth 3 under `--root` (worktrees skipped). "Agents" and "Only you" views; refreshes every 2s. |
+| `fact-os dash [--root DIR] [--port 7420]` | Dashboard on `127.0.0.1` for every `.fact-os/features.json` up to depth 3 under `--root` (worktrees skipped). Views: Factory (intake → build bays with pixel-art workers and estimated progress → test → inspection → dock, stuck list, live feed), Board (features by epic, filters, detail panel with pause/resume/retry), Project (your own `project-view.html`, sandboxed) and Only you. Refreshes every 2s. |
 | `fact-os hook` | Internal: Claude Code hook that appends a line to `activity.jsonl`. Never prints, never exits non-zero. |
 
 Per feature the foreman: creates/reuses worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`)
@@ -62,7 +63,7 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
-  `todo|building|testing|evaluating|ready|merged|stuck`.
+  `todo|building|testing|evaluating|ready|merged|stuck|paused`.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
   `runs/<feature>/<attempt>-{build,eval}.json` (raw `claude -p` output), `.lock`, `.foreman` (foreman pid).

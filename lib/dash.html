@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{NAME}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Pixelify+Sans:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/dash/base.css">
+<link rel="stylesheet" href="/dash/factory.css">
+<link rel="stylesheet" href="/dash/board.css">
+<link rel="stylesheet" href="/dash/you.css">
+<link rel="stylesheet" href="/dash/detail.css">
+</head>
+<body data-name="{{NAME}}">
+<header class="top">
+  <div class="brand"><img src="/assets/logo.png" alt="" width="42" height="40"><span><b>{{NAME}}</b><small>SOFTWARE FACTORY</small></span></div>
+  <nav class="tabs" aria-label="Views">
+    <a href="#factory" data-v="factory">Factory</a>
+    <a href="#board" data-v="board">Board</a>
+    <a href="#project" data-v="project">Project</a>
+    <a href="#you" data-v="you">Only you <span class="badge" id="you-n"></span></a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="picker">
+    <button class="btn" id="pick" aria-haspopup="listbox" aria-expanded="false"><span class="ell" id="pick-name">—</span><span aria-hidden="true">▾</span></button>
+    <div class="menu" id="menu" role="listbox"></div>
+  </div>
+  <div class="status" id="foreman"><span class="dot"></span><span><b id="foreman-t">Foreman stopped</b><small id="foreman-s"></small></span></div>
+</header>
+
+<main>
+  <section class="view" id="v-factory"><div id="factory"></div></section>
+  <section class="view" id="v-board"><div id="board"></div></section>
+  <section class="view" id="v-project"><div id="project"></div></section>
+  <section class="view" id="v-you"><div id="you"></div></section>
+  <section class="view" id="v-detail"><div id="detail"></div></section>
+</main>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="/dash/core.js"></script>
+<script src="/dash/factory.js"></script>
+<script src="/dash/board.js"></script>
+<script src="/dash/you.js"></script>
+<script src="/dash/detail.js"></script>
+<script>F.boot();</script>
+</body>
+</html>

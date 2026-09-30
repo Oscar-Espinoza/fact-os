@@ -1,0 +1,144 @@
+/* Only-you view (kanban). Everything is scoped to #you; colors follow the approved design. */
+#you{--y-fg:#e7edf5;--y-mut:#93a1b5;--y-dim:#7d8ba0;--y-line:#1f2b3b;--y-panel:#111925;--y-deep:#0e1520;
+  display:flex;flex-direction:column;gap:16px;height:calc(100vh - 101px);min-height:560px;color:var(--y-fg);font-family:'Geist',system-ui,sans-serif}
+#you button{font-family:inherit;cursor:pointer;color:inherit}
+#you .mono{font-family:'Geist Mono',ui-monospace,monospace}
+#you h1,#you h2,#you h3,#you p{margin:0}
+#you .y-sp{flex-grow:1}
+#you .y-bar{display:flex;align-items:center;gap:16px;flex:none}
+#you .y-ttl{display:flex;flex-direction:column;gap:2px}
+#you .y-ttl h1{font-size:20px;font-weight:600}
+#you .y-ttl span{font-size:13px;color:var(--y-mut)}
+#you .y-seg{display:flex;gap:2px;padding:3px;background:var(--y-deep);border:1px solid var(--y-line);border-radius:7px}
+#you .y-seg button{height:30px;padding:0 12px;border:none;border-radius:5px;background:transparent;color:var(--y-mut);font-size:13px;font-weight:500;white-space:nowrap}
+#you .y-seg button[aria-pressed="true"]{background:#1c2839;color:var(--y-fg)}
+#you .y-seg button:hover{color:var(--y-fg)}
+#you .y-search{display:flex;align-items:center;gap:8px;width:260px;height:38px;box-sizing:border-box;padding:0 12px;background:var(--y-deep);border:1px solid var(--y-line);border-radius:7px}
+#you .y-search input{flex-grow:1;min-width:0;background:transparent;border:none;outline:none;color:var(--y-fg);font:13px 'Geist',sans-serif}
+#you .y-search:focus-within{border-color:#2c3a4f}
+
+#you .y-main{flex:1;min-height:0;display:flex;gap:16px}
+#you .y-body{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+#you .y-tabs{display:none}
+#you .y-cols{flex:1;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+#you .y-col{display:flex;flex-direction:column;gap:8px;min-height:0;padding:10px;background:#0d141e;border:1px solid #1a2433;border-radius:8px;overflow:hidden}
+#you .y-ch{display:flex;align-items:center;gap:8px;height:26px;padding:0 4px;flex:none}
+#you .y-ch i{width:8px;height:8px;border-radius:50%;flex:none}
+#you .y-ch h2{font-size:13px;font-weight:600}
+#you .y-n{font-size:11px;color:var(--y-mut);padding:1px 6px;background:#162030;border-radius:4px}
+#you .y-hint{font-size:11.5px;color:#6b778a;white-space:nowrap}
+#you .y-hint.warn{color:#f5b73b}
+#you .y-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin;scrollbar-color:#233045 transparent}
+#you .y-none{font-size:13px;color:#8d9ab0;padding:8px 4px}
+#you .y-empty{grid-column:1/-1;padding:32px 16px;color:var(--y-mut);font-size:13.5px}
+#you .y-more{flex:none;height:32px;background:transparent;border:1px dashed #263346;border-radius:6px;color:var(--y-mut);font-size:12.5px}
+#you .y-more:hover{color:var(--y-fg);border-color:#33445c}
+
+#you .y-card{display:flex;flex-direction:column;gap:8px;flex:none;padding:12px;text-align:left;background:var(--y-panel);border:1px solid var(--y-line);border-radius:6px;box-shadow:none;color:var(--y-fg)}
+#you .y-card:hover{background:#141e2c}
+#you .y-card.on{background:#1a2638;border-color:#1a2638;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+#you .y-card.done{opacity:.6}
+#you .y-t{font-size:13.5px;font-weight:500;line-height:1.4}
+#you .y-id{font-size:11px;color:var(--y-dim)}
+#you .y-pid,#you .y-pwait,#you .y-pbar{display:none}
+#you .y-wait{display:flex;align-items:center;gap:6px;font-size:12px;color:#b4c0d0;min-width:0}
+#you .y-wait svg{flex:none}
+#you .y-wo{flex-grow:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#you .y-wa{font-size:11px;color:var(--y-mut);flex:none}
+#you .y-wa.old{color:#f5b73b}
+#you .y-foot{display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--y-mut)}
+#you .y-kind{display:flex;align-items:center;gap:5px}
+#you .y-kind i{width:6px;height:6px;border-radius:50%}
+#you .y-bar{}
+#you .y-foot .y-bar{display:block;width:32px;height:2px;background:var(--y-line);flex:none}
+#you .y-foot .y-bar i{display:block;height:2px;background:#3ddc7a}
+
+#you .y-det{width:400px;flex:none;box-sizing:border-box;display:flex;flex-direction:column;gap:16px;padding:20px;background:var(--y-panel);border:1px solid var(--y-line);border-radius:8px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#233045 transparent}
+#you .y-det>div:empty{display:none}
+#you .y-det>div{display:flex;flex-direction:column;gap:16px}
+#you .y-dh{flex-direction:row!important;align-items:center;gap:8px!important}
+#you .y-st{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:500;color:#b4c0d0}
+#you .y-st i{width:8px;height:8px;border-radius:50%}
+#you .y-did{font-size:12px;color:var(--y-dim)}
+#you .y-x{width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:none;border:none;border-radius:6px;color:var(--y-mut)}
+#you .y-x:hover{background:#162030;color:var(--y-fg)}
+#you .y-back{display:none;align-items:center;gap:4px;height:32px;padding:0 10px 0 6px;background:#0e1520;border:1px solid #263346;border-radius:6px;font-size:13px}
+#you .y-dt{gap:6px!important}
+#you .y-dt h2{font-size:19px;font-weight:600;line-height:1.35}
+#you .y-dt span{font-size:12.5px;color:var(--y-mut)}
+#you .y-wbox{flex-direction:row!important;align-items:center;gap:12px!important;padding:12px 14px;background:var(--y-deep);border:1px solid var(--y-line);border-radius:6px}
+#you .y-wbox>div{flex-grow:1;display:flex;flex-direction:column;gap:2px;font-size:13.5px;min-width:0;overflow-wrap:anywhere}
+#you .y-wd{font-size:12px;color:var(--y-mut)}
+#you .y-prog{flex-direction:row!important;align-items:center;gap:10px!important}
+#you .y-prog>div{flex-grow:1;height:4px;border-radius:2px;background:#1a2433}
+#you .y-prog i{display:block;height:4px;border-radius:2px;background:#3ddc7a}
+#you .y-prog span{font-size:12.5px;color:#b4c0d0}
+#you .y-acts{flex-direction:row!important;flex-wrap:wrap;gap:8px!important}
+#you .y-btn{height:36px;padding:0 14px;border-radius:6px;font-size:13.5px;font-weight:500;background:#0e1520;color:var(--y-fg);border:1px solid #263346}
+#you .y-btn:hover{background:#142033}
+#you .y-btn.primary{background:#2f6fe4;border-color:#2f6fe4}
+#you .y-btn.primary:hover{background:#3a7af0}
+#you .y-wl{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:#b4c0d0}
+#you .y-wr{display:flex;gap:8px}
+#you .y-wr input{flex-grow:1;min-width:0;height:36px;box-sizing:border-box;padding:0 10px;background:var(--y-deep);border:1px solid #2c3a4f;border-radius:6px;color:var(--y-fg);font:13.5px 'Geist',sans-serif}
+#you .y-steps{margin:0;padding:0;list-style:none;display:flex;flex-direction:column}
+#you .y-steps li{display:flex;gap:12px;align-items:flex-start;padding:10px 2px;border-top:1px solid #1a2433}
+#you .y-steps input{width:16px;height:16px;margin:2px 0 0;accent-color:#3ddc7a;flex:none;cursor:pointer}
+#you .y-steps span{font-size:13.5px;line-height:1.5}
+#you .y-steps span.on{color:var(--y-dim)}
+#you .y-sec{gap:8px!important;padding-top:4px;border-top:1px solid #1a2433}
+#you .y-sec h3{font-size:12px;font-weight:600;color:var(--y-mut);padding-top:12px}
+#you .y-sec p{font-size:13px;line-height:1.5}
+#you .y-dim{color:var(--y-dim)!important;font-size:12px!important}
+#you .y-chips{display:flex;flex-wrap:wrap;gap:6px}
+#you .y-chip{display:inline-flex;align-items:center;height:24px;padding:0 8px;border-radius:5px;background:#162030;border:1px solid var(--y-line);font-size:11.5px;color:var(--y-mut);text-decoration:none}
+#you a.y-chip{color:var(--y-fg)}
+#you a.y-chip:hover{border-color:#33445c;background:#1a2638}
+#you button:focus-visible,#you a:focus-visible,#you input:focus-visible{outline:2px solid #5b9cf5;outline-offset:2px}
+#you .y-search input:focus-visible{outline:none}
+
+/* narrow: the detail panel becomes a full-width sheet */
+@media (max-width:900px){
+  #you{height:auto;min-height:0}
+  #you .y-main{display:block}
+  #you .y-det{display:none;position:fixed;inset:0;z-index:50;width:auto;border-radius:0;border:none;padding:16px}
+  #you.open .y-det{display:flex}
+  #you .y-back{display:inline-flex}
+  #you .y-x{display:none}
+  #you .y-bar{flex-wrap:wrap;gap:12px}
+  #you .y-ttl{flex:1 1 100%}
+  #you .y-sp{display:none}
+  #you .y-cols{flex:none}
+  #you .y-list{overflow:visible}
+  #you .y-search{flex:1 1 220px;width:auto}
+}
+/* phone: columns become tabs */
+@media (max-width:700px){
+  #you .y-bar{gap:10px}
+  #you .y-seg{max-width:100%;overflow-x:auto;scrollbar-width:none}
+  #you .y-search{flex-basis:100%}
+  #you .y-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;border-bottom:2px solid #1f2733;margin-bottom:12px}
+  #you .y-tabs button{min-height:44px;background:none;border:none;border-bottom:3px solid transparent;color:#aab5c6;font-size:13px;font-weight:500;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}
+  #you .y-tabs button span.mono{font-size:11px;color:#8d9ab0}
+  #you .y-tabs button[aria-selected="true"]{color:#e6ebf2;border-bottom-color:var(--tc)}
+  #you .y-cols{display:block}
+  #you .y-col{display:none;padding:0;background:none;border:none;border-radius:0;overflow:visible}
+  #you .y-cols[data-tab="todo"] .y-col[data-col="todo"],#you .y-cols[data-tab="doing"] .y-col[data-col="doing"],
+  #you .y-cols[data-tab="waiting"] .y-col[data-col="waiting"],#you .y-cols[data-tab="done"] .y-col[data-col="done"]{display:flex}
+  #you .y-ch{display:none}
+  #you .y-list{gap:10px}
+  #you .y-card{padding:12px 14px;border:2px solid var(--y-line);border-radius:3px;gap:8px}
+  #you .y-card.on{background:var(--y-panel);border-color:var(--y-line);box-shadow:none}
+  #you .y-t{font-size:14px;line-height:1.35}
+  #you .y-id,#you .y-wait,#you .y-foot{display:none}
+  #you .y-pid{display:block;font-size:11px;color:#8d9ab0}
+  #you .y-pwait{display:block;font-size:12px;color:#b4c0d0}
+  #you .y-pbar{display:flex;align-items:center;gap:8px}
+  #you .y-pbar>span:first-child{flex-grow:1;height:3px;background:#0a0e14}
+  #you .y-pbar i{display:block;height:3px;background:#5fd07a}
+  #you .y-pbar .mono{font-size:11px;color:#aab5c6}
+  #you .y-wr{flex-wrap:wrap}
+}
+#you .y-dh,#you .y-dt,#you .y-wbox,#you .y-prog,#you .y-acts,#you .y-sec{display:flex}
+#you .y-dt{flex-direction:column}
+#you .y-sec{flex-direction:column}

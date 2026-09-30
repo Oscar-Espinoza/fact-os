@@ -1,7 +1,8 @@
 // Shapes of the state files and events, as specified in SPEC.md. JSON read from disk is only trusted
 // after readJson (state.ts) casts it; doctor (cli.ts) is what validates it.
 
-export type Status = 'todo' | 'building' | 'testing' | 'evaluating' | 'ready' | 'merged' | 'stuck';
+export type Status = 'todo' | 'building' | 'testing' | 'evaluating' | 'ready' | 'merged' | 'stuck' | 'paused';
+export const STATUSES: Status[] = ['todo', 'building', 'testing', 'evaluating', 'ready', 'merged', 'stuck', 'paused'];
 export type Surface = 'web' | 'api' | 'ios' | 'android' | 'desktop' | 'any';
 export type MergeMode = 'auto' | 'manual';
 export type Role = 'builder' | 'evaluator';
@@ -50,6 +51,8 @@ export interface Feature {
   updatedAt: string;                  // ISO
   sha?: string;                       // evaluated commit (ready/merged)
   parked?: boolean;
+  pausedAt?: string;                  // ISO, while paused
+  issue?: number;                     // GitHub issue number
   pid?: number;                       // current child
   pidStart?: string;                  // /proc/<pid>/stat field 22
   foremanPid?: number;
@@ -63,6 +66,10 @@ export interface HumanTask {
   mockable: boolean;
   status: 'open' | 'done';
   doneAt?: string;
+  startedAt?: string;                 // set once the person begins; makes it "doing"
+  checked?: number[];                 // indexes of steps already done
+  waitingOn?: string;                 // who the person is waiting on (vendor etc.); status stays open
+  waitingSince?: string;              // ISO
 }
 
 export interface FeaturesFile { features: Feature[] }

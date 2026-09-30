@@ -353,12 +353,14 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     const sha = git(['rev-parse', branch], wt).out; // what gets tested, evaluated and merged
 
     await set(id, { status: 'testing' });
+    log(root, id, 'testing', sha);
     const t = await exec('sh', ['-c', `exec 2>&1\n${config.test}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
     if (await stopped()) return;
     const test = { code: t.code, tail: tail(t.out + t.err) + (t.timedOut ? `\n(timed out after ${config.timeoutMin} min)` : '') };
     if (t.code !== 0) return fail(`test command \`${config.test}\` exited ${t.code}:\n${test.tail}`);
 
     await set(id, { status: 'evaluating' });
+    log(root, id, 'evaluating', '');
     const diff = git(['diff', '--text', '--no-ext-diff', '--no-textconv', `${config.base}...${sha}`], wt).out;
     const e = await claude('evaluator', evaluatorPrompt(root, config, f, branch, diff, test), `${attempt}-eval.json`);
     if (await stopped()) return;
@@ -514,7 +516,8 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
         await sleep(Number(envVar('POLL_MS')) || 5000);
         continue;
       }
-      if (!(opts.watch && a.waiting.length)) break;
+      // --watch also waits while features are paused, so resuming one (CLI or dashboard) launches it.
+      if (!(opts.watch && (a.waiting.length || features.some((f) => f.status === 'paused')))) break;
       if (a.waiting.join() !== lastWaiting) {
         lastWaiting = a.waiting.join();
         log(root, null, 'waiting', a.waiting.join(', '));

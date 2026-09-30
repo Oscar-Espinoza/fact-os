@@ -6,7 +6,8 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, NAME } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
-import type { ActivityEvent, Config, Feature, HumanTask } from './types.ts';
+import { STATUSES, type ActivityEvent, type Config, type Feature, type HumanTask } from './types.ts';
+import { act, PAST, type Action } from './actions.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const USAGE = `usage: ${NAME} <command>
@@ -14,6 +15,7 @@ const USAGE = `usage: ${NAME} <command>
   run [--watch] [--once] [--max-features N]
   status                          features and open human tasks
   done <human-task-id>            mark a human task done
+  pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
   doctor                          validate state files and tools
   dash [--root DIR] [--port 7420] dashboard on 127.0.0.1
   hook                            (internal) Claude Code hook: stdin payload → activity.jsonl`;
@@ -88,7 +90,7 @@ function doctor(): number {
   try { config = loadConfig(root); } catch (e) { problems.push(errMsg(e)); }
   try { features = (readJson(P.features, null) as { features?: Loose[] } | null)?.features ?? (problems.push(`${P.features}: missing or no "features" array`), []); } catch (e) { problems.push(errMsg(e)); }
   try { tasks = (readJson(P.human, null) as { tasks?: Loose[] } | null)?.tasks ?? (problems.push(`${P.human}: missing or no "tasks" array`), []); } catch (e) { problems.push(errMsg(e)); }
-  const STATUS = ['todo', 'building', 'testing', 'evaluating', 'ready', 'merged', 'stuck'];
+  const STATUS: string[] = STATUSES;
   const SURF = ['web', 'api', 'ios', 'android', 'desktop', 'any'];
   const str = (x: unknown): x is string => typeof x === 'string' && x.trim() !== '';
   const strs = (x: unknown): x is string[] => Array.isArray(x) && x.every(str);
@@ -154,6 +156,13 @@ try {
     case 'init': init(o.test); break;
     case 'status': status(); break;
     case 'done': await done(positionals[0]); break;
+    case 'pause': case 'resume': case 'retry': {
+      if (!positionals.length) throw new Error(`usage: ${NAME} ${argv[0]} <feature-id>...`);
+      const r = await act(needRoot(), argv[0] as Action, positionals);
+      for (const [id, err] of Object.entries(r)) console.log(err ? `✗ ${id}: ${err}` : `${PAST[argv[0] as Action]} ${id}`);
+      if (Object.values(r).some(Boolean)) process.exitCode = 1;
+      break;
+    }
     case 'doctor': process.exitCode = doctor(); break;
     case 'hook': await hook(); process.exit(0); break;
     case 'run': {

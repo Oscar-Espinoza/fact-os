@@ -57,7 +57,9 @@ Feature {
   priority: number                // lower = sooner
   branch?: string                 // existing branch to continue/evaluate instead of starting fresh
   group?: string                  // conflict group: never in flight together with another feature of the same group
-  status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"
+  status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"|"paused"
+  issue?: number                  // GitHub issue number (dashboard shows #n, linked when the origin remote is GitHub)
+  pausedAt?: ISO string           // set while paused; only a person pauses (CLI or dashboard), never the foreman
   onMock?: boolean                // built while a human task it needs is open
   attempts: number, refreshes?: number /* base refreshes after merge conflicts */, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
   sha?: string                    // evaluated commit, recorded when the feature becomes ready or merged
@@ -68,7 +70,8 @@ Feature {
 `.fact-os/human.json` — `{ "tasks": [HumanTask] }`
 ```
 HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
-            mockable: boolean, status: "open"|"done", doneAt? }
+            mockable: boolean, status: "open"|"done", doneAt?, startedAt?, checked?: number[],
+            waitingOn?: string /* who the person waits on; status stays open */, waitingSince?: ISO string }
 ```
 `.fact-os/log.jsonl` — one JSON line per event (`{ts, feature, event, detail}`).
 `.fact-os/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
@@ -155,12 +158,12 @@ Each tick:
      `base` that reach a feature branch through a base refresh (they are reachable from the recorded base). Other
      `base` moves are logged and re-recorded.
 4. Stop conditions: nothing in flight and nothing ready → if `--watch` and some feature is
-   waiting-on-human, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s), and
+   waiting-on-human or `paused`, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s), and
    while some feature is `parked`, re-check every poll;
    otherwise exit printing a summary. Also stop launching when `budgetUsdTotal` is reached, or on
    SIGINT/SIGTERM (SIGTERM to each child's process group; in-flight features back to `todo` without
    spending an attempt; a second signal SIGKILLs the groups and exits at once).
-   Exit code 0 when all features are `merged`/`ready`, 2 when stopped with stuck or waiting features.
+   Exit code 0 when all features are `merged`/`ready`, 2 when stopped with stuck, waiting or paused features.
 
 The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can substitute a fake.
 
@@ -171,6 +174,12 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   `.fact-os/*.jsonl` and `.fact-os/.lock` to `.git/info/exclude`. Idempotent; never overwrites.
 - `fact-os status` — table of features and open human tasks.
 - `fact-os done <human-task-id>` — marks a human task done.
+- `fact-os pause|resume|retry <feature-id>...` — `pause`: `todo`/`stuck` → `paused` (in-flight features
+  belong to the foreman and are refused). `resume`: `paused` → `todo`, with `attempts` reset to 0 when
+  they had reached `maxAttempts`. `retry`: `stuck` → `todo` with `attempts` and `refreshes` reset;
+  `lastFeedback` is kept so the next build sees it. Each applied action is logged (`paused`,
+  `resumed`, `retrying`). A paused feature is never ready, so its dependents wait too; `run --watch`
+  keeps waiting while any feature is paused. Exit 1 if any id was refused.
 - `fact-os doctor` — validates the files (schema, unknown deps, cycles, duplicate ids) and that
   `claude`, `git` and the test command's first word resolve.
 - `fact-os hook` — reads a Claude Code hook JSON payload on stdin; finds the project via
@@ -178,16 +187,38 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   id comes from `FACTOS_FEATURE` env. Must never exit non-zero or print to stdout (hooks must not
   break the session).
 - `fact-os dash [--root DIR] [--port 7420]` — HTTP server on 127.0.0.1 only. Discovers every
-  `*/.fact-os/features.json` up to depth 3 under `--root` (default: cwd). One HTML page (inline
-  CSS/JS, light and dark) with two views:
-  - **Agents**: per project, features grouped by status, onMock badges, last 20 activity lines;
-    refreshes every 2s via `GET /api/state`.
+  `*/.fact-os/features.json` up to depth 3 under `--root` (default: cwd). The page is `lib/dash.html`
+  (inline CSS/JS, no dependencies, light and dark, phone width), polling `GET /api/state` every 2s,
+  one project at a time (picker in the header) with four views:
+  - **Factory**: intake (ready queue, blocked/waiting/paused counts) → build bays (one per
+    `maxParallel`; pixel-art worker building a house as the build progresses; idle bays as empty lots)
+    → test bench → inspection (evaluator) → dock (merged/ready), a stuck list with Retry, and a live
+    feed of `log.jsonl` events and hook activity.
+  - **Board**: every feature grouped by epic (`group`, `groupBy`, or the id up to its first `-`), fixed
+    height rows, status filters and search; a row opens a side panel with progress, actions
+    (pause/resume/retry), feedback, description, acceptance, deps, dependents, human tasks, details
+    and the feature's timeline (`GET /api/feature?project=&id=`).
+  - **Project**: `<state dir>/project-view.html` if present, in an iframe with `sandbox="allow-scripts"`
+    and served with `Content-Security-Policy: sandbox allow-scripts` (opaque origin: it cannot call
+    the API). The dashboard posts `{type: "fact-os-state", project, features: [{id, title, status,
+    group}]}` to it on every change. Otherwise an empty state explaining how to add one.
   - **Only you**: every open human task across projects, sorted by number of features it unblocks
-    (transitively), with steps and buttons "I did my part" (`POST /api/human/done`) and
-    "Mark done" on `ready` features in manual-merge projects (`POST /api/feature/merged`).
-  POST bodies are JSON `{project, id}`; `project` must be one of the discovered paths (no arbitrary
-  paths). Requests with an `Origin` header other than the dash's own origin, or an unexpected `Host`
-  header (DNS rebinding), are rejected.
+    (transitively), with steps and "I did my part" (`POST /api/human/done`), plus "Mark merged" on
+    `ready` features in manual-merge projects (`POST /api/feature/merged`).
+  Progress is an estimate: building is 0–60%, testing 60–80%, evaluating 80–100%; within a stage it
+  moves with elapsed time against the median duration of that stage (build/eval from the last 200
+  `runs/*/*-{build,eval}.json` `duration_ms`, test from `testing` → `evaluating` log pairs; 12/5/4 min
+  until there is history), capped below the next stage. A stage started at its log event (`launch`,
+  `testing`, `evaluating`) after the feature's last launch, else at `updatedAt`.
+  `/api/state` projects also carry `repoUrl?` (`https://github.com/<owner>/<repo>` from `.git/config`'s origin) and
+  `stats {mergedAt: ISO[] /* merged events, last 48h */, costToday, costYesterday}` (`total_cost_usd` of
+  `runs/*/*.json` by mtime, local day). `GET /api/feature` returns `{log, activity, runs}`; `runs` are the last 20
+  `{n, role: build|eval, at, ms, cost, turns, model, pass?, findings?, summary}` from `runs/<id>/`.
+  `POST /api/human/wait {project, id, who}` (who: 1-200 chars, else 400; 409 if done) sets `waitingOn`/`waitingSince`;
+  `/api/human/unwait` clears them; `reopen` and `done` clear them too.
+  POST bodies are JSON `{project, id}` (`/api/feature/{pause,resume,retry}` too); `project` must be one
+  of the discovered paths (no arbitrary paths). Requests with an `Origin` header other than the dash's
+  own origin, or an unexpected `Host` header (DNS rebinding), are rejected.
 
 ## Skills copied by init
 
