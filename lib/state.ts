@@ -135,12 +135,12 @@ export const DEFAULT_CONTROL: Control = { paused: false, maxParallel: null };
 // foreman keeps its last good control, or holds all new work when it has none). `text` is the raw content, to report it once.
 export type ControlRead = { ok: true; control: Control; missing: boolean } | { ok: false; error: string; text: string };
 export function readControlFile(root: string): ControlRead {
-  const file = paths(root).control;
+  const P = paths(root), name = `${P.name}/control.json`; // short name in messages: they are shown in the dashboard
   let text: string;
-  try { text = readFileSync(file, 'utf8'); } catch (e) {
-    return errCode(e) === 'ENOENT' ? { ok: true, control: { ...DEFAULT_CONTROL }, missing: true } : { ok: false, error: `${file}: ${errMsg(e)}`, text: '' };
+  try { text = readFileSync(P.control, 'utf8'); } catch (e) {
+    return errCode(e) === 'ENOENT' ? { ok: true, control: { ...DEFAULT_CONTROL }, missing: true } : { ok: false, error: `${name}: ${errCode(e) || errMsg(e)}`, text: '' };
   }
-  const bad = (why: string): ControlRead => ({ ok: false, error: `${file}: ${why}`, text });
+  const bad = (why: string): ControlRead => ({ ok: false, error: `${name}: ${why}`, text });
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e) { return bad(`not JSON (${errMsg(e)})`); }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return bad('not a JSON object');
