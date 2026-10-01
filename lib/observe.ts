@@ -340,15 +340,18 @@ async function improvePass(root: string, config: Config, cfg: ObserverConfig, st
   const since = Date.now() - DAY, recent = state.diagnoses.filter((d) => Date.parse(d.ts) >= since);
   const bounces = state.bounces.filter((b) => Date.parse(b.ts) >= since), alerts = state.alerts.filter((a) => Date.parse(a.ts) >= since);
   const recurring = recurringTests(state.diagnoses, since, cfg.recurring);
-  if (!bounces.length && !alerts.length && !recurring.length && !recent.some((d) => d.cause !== 'own')) return; // nothing systemic to fix
+  if (!bounces.length && !alerts.length && !recurring.length && !recent.some((d) => d.cause !== 'own' && features.some((f) => f.id === d.feature && f.status !== 'merged'))) return; // nothing systemic to fix
   state.improveAt = now();
-  const causes = Object.entries(recent.reduce<Record<string, number>>((m, d) => ((m[d.cause] = (m[d.cause] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
-  const examples = recent.filter((d) => d.cause !== 'own').slice(-8).map((d) => `- ${d.ts} ${d.feature}: ${d.cause} (${d.evidence})`);
+  // Failures of features that have merged since are history; count and show only what is still open.
+  const status = new Map(features.map((f) => [f.id, f.status])), live = recent.filter((d) => status.get(d.feature) !== 'merged');
+  const causes = Object.entries(live.reduce<Record<string, number>>((m, d) => ((m[d.cause] = (m[d.cause] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
+  const examples = live.filter((d) => d.cause !== 'own').slice(-8).map((d) => `- ${d.ts} ${d.feature} (now ${status.get(d.feature) ?? 'gone'}): ${d.cause} (${d.evidence})`);
   const prompt = [`You improve the ${NAME} software factory that builds this repository: many builders work on features in parallel`,
     'worktrees, each feature passes a test gate and an independent evaluator, then merges into ' + config.base + '. Below is what',
     'the observer saw in the last 24 hours. Find the causes that waste the most work across features and decide what would remove',
     'them. Read the repository as needed. Do not modify anything: your answer is a plan that others carry out.', '',
-    `Failures by cause: ${causes.map(([c, n]) => `${c} ${n}`).join(', ') || 'none'}.`,
+    `Failures by cause, features not merged yet: ${causes.map(([c, n]) => `${c} ${n}`).join(', ') || 'none'}. Features that merged since are resolved;`,
+    'never propose acting on them.',
     `Finished features sent back by merge conflicts: ${bounces.length}.`, ...hotFiles(bounces).slice(0, 8).map(([f, n]) => `- ${f}: ${n}`),
     recurring.length ? 'Tests failing in several features that do not change them:' : '', ...recurring.slice(0, 8).map(([t, fs]) => `- ${t}: ${fs.join(', ')}`),
     alerts.length ? 'Alerts:' : '', ...alerts.map((a) => `- ${a.text}`),
