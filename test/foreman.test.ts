@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTag, promptFingerprint } from '../lib/foreman.ts';
+import { runTag, promptFingerprint, evaluatorDiff } from '../lib/foreman.ts';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -141,4 +141,25 @@ test('promptFingerprint names the role, model and effort, and hashes lessons and
   assert.match(a, /^builder model=opus effort=medium lessons=[0-9a-f]{8} briefs=[0-9a-f]{8}$/);
   assert.notEqual(a, promptFingerprint('builder', { model: 'opus', effort: 'medium' }, 'lessons v2', 'brief'));
   assert.equal(promptFingerprint('evaluator', {}, null, ''), 'evaluator model=- effort=- lessons=- briefs=-');
+});
+
+test('a blocking problem fails the feature even when every acceptance check is ok, and reaches the next build', () => {
+  const v = parseVerdict(verdict({ blocking: ['F07-09: a paid manual order cancels with only orders.fulfill (cancel.ts:182)'], notes: ['naming'] }));
+  assert.equal(v.pass, false);
+  assert.deepEqual(v.notes, ['naming']);
+  assert.match(v.error!, /contradicted/);
+  assert.match(feedbackFromVerdict(v), /^BLOCKING: F07-09: a paid manual order/m);
+  assert.equal(parseVerdict(verdict({ notes: ['minor'] })).pass, true, 'notes alone do not block');
+  assert.deepEqual(parseVerdict(verdict()).blocking, [], 'older verdicts without the field still parse');
+});
+
+test('evaluatorDiff keeps whole files in order while they fit and names what it leaves out', () => {
+  const files = [{ path: 'apps/api/routes.ts', diff: 'A'.repeat(60) }, { path: 'packages/c/generated/x.json', diff: '' },
+    { path: 'migrations/0001.sql', diff: 'B'.repeat(60) }, { path: 'packages/z.ts', diff: 'C'.repeat(30) }];
+  const out = evaluatorDiff(' 4 files changed', files, ['packages/c/generated/x.json'], 100);
+  assert.match(out, /^Files changed \(git diff --stat\):\n 4 files changed/);
+  assert.match(out, /Generated or excluded files, not shown[^\n]*\n- packages\/c\/generated\/x\.json/);
+  assert.match(out, /NOT SHOWN because the diff is too long[^\n]*\n- migrations\/0001\.sql/);
+  assert.ok(out.includes('A'.repeat(60)) && out.includes('C'.repeat(30)) && !out.includes('B'.repeat(60)));
+  assert.doesNotMatch(evaluatorDiff('s', [{ path: 'a', diff: 'x' }], []), /NOT SHOWN|excluded/);
 });
