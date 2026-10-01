@@ -27,7 +27,8 @@ if (has('hang')) { // never answers; leaves a grandchild in its process group
   setInterval(() => {}, 1000);
   await new Promise(() => {});
 }
-await new Promise((r) => setTimeout(r, Number(process.env.FAKE_DELAY_MS ?? 400)));
+// "slow" (any mode): five times the delay, so one feature can outlast another
+await new Promise((r) => setTimeout(r, Number(process.env.FAKE_DELAY_MS ?? 400) * (flags.includes('slow') ? 5 : 1)));
 let result = 'done', extra: Record<string, unknown> = {};
 const conflicted = () => git('diff', '--name-only', '--diff-filter=U').split('\n').filter(Boolean);
 if (mode === 'resolve') {

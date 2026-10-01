@@ -4,7 +4,7 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, effectiveLimit, MAX_LANES, NAME } from './state.ts';
+import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
 import { STATUSES, IN_FLIGHT, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
@@ -122,6 +122,8 @@ function doctor(): number {
   if (cl != null && (typeof cl !== 'object' || !strs(cl.hot ?? []) || typeof (cl.minScore ?? 0) !== 'number' || typeof (cl.days ?? 0) !== 'number'))
     problems.push('config.claims must be null or {hot: string[], minScore: number, days: number}');
   if (config.resolver != null && typeof config.resolver !== 'object') problems.push('config.resolver must be null or {model, effort, permissionMode}');
+  const cr = readControlFile(root);
+  if (!cr.ok) problems.push(`${cr.error} (the foreman keeps its last good control, or holds all new work; fix it, or rewrite it with pause-all, resume-all or lanes)`);
   if (!problems.length) problems.push(...validate(features as unknown as Feature[], tasks as unknown as HumanTask[])); // shapes checked above
   const claude = envVar('CLAUDE') || 'claude';
   for (const [what, cmd] of [['claude', claude], ['git', 'git'], ['test command', String(config.test || '').trim().split(/\s+/)[0]]])
@@ -143,13 +145,17 @@ async function control(cmd: string, args: string[]): Promise<void> {
     if (args.length) throw new Error(`usage: ${NAME} ${cmd}`);
     patch = { paused: cmd === 'pause-all' };
   }
-  const c = await writeControl(root, patch, 'cli'), config = loadConfig(root), def = Math.max(1, config.maxParallel);
+  const config = loadConfig(root), def = Math.max(1, config.maxParallel), before = readControlFile(root);
+  const c = await writeControl(root, patch, 'cli');
+  if (!before.ok) console.log(`note: ${before.error}; rewritten (the other setting is back to its default)`);
   const running = load(root).features.filter((f) => IN_FLIGHT.includes(f.status)).length, limit = effectiveLimit(c, config);
   const state = c.paused ? 'paused: no new features start' : limit === 0 ? 'lanes 0: no new features start' : `up to ${limit} in flight`;
   const lanes = c.maxParallel == null ? `${def} (default)` : `${c.maxParallel} (default ${def})`;
   const note = !running ? 'nothing running' : limit === 0 ? `${running} still running will finish`
     : running > limit ? `${running} running will finish; no new ones start until fewer than ${limit} are running` : `${running} running`;
-  console.log(`${state}; lanes ${lanes}; ${note}`);
+  let foreman = false;
+  try { foreman = pidAlive(parseInt(readFileSync(paths(root).foreman, 'utf8'), 10)); } catch {} // no .foreman: none running
+  console.log(`${state}; lanes ${lanes}; ${note}${foreman ? '' : ' (no foreman running; applies when one starts)'}`);
 }
 
 // Claude Code hook: never prints, never fails.

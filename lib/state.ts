@@ -128,12 +128,27 @@ export function load(root: string): { config: Config; features: Feature[]; tasks
 export const MAX_LANES = 32;
 export const validLanes = (x: unknown): x is number | null => x === null || (Number.isInteger(x) && (x as number) >= 0 && (x as number) <= MAX_LANES);
 
-// The control file, normalized: a missing, unreadable or invalid file (or field) means "not paused, config's lanes".
-export function readControl(root: string): Control {
-  let raw: Record<string, unknown> = {};
-  try { const j = JSON.parse(readFileSync(paths(root).control, 'utf8')); if (j && typeof j === 'object') raw = j; } catch {}
-  return { paused: raw.paused === true, maxParallel: validLanes(raw.maxParallel) ? raw.maxParallel : null,
-    ...(typeof raw.updatedAt === 'string' ? { updatedAt: raw.updatedAt } : {}), ...(raw.by === 'dashboard' || raw.by === 'cli' ? { by: raw.by } : {}) };
+export const DEFAULT_CONTROL: Control = { paused: false, maxParallel: null };
+
+// The control file as found: a missing file means the defaults ("not paused, config's lanes"); a file that exists but is not
+// JSON, not an object, or has a wrong `paused`/`maxParallel` is invalid, and callers must not read it as the defaults (the
+// foreman keeps its last good control, or holds all new work when it has none). `text` is the raw content, to report it once.
+export type ControlRead = { ok: true; control: Control; missing: boolean } | { ok: false; error: string; text: string };
+export function readControlFile(root: string): ControlRead {
+  const file = paths(root).control;
+  let text: string;
+  try { text = readFileSync(file, 'utf8'); } catch (e) {
+    return errCode(e) === 'ENOENT' ? { ok: true, control: { ...DEFAULT_CONTROL }, missing: true } : { ok: false, error: `${file}: ${errMsg(e)}`, text: '' };
+  }
+  const bad = (why: string): ControlRead => ({ ok: false, error: `${file}: ${why}`, text });
+  let raw: unknown;
+  try { raw = JSON.parse(text); } catch (e) { return bad(`not JSON (${errMsg(e)})`); }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return bad('not a JSON object');
+  const r = raw as Record<string, unknown>;
+  if (r.paused !== undefined && typeof r.paused !== 'boolean') return bad(`"paused" must be true or false (is ${JSON.stringify(r.paused)})`);
+  if (r.maxParallel !== undefined && !validLanes(r.maxParallel)) return bad(`"maxParallel" must be an integer from 0 to ${MAX_LANES} or null (is ${JSON.stringify(r.maxParallel)})`);
+  return { ok: true, missing: false, control: { paused: r.paused === true, maxParallel: (r.maxParallel ?? null) as number | null,
+    ...(typeof r.updatedAt === 'string' ? { updatedAt: r.updatedAt } : {}), ...(r.by === 'dashboard' || r.by === 'cli' ? { by: r.by } : {}) } };
 }
 
 // Changes control.json under the state lock (atomic write); throws on an invalid maxParallel. Returns what was written.
@@ -141,7 +156,7 @@ export async function writeControl(root: string, patch: Partial<Pick<Control, 'p
   if ('maxParallel' in patch && !validLanes(patch.maxParallel)) throw new Error(`lanes must be an integer from 0 to ${MAX_LANES}, or null for the config default`);
   if ('paused' in patch && typeof patch.paused !== 'boolean') throw new Error('paused must be a boolean');
   return withLock(root, () => {
-    const cur = readControl(root);
+    const r = readControlFile(root), cur = r.ok ? r.control : DEFAULT_CONTROL; // writing repairs an invalid file
     const next: Control = { paused: patch.paused ?? cur.paused, maxParallel: 'maxParallel' in patch ? patch.maxParallel! : cur.maxParallel, updatedAt: new Date().toISOString(), by };
     writeJsonAtomic(paths(root).control, next);
     return next;

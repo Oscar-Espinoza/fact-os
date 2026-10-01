@@ -315,6 +315,14 @@ test('control routes: pause, resume and lanes write control.json; state carries 
     assert.deepEqual((await get()).control, { ...JSON.parse(readFileSync(file, 'utf8')), effective: 5, configMax: 3 });
     assert.equal((await ask('lanes', { maxParallel: null })).status, 200);
     assert.deepEqual([(await get()).control!.maxParallel, (await get()).control!.effective], [null, 3]);
+    // an invalid file is surfaced, never shown as the defaults; any control action rewrites it
+    writeFileSync(file, '{"paused":"true"}');
+    p = await get();
+    assert.match(p.control!.invalid!, /control\.json: "paused" must be true or false/);
+    assert.equal(p.control!.effective, null);
+    assert.equal((await ask('pause')).status, 200);
+    p = await get();
+    assert.deepEqual([p.control!.invalid, p.control!.paused, p.control!.effective], [undefined, true, 0]);
   } finally {
     writeFileSync(feats, saved);
     rmSync(file, { force: true });
