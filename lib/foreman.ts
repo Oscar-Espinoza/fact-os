@@ -142,14 +142,16 @@ export function promptFingerprint(role: Role, r: { model?: string; effort?: stri
 // `testing <sha>` of the same pass), or null. The next pass can skip the builder if the branch is still exactly there.
 const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked'];
 export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'detail'>[], id: string): string | null {
-  let sha: string | null = null, last = '';
+  let sha: string | null = null, last = '', before: { sha: string | null; last: string } | null = null;
   for (const e of events) {
     if (e.feature !== id || e.event === 'prompt' || e.event === 'lesson') continue;
+    if (e.event === 'launch') before = { sha, last }; // the pass now starting is judged by the one before it
     last = e.event;
     if (e.event === 'launch' || ENDS_PASS.includes(e.event)) sha = null;
     else if (e.event === 'testing') sha = e.detail || null;
   }
-  return last === 'interrupted' ? sha : null;
+  const end = last === 'launch' && before ? before : { sha, last };
+  return end.last === 'interrupted' ? end.sha : null;
 }
 
 // ---- prompts ----
@@ -484,7 +486,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     const built = builtWhenStopped(readLogEvents(P.log), id);
     const skipBuild = !!built && git(['rev-parse', branch], wt).out === built && !git(['status', '--porcelain'], wt).out &&
       git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code !== 0;
-    if (skipBuild) log(root, id, 'resumed', `skipping the build: the foreman stopped after it built ${built!.slice(0, 12)}`);
+    if (skipBuild) log(root, id, 'build-skipped', ` the foreman stopped after it built ${built!.slice(0, 12)}`);
     else {
     const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld);
     recordPrompt('builder', bp);

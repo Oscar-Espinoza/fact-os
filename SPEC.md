@@ -136,7 +136,7 @@ Each tick:
      (at `maxRefreshes`, the merge is aborted and the feature is `stuck`). So the test always runs on "current base + this feature".
    - **Resume.** If the feature's previous pass ended with `interrupted` after its `testing <sha>` event (the foreman was
      stopped once the build was done) and the branch is still exactly at that sha with a clean worktree and no merge in
-     progress, the builder is skipped (`resumed` event) and the pass goes on to the refresh and the test.
+     progress, the builder is skipped (`build-skipped` event) and the pass goes on to the refresh and the test.
    - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++.
    - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the acceptance list as read at launch, the
      test output and the diff `base...<sha>` (`--text --no-ext-diff --no-textconv`), built as: `git diff --stat`; files

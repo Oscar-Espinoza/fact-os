@@ -170,6 +170,7 @@ test('builtWhenStopped: the sha a pass had built when the foreman stopped, only 
   assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'evaluating'), ev('a', 'lesson', 'x'), ev('a', 'interrupted')], 'a'), 'abc');
   assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'interrupted')], 'a'), null, 'stopped while building');
   assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'failed', 'x'), ev('a', 'launch'), ev('a', 'interrupted')], 'a'), null);
-  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'interrupted'), ev('a', 'launch')], 'a'), null, 'already relaunched');
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'interrupted'), ev('a', 'launch')], 'a'), 'abc', 'read by the new pass after its launch');
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'interrupted'), ev('a', 'launch'), ev('a', 'interrupted'), ev('a', 'launch')], 'a'), null, 'stopped again while building');
   assert.equal(builtWhenStopped([ev('b', 'launch'), ev('b', 'testing', 'abc'), ev('b', 'interrupted')], 'a'), null);
 });
