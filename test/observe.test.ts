@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFile
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failingTests, resolveTests, classify, signature, recurringTests, testOnly, parseAgentReport, readNew, observeOnce, observerPaths } from '../lib/observe.ts';
+import { failingTests, resolveTests, classify, signature, recurringTests, testOnly, parseAgentReport, readNew, observeOnce, observerPaths, lessonSection, parseCurated, bulletsOf } from '../lib/observe.ts';
 import type { Diagnosis, Feature } from '../lib/types.ts';
 
 const VITEST = `test command \`gate.sh\` exited 1:
@@ -163,4 +163,76 @@ test('observeOnce alerts when the foreman is not running and features are left',
     const again = await observeOnce(root, { out: () => {} });
     assert.equal(again.alerts.length, 1, 'the same alert is not repeated within the hour');
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('lessonSection splits a lessons file around its section, old heading included', () => {
+  const s = lessonSection('# Notes\n\nkeep\n\n## Shipyard lessons\n\n- 2026-01-01: a\n- b\n\n## Other\n\nx\n')!;
+  assert.equal(s.heading, '## Shipyard lessons');
+  assert.deepEqual(bulletsOf(s.body), ['- 2026-01-01: a', '- b']);
+  assert.match(s.before, /keep/);
+  assert.match(s.after, /^## Other/);
+  assert.equal(lessonSection('no lessons here'), null);
+});
+
+test('parseCurated takes bullets and ### topics within the size limit, and refuses anything else', () => {
+  const five = Array.from({ length: 5 }, (_, i) => `- rule ${i}`).join('\n');
+  assert.deepEqual(parseCurated(`Sure.\n<lessons>\n### Tests\n${five}\n</lessons>`, 1000), { body: `### Tests\n${five}` });
+  assert.match((parseCurated('no tags', 1000) as { error: string }).error, /no <lessons>/);
+  assert.match((parseCurated('<lessons>- a\n- b</lessons>', 1000) as { error: string }).error, /only 2 bullets/);
+  assert.match((parseCurated(`<lessons>${five}</lessons>`, 20) as { error: string }).error, /over the limit/);
+  assert.match((parseCurated(`<lessons>Here you go:\n${five}</lessons>`, 1000) as { error: string }).error, /other than bullets/);
+});
+
+test('observeOnce curates an oversized lessons section with the agent, archives the original and keeps new lessons', async () => {
+  const root = repo(), fake = join(root, 'fake-claude.sh');
+  const prev = process.env.FACTOS_CLAUDE;
+  try {
+    const old = Array.from({ length: 40 }, (_, i) => `- 2026-09-2${i % 9}: lesson number ${i} about testing things carefully`).join('\n');
+    writeFileSync(join(root, '.fact-os/lessons.md'), `## fact-os lessons\n\n${old}\n`);
+    writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh', lessonsFile: '.fact-os/lessons.md',
+      observer: { agent: { model: 'x' }, lessonsMaxBytes: 500 } }));
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [F('F1', { status: 'merged' })] }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), '');
+    const curated = '### Testing\\n' + Array.from({ length: 6 }, (_, i) => `- Rule ${i}.`).join('\\n');
+    writeFileSync(fake, `#!/bin/sh\ncat >/dev/null\nprintf '%s' '{"type":"result","is_error":false,"result":"<lessons>\\n${curated}\\n</lessons>","total_cost_usd":0.25}'\n`, { mode: 0o755 });
+    process.env.FACTOS_CLAUDE = fake;
+    const s = await observeOnce(root, { out: () => {} });
+    const text = readFileSync(join(root, '.fact-os/lessons.md'), 'utf8');
+    assert.match(text, /^## fact-os lessons\n\n<!-- Curated .* by the fact-os observer; the full history is in lessons\.archive\.md\. -->\n\n### Testing\n- Rule 0\./);
+    assert.equal(bulletsOf(lessonSection(text)!.body).length, 6);
+    assert.match(readFileSync(join(root, '.fact-os/lessons.archive.md'), 'utf8'), /## Archived .* \(40 lessons\)[\s\S]*lesson number 39/);
+    assert.ok(s.lessonsAt);
+    assert.match(readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8'), /"event":"observer-lessons","detail":"curated 40 lessons into 6/);
+
+    // Within curateEveryHours nothing runs again, even when the section grows.
+    writeFileSync(fake, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    appendFileSync(join(root, '.fact-os/lessons.md'), old + '\n');
+    await observeOnce(root, { out: () => {} });
+    assert.doesNotMatch(readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8'), /not curated/);
+  } finally {
+    if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('observeOnce leaves the lessons alone when the agent answers with something unusable', async () => {
+  const root = repo(), fake = join(root, 'fake-claude.sh');
+  const prev = process.env.FACTOS_CLAUDE;
+  try {
+    const old = Array.from({ length: 40 }, (_, i) => `- lesson ${i} with enough words to pass the size limit`).join('\n');
+    writeFileSync(join(root, '.fact-os/lessons.md'), `## fact-os lessons\n\n${old}\n`);
+    writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh', lessonsFile: '.fact-os/lessons.md',
+      observer: { agent: { model: 'x' }, lessonsMaxBytes: 500 } }));
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [F('F1', { status: 'merged' })] }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), '');
+    writeFileSync(fake, `#!/bin/sh\ncat >/dev/null\nprintf '%s' '{"type":"result","is_error":false,"result":"I could not do it.","total_cost_usd":0.1}'\n`, { mode: 0o755 });
+    process.env.FACTOS_CLAUDE = fake;
+    await observeOnce(root, { out: () => {} });
+    assert.equal(readFileSync(join(root, '.fact-os/lessons.md'), 'utf8'), `## fact-os lessons\n\n${old}\n`);
+    assert.ok(!existsSync(join(root, '.fact-os/lessons.archive.md')));
+    assert.match(readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8'), /not curated: no <lessons> block/);
+  } finally {
+    if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

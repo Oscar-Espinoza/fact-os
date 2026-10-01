@@ -43,6 +43,8 @@ export interface ObserverConfig {
   agent: RoleConfig | null;           // null = no agent pass
   agentEveryMin: number;
   featureId: string;                  // id the agent's worktree runs `prepare` as
+  lessonsMaxBytes: number;            // the agent curates the lessons section once it grows past this
+  curateEveryHours: number;           // at most this often
 }
 
 // What the observer decided about one stuck feature.

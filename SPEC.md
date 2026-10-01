@@ -252,14 +252,22 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    base (`--no-ff`, `fact-os: observer fix: …`, logged `observer-fix`) only when every changed file is a test,
    helper or fixture and the main checkout is on base and clean; otherwise a human task asks for a review.
    Proposals become open human tasks with ids `observer-<time>-<n>` (deduplicated by title).
-6. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
+6. **Curates the lessons** (with an agent, at most every `curateEveryHours`): when the lessons section of
+   `lessonsFile` grows past `lessonsMaxBytes` (12000), `claude -p` rewrites it into at most that many bytes of bullets
+   under 3–8 `### topic` headings, favoring lessons that prevent the recent failure causes. The answer must sit between
+   `<lessons>` tags, hold at least 5 bullets, only bullets and topics, and stay within 1.25× the limit; otherwise the
+   file is left alone (`observer-lessons` "not curated"). On success the old section is appended to
+   `<lessonsFile>.archive.md`, the section is replaced (with a note pointing at the archive), lessons the foreman
+   appended meanwhile are kept after it, and a tracked file is committed on base (`fact-os: curate lessons`; skipped
+   when the checkout is not on base or the file has uncommitted changes).
+7. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
    person (alerts, stuck features with their cause, open proposals), the last 24h (failures by cause, tests failing
    in several features, retries, fixes) and the last 15 decisions. Times are local.
 
 `--watch` repeats every `observer.pollSec` (60). `--as <id>` sets `featureId` (for projects whose `prepare` needs a
 particular id). Config (`observer` in `config.json`, all optional): `pollSec`, `retry` (true), `maxRetries` (1),
 `infraPatterns` ([]), `recurring` (2), `agent` (null or `{model, effort, permissionMode}`), `agentEveryMin` (120),
-`featureId` ("observer"). The foreman ignores the key, but editing `config.json` during a run still halts it.
+`featureId` ("observer"), `lessonsMaxBytes` (12000), `curateEveryHours` (24). The foreman ignores the key, but editing `config.json` during a run still halts it.
 
 ## Skills copied by init
 

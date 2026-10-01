@@ -2,17 +2,18 @@
 // the ones stuck for a reason outside the feature (a failing test the feature does not change, an infrastructure
 // error) with a note for the next build, re-parks features whose merge never started, and writes a report.
 // With an agent it also runs a fresh Claude session on tests that keep failing across features: a fix that only
-// touches test files is merged into base; anything else it would change becomes a human task. The observer itself
-// never edits config, gates or product code.
-import { existsSync, readFileSync, writeFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
+// touches test files is merged into base; anything else it would change becomes a human task. It also keeps the
+// lessons builders read short: once their section grows past a limit, the agent rewrites it into a curated set and
+// the full text goes to an archive. The observer itself never edits config, gates or product code.
+import { existsSync, readFileSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
-import { git, exec, claudeArgs, parseClaudeOutput } from './foreman.ts';
+import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
 
 export const DEFAULT_OBSERVER: ObserverConfig = { pollSec: 60, retry: true, maxRetries: 1, infraPatterns: [], recurring: 2,
-  agent: null, agentEveryMin: 120, featureId: 'observer' };
+  agent: null, agentEveryMin: 120, featureId: 'observer', lessonsMaxBytes: 12000, curateEveryHours: 24 };
 export const DEFAULT_AGENT: RoleConfig = { model: 'opus', effort: 'high' };
 const INFRA = ['out of shared memory', 'no space left on device', 'enospc', 'too many clients', 'econnrefused',
   'connection terminated unexpectedly', 'terminating connection due to administrator command',
@@ -97,6 +98,28 @@ export function parseAgentReport(text: string): { fixed: { test: string; summary
   };
 }
 
+// The lessons section of a lessons file: from its heading to the next level-1/2 heading (as appendLesson writes it).
+export function lessonSection(text: string): { before: string; heading: string; body: string; after: string } | null {
+  const lines = text.split('\n'), h = lines.findIndex((l) => [HEADING, ...OLD_HEADINGS].includes(l.trim()));
+  if (h < 0) return null;
+  let end = lines.findIndex((l, i) => i > h && /^#{1,2} /.test(l));
+  if (end < 0) end = lines.length;
+  return { before: lines.slice(0, h).join('\n'), heading: lines[h]!, body: lines.slice(h + 1, end).join('\n'), after: lines.slice(end).join('\n') };
+}
+export const bulletsOf = (body: string): string[] => body.split('\n').filter((l) => /^- /.test(l));
+
+// The agent's curated lessons, or why they are refused: between <lessons> tags, bullets (### topics allowed), within
+// 1.25× the size limit, and at least 5 bullets.
+export function parseCurated(text: string, maxBytes: number): { body: string } | { error: string } {
+  const m = text.match(/<lessons>\s*([\s\S]*?)\s*<\/lessons>/);
+  if (!m) return { error: 'no <lessons> block' };
+  const body = m[1]!.trim(), n = bulletsOf(body).length;
+  if (n < 5) return { error: `only ${n} bullets` };
+  if (Buffer.byteLength(body) > maxBytes * 1.25) return { error: `${Buffer.byteLength(body)} bytes, over the limit` };
+  if (body.split('\n').some((l) => l.trim() && !/^(- |  |### )/.test(l))) return { error: 'lines other than bullets and ### topics' };
+  return { body };
+}
+
 // ---- state ----
 
 export interface ObserverState {
@@ -108,6 +131,7 @@ export interface ObserverState {
   agentAt?: string;
   agentTargets: Record<string, string>;         // test → when the agent last looked at it
   agentNotes?: string;
+  lessonsAt?: string;                           // last curation
 }
 const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], fixes: [], agentTargets: {} });
 export const observerPaths = (root: string) => { const d = paths(root).dir; return { state: join(d, 'observer.json'), report: join(d, 'observer-report.md'), pid: join(d, '.observer') }; };
@@ -226,6 +250,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   }
 
   if (cfg.agent) await agentPass(root, config, cfg, state, out, opts.children ?? new Set());
+  if (cfg.agent) await curateLessons(root, config, cfg, state, out, opts.children ?? new Set());
 
   state.diagnoses = state.diagnoses.slice(-500);
   state.alerts = state.alerts.filter((a) => Date.now() - Date.parse(a.ts) < 7 * DAY);
@@ -316,6 +341,48 @@ async function agentPass(root: string, config: Config, cfg: ObserverConfig, stat
       log(root, null, 'observer-proposal', `${t.id}: ${t.title}`);
     }
   });
+}
+
+// ---- lessons ----
+
+async function curateLessons(root: string, config: Config, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
+  const file = resolve(root, config.lessonsFile);
+  const text = existsSync(file) ? readFileSync(file, 'utf8') : '', sec = lessonSection(text);
+  if (!sec || Buffer.byteLength(sec.body) <= cfg.lessonsMaxBytes) return;
+  if (state.lessonsAt && Date.now() - Date.parse(state.lessonsAt) < cfg.curateEveryHours * 3600e3) return;
+  const tracked = git(['ls-files', '--error-unmatch', '--', file], root).code === 0;
+  if (tracked && (git(['symbolic-ref', '--quiet', '--short', 'HEAD'], root).out !== config.base || git(['status', '--porcelain', '--', file], root).out)) return;
+  state.lessonsAt = now();
+  const since = Date.now() - 7 * DAY, recent = state.diagnoses.filter((d) => Date.parse(d.ts) >= since);
+  const causes = Object.entries(recent.reduce<Record<string, number>>((m, d) => ((m[d.cause] = (m[d.cause] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
+  const prompt = [`You curate the lessons that every builder in this repository reads before it starts a feature. They were written`,
+    'one per finished feature, so many repeat each other or only describe one feature. Rewrite them into a short set that helps',
+    'the next builder most.', '',
+    `- At most ${cfg.lessonsMaxBytes} bytes in total. Group them under 3 to 8 "### <topic>" headings.`,
+    '- Merge duplicates and near-duplicates into one general rule. Keep concrete paths, commands and names when they make a',
+    '  rule actionable. Drop lessons about one-off history or a single feature that will not come up again.',
+    '- Favor lessons that prevent the failures below. Each bullet is one or two plain sentences, starting with "- ". No dates.',
+    '- Do not use tools; answer from the text below.', '',
+    causes.length ? `Why features failed in the last 7 days: ${causes.map(([c, n]) => `${c} ${n}`).join(', ')}.` : '',
+    ...recurringTests(state.diagnoses, since, 2).slice(0, 10).map(([t, fs]) => `- ${t} failed in ${fs.length} features`), '',
+    'The lessons:', '', sec.body.trim(), '', 'Answer with the curated lessons only, between <lessons> and </lessons>.'].join('\n');
+  out(`observer: curating ${bulletsOf(sec.body).length} lessons (${Buffer.byteLength(sec.body)} bytes)`);
+  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs({ ...config, builder: cfg.agent! }, 'builder', root),
+    { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
+  const p = parseClaudeOutput(r.out), c = p.ok ? parseCurated(p.text, cfg.lessonsMaxBytes) : { error: `agent failed: ${p.error}` };
+  if ('error' in c) { log(root, null, 'observer-lessons', `not curated: ${c.error}`); out(`observer: lessons not curated: ${c.error}`); return; }
+
+  // Lessons the foreman appended while the agent worked are kept after the curated ones.
+  const nowText = readFileSync(file, 'utf8'), cur = lessonSection(nowText) ?? sec, had = new Set(bulletsOf(sec.body));
+  const added = bulletsOf(cur.body).filter((b) => !had.has(b));
+  const archive = file.replace(/(\.md)?$/, '.archive.md');
+  appendFileSync(archive, `${existsSync(archive) ? '\n' : ''}## Archived ${now().slice(0, 10)} (${bulletsOf(sec.body).length} lessons)\n\n${sec.body.trim()}\n`);
+  writeFileSync(file, [cur.before ? cur.before.replace(/\n*$/, '\n\n') : '', `${cur.heading}\n\n`, `<!-- Curated ${now().slice(0, 10)} by the ${NAME} observer; the full history is in ${archive.split('/').pop()}. -->\n\n`,
+    c.body, added.length ? `\n\n${added.join('\n')}` : '', '\n', cur.after ? `\n${cur.after.replace(/^\n*/, '')}` : ''].join(''));
+  if (tracked) { git(['add', '--', file], root); git(['commit', '-q', '-m', `${NAME}: curate lessons`, '--', file], root); }
+  const size = Buffer.byteLength(lessonSection(readFileSync(file, 'utf8'))!.body);
+  log(root, null, 'observer-lessons', `curated ${bulletsOf(sec.body).length} lessons into ${bulletsOf(c.body).length} (${size} bytes); $${p.cost.toFixed(2)}`);
+  out(`observer: curated lessons: ${bulletsOf(sec.body).length} → ${bulletsOf(c.body).length + added.length}, ${size} bytes`);
 }
 
 // ---- report ----

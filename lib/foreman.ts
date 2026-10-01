@@ -9,7 +9,7 @@ import type { ClaudeResult, Config, Feature, Finding, HumanTask, Paths, Role, St
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const IN_FLIGHT: Status[] = ['building', 'testing', 'evaluating'];
-const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
+export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
 const now = (): string => new Date().toISOString();
 const tail = (s: string, n = 4000): string => (s.length > n ? '…' + s.slice(-n) : s);
 
