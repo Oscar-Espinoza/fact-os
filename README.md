@@ -85,8 +85,11 @@ every open human task that unblocks it is `mockable` (it is then built `onMock`)
 makes it *waiting-on-human*. Ready features run by priority, then number of transitive dependents, then id.
 Features in cycles, with unknown deps or duplicate ids are reported and never run.
 
-**Evaluator verdict:** `{pass, findings: [{check, ok, evidence}], cheating: [], lesson}`. Output that is not
-such an object, `pass: true` with a failed finding, non-empty `cheating`, or no findings all count as a fail.
+**Evaluator verdict:** `{pass, findings: [{check, ok, evidence}], cheating: [], blocking: [], notes: [], lesson}`. Output that is
+not such an object, `pass: true` with a failed finding, non-empty `cheating` or `blocking`, or no findings all count as a fail.
+The evaluator must run the feature's changed test files, mutate one guard per money/auth/tenant/state check, and check
+production wiring; its diff lists any file it could not include instead of cutting silently (`evaluatorDiffExclude` lists
+generated paths by name only).
 
 ## Safety limits
 

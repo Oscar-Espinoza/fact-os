@@ -135,13 +135,21 @@ Each tick:
      a merge conflict: merge left in progress, `todo` with the conflict feedback, no attempt spent, `refreshes++`
      (at `maxRefreshes`, the merge is aborted and the feature is `stuck`). So the test always runs on "current base + this feature".
    - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++.
-   - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the diff
-     `base...<sha>` (`--text --no-ext-diff --no-textconv`), the acceptance list as read at launch and
-     the test output, and must answer with a JSON object
-     `{ "pass": boolean, "findings": [{ "check": string, "ok": boolean, "evidence": string }],
-        "cheating": string[], "lesson": string|null }`. It is told explicitly to look for
-     pass-through implementations, tests that cannot fail, skipped/deleted tests, and hard-coded
-     results. Unparseable output, no findings, or `pass: true` with a failed finding or cheating counts as a fail.
+   - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the acceptance list as read at launch, the
+     test output and the diff `base...<sha>` (`--text --no-ext-diff --no-textconv`), built as: `git diff --stat`; files
+     matching `evaluatorDiffExclude` pathspecs (generated files, fixtures) listed by name only; then whole files' diffs in
+     order while they fit in 150,000 characters, with every file that did not fit listed under "NOT SHOWN" (never a silent
+     cut). It must run each test file the feature adds or changes, check one mutation per money/permission/tenant/state
+     check in a scratch worktree, and check production wiring (no path that only works with a fake or a development
+     setting; every new state has a production writer). It answers with a JSON object
+     `{ "pass": boolean, "findings": [{ "check": string, "ok": boolean, "evidence": string }], "cheating": string[],
+        "blocking": string[], "notes": string[], "lesson": string|null }` with one finding per acceptance check plus a
+     "production wiring" finding. It is told to look for pass-through implementations, tests that cannot fail,
+     skipped/deleted tests and hard-coded results (`cheating`), and to list under `blocking` any defect in money, auth,
+     tenant isolation or state handling, fake- or dev-only paths, multi-line copies of existing helpers, unchecked
+     behaviour changes of existing exports and weakened unrelated tests, even when no acceptance check names them.
+     Unparseable output, no findings, or `pass: true` with a failed finding, cheating or a blocking entry counts as a
+     fail. `notes` never block; `lesson` is advice for future builders only.
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
      becomes `ready` with `parked: true` and a log event explains why; "clean" = no tracked changes outside `.fact-os/`),
      `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to
@@ -180,8 +188,9 @@ Each tick:
      the refresh-before-test and the test). Per conflicting file, over trimmed non-blank non-comment lines (comments: `//`,
      `/*`, `*`, `#`, `<!--`, `-- `): the tip must hold at least base + (ours − base) + (theirs − base) copies of each line
      either side added (a line with a letter or digit added by both sides: base + max of the two); a short line is
-     *changed*, not lost, when the tip has a new line of the same shape (digits as #, no trailing `,`/`;`) or ≥ 85% alike
-     (character-bigram Dice), each new line excusing one; lines listed as `dropped: <file>: <line>` in a first-parent
+     *changed*, not lost, when the tip has a new line (one neither side had) of the same shape (digits as #, no trailing
+     `,`/`;`), ≥ 85% alike (character-bigram Dice) or holding all its words (3+), each new line excusing at most one line of
+     each side; lines listed as `dropped: <file>: <line>` in a first-parent
      commit message since `ours` are excused. Lost lines → the resolver's resolution: `todo` with the lost lines as feedback
      (`resolve-failed`, no attempt spent, `conflict` kept so the builder's fix is checked); the builder's: a failed attempt
      with that feedback (`keep-check` event). A tip that no longer contains the merge clears `conflict`; with both keys
@@ -191,7 +200,7 @@ Each tick:
      and which changed lines to verify too, then the merge. A resolution therefore never reaches base without the test and
      the evaluator; repeated bounces are bounded by `maxRefreshes`. Resolver run files are `<tag>-resolve.json` with a new
      pass tag.
-   - **Fail** → attempts++, `lastFeedback` = failed findings + cheating; back to `todo`; at
+   - **Fail** → attempts++, `lastFeedback` = failed findings, cheating and blocking entries; back to `todo`; at
      `maxAttempts` → `stuck`.
    - **Compound.** A non-null `lesson` is appended to `lessonsFile` as one dated bullet under a
      `## fact-os lessons` heading (created if missing), deduplicated by exact text, and committed on

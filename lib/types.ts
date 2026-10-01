@@ -31,6 +31,7 @@ export interface Config {
   mergeHook: string | null;
   groupBy: string | null;             // null or "idPrefix:<n>"
   restoreFrom: string | null;         // null or a ref with "{id}", e.g. "archive/task/{id}": earlier work for a branch with none
+  evaluatorDiffExclude: string[];     // pathspecs listed by name only in the evaluator's diff (generated files, fixtures)
   claims: Partial<ClaimsConfig> | null; // null = schedule by group only; set = also never run two features that share a hot file
   conflictBrief: boolean;             // a conflicting refresh's feedback carries both sides' context; resolutions get the keep-lines check
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
@@ -107,7 +108,7 @@ export interface StateFiles { features: FeaturesFile; human: HumanFile }
 export type StateName = keyof StateFiles;
 
 export interface Finding { check: string; ok: boolean; evidence: string }
-export interface Verdict { pass: boolean; findings: Finding[]; cheating: string[]; lesson: string | null; error?: string }
+export interface Verdict { pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string }
 
 // log.jsonl
 export interface LogEvent { ts: string; feature: string | null; event: string; detail: string }

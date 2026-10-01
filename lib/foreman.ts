@@ -30,23 +30,27 @@ export function parseClaudeOutput(stdout: string): ClaudeResult {
 const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { return undefined; } };
 
 export function parseVerdict(text: unknown): Verdict {
-  const fail = (error: string): Verdict => ({ pass: false, findings: [], cheating: [], lesson: null, error });
+  const fail = (error: string): Verdict => ({ pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error });
   const s = String(text ?? '');
   const v = [s, s.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1], s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]
     .map((x) => (x === undefined ? undefined : tryJson(x))).find((x) => x && typeof x === 'object' && !Array.isArray(x)) as Record<string, unknown> | undefined;
   if (!v) return fail('evaluator output is not a JSON object');
   if (typeof v.pass !== 'boolean' || !Array.isArray(v.findings)) return fail('verdict needs boolean "pass" and array "findings"');
   const findings = v.findings.filter((f) => f && typeof f === 'object') as Finding[]; // fields unchecked: a missing ok is a failed finding
-  const cheating = Array.isArray(v.cheating) ? v.cheating.map(String) : [];
+  const list = (x: unknown) => (Array.isArray(x) ? x.map(String).map((s) => s.trim()).filter(Boolean) : []);
+  const cheating = list(v.cheating), blocking = list(v.blocking), notes = list(v.notes);
   const lesson = typeof v.lesson === 'string' && v.lesson.trim() ? v.lesson.trim() : null;
-  const pass = v.pass && findings.length > 0 && findings.every((f) => f.ok === true) && cheating.length === 0;
-  return { pass, findings, cheating, lesson, ...(v.pass && !pass ? { error: 'pass:true contradicted by findings/cheating' } : {}) };
+  // A blocking problem fails the feature even when every acceptance check is ok: the evaluator used to find real defects,
+  // write them into a note or the lesson, and pass anyway.
+  const pass = v.pass && findings.length > 0 && findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0;
+  return { pass, findings, cheating, blocking, notes, lesson, ...(v.pass && !pass ? { error: 'pass:true contradicted by findings, cheating or blocking' } : {}) };
 }
 
 export function feedbackFromVerdict(v: Partial<Verdict>): string {
   const lines = v.error ? [`Evaluator: ${v.error}`] : [];
   for (const f of v.findings || []) if (f.ok !== true) lines.push(`FAILED ${f.check}: ${f.evidence}`);
   for (const c of v.cheating || []) lines.push(`CHEATING: ${c}`);
+  for (const b of v.blocking || []) lines.push(`BLOCKING: ${b}`);
   return lines.join('\n') || 'Evaluator did not pass the feature.';
 }
 
@@ -165,19 +169,51 @@ function builderPrompt(root: string, config: Config, f: Feature, branch: string,
     lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config)].join('\n');
 }
 
-function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, resolved = ''): string {
+// The evaluator's view of the diff: a file list first, then whole files' diffs while they fit in `budget` characters
+// (generated files and other `evaluatorDiffExclude` paths by name only), and an explicit list of what was left out.
+// git lists files alphabetically, so a plain tail used to drop routes, migrations and new tests from large diffs.
+export function evaluatorDiff(stat: string, files: { path: string; diff: string }[], excluded: string[], budget = 150000): string {
+  const out: string[] = [], omitted: string[] = [];
+  let used = 0;
+  for (const f of files) {
+    if (excluded.includes(f.path)) continue;
+    if (used + f.diff.length > budget) { omitted.push(f.path); continue; }
+    out.push(f.diff); used += f.diff.length;
+  }
+  return [`Files changed (git diff --stat):\n${stat}`,
+    excluded.length ? `Generated or excluded files, not shown (read them in the worktree if a check depends on them):\n${excluded.map((p) => `- ${p}`).join('\n')}` : '',
+    omitted.length ? `NOT SHOWN because the diff is too long (read them in the worktree with git diff before judging):\n${omitted.map((p) => `- ${p}`).join('\n')}` : '',
+    out.join('\n')].filter(Boolean).join('\n\n');
+}
+
+const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+
+function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = ''): string {
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
-    'You did not write this code. Judge it skeptically. You may read files and run commands, but do not modify or commit anything.',
+    'You did not write this code. Judge it skeptically. You may read files and run commands; do not modify or commit anything in this',
+    'worktree (for a mutation check, use a scratch copy: git worktree add /tmp/<name> HEAD, and remove it afterwards).',
     '', f.description || '', '', 'Acceptance checks (verify each one):', ...(f.acceptance || []).map((a) => `- ${a}`), '',
+    'Before you answer, you must:',
+    tests.length ? `- Run each test file this feature adds or changes (targeted runs, not the whole suite):\n${tests.map((t) => `  - ${t}`).join('\n')}` : '- This feature changes no test files: say whether it needed tests.',
+    '- For each check about money, permissions, tenant isolation or a state change: remove or flip the guard in a scratch copy, run its',
+    '  test, and report which test fails. A test that still passes does not prove the check.',
+    '- Check production wiring: every check must be reachable from a real route, job or composition, not only from a test, a fake or a',
+    '  development-only setting. Every new state or status needs production code that moves it forward.',
+    '',
     'Look explicitly for pass-through implementations, tests that cannot fail, skipped or deleted tests, and hard-coded results. ' +
-    'Report any under "cheating".', '',
+    'Report any under "cheating".',
+    'Report under "blocking" every problem that must stop the merge even if no acceptance check names it: a defect in money, auth,',
+    'tenant isolation or state handling; a path that only works with a fake or a development setting; a multi-line copy of an existing',
+    'helper (name both file:line locations); changed behaviour of an existing export whose callers were not checked; edits to unrelated',
+    'tests that weaken them. Minor remarks go under "notes" and do not block. "lesson" is only advice for future builders.', '',
     `Test command \`${config.test}\` exited ${test.code}. Output tail:\n\`\`\`\n${test.tail}\n\`\`\``, '',
     resolved ? `This branch resolved a merge conflict with ${config.base} in this pass. Also verify that the features merged into ` +
       `${config.base} it conflicted with still behave as their acceptance checks say (a failure there fails this feature):\n${resolved}\n` : '',
-    `Diff ${config.base}...${branch}:\n\`\`\`diff\n${tail(diff, 150000)}\n\`\`\``, '',
+    `Diff ${config.base}...${branch}:\n\`\`\`diff\n${diff}\n\`\`\``, '',
     'Answer with ONLY a JSON object: {"pass": boolean, "findings": [{"check": string, "ok": boolean, "evidence": string}], ' +
-    '"cheating": string[], "lesson": string|null}. One finding per acceptance check; "pass" only if every check is ok and ' +
-    'cheating is empty. "lesson": one short reusable lesson for future builders in this repo, or null.',
+    '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null}. One finding per acceptance check, plus one ' +
+    '"production wiring" finding; "pass" only if every finding is ok and cheating and blocking are empty. Evidence names files, ' +
+    'lines, the tests you ran and what the mutation check showed.',
     briefs(root, config)].join('\n');
 }
 
@@ -464,12 +500,16 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
 
       await set(id, { status: 'evaluating' });
       log(root, id, 'evaluating', '');
-      const diff = git(['diff', '--text', '--no-ext-diff', '--no-textconv', `${config.base}...${sha}`], wt).out;
-      const ep = evaluatorPrompt(root, config, f, branch, diff, test, resolved);
+      const range = `${config.base}...${sha}`, d = (...a: string[]) => git(['diff', '--text', '--no-ext-diff', '--no-textconv', ...a], wt).out;
+      const names = d('--name-only', range).split('\n').filter(Boolean);
+      const excluded = (config.evaluatorDiffExclude || []).length
+        ? d('--name-only', range, '--', ...config.evaluatorDiffExclude.map((p) => `:(glob)${p}`)).split('\n').filter(Boolean) : [];
+      const diff = evaluatorDiff(d('--stat=160', range), names.map((p) => ({ path: p, diff: excluded.includes(p) ? '' : d(range, '--', p) })), excluded);
+      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved);
       recordPrompt('evaluator', ep);
       const e = await claude('evaluator', ep, `${tag}-eval.json`);
       if (await stopped()) return;
-      const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], lesson: null, error: `evaluator failed: ${e.error}` };
+      const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };
       const lesson = v.lesson;
       if (lesson) await serial(() => compound(id, lesson));
       if (!v.pass) return fail(feedbackFromVerdict(v));

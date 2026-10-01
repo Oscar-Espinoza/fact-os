@@ -9,7 +9,7 @@ export const DEFAULT_CONFIG: Config = {
   builder: { model: 'opus', effort: 'medium', permissionMode: 'auto' },
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
-  groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, claims: null, conflictBrief: false, resolver: null,
+  groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
