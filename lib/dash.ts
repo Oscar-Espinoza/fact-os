@@ -4,11 +4,11 @@ import type { AddressInfo } from 'node:net';
 import { readdirSync, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, load, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson } from './state.ts';
+import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControl, writeControl, effectiveLimit, validLanes, MAX_LANES } from './state.ts';
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
 import { observerPaths, recurringTests, hotFiles, type ObserverState, type Era } from './observe.ts';
-import type { ActivityEvent, Config, Diagnosis, Feature, HumanTask, LogEvent, MergeMode, RoleConfig } from './types.ts';
+import { IN_FLIGHT, type ActivityEvent, type Config, type Control, type Diagnosis, type Feature, type HumanTask, type LogEvent, type MergeMode, type RoleConfig } from './types.ts';
 
 // Median durations (ms) of each pipeline stage, for the dashboard's estimated progress; null = no history yet.
 export interface Estimates { build: number | null; test: number | null; eval: number | null }
@@ -23,7 +23,11 @@ export interface ProjectState {
   repoUrl?: string;                    // https://github.com/<owner>/<repo>, from the origin remote
   stats: Stats;
   observer: ObserverSummary | null;    // null when the observer has never run here
+  control?: ControlState;              // control.json with what it means now (absent when the state files are unreadable)
+  inFlight?: number;                   // features building, testing or evaluating
 }
+// A person's pause / lanes (control.json): effective = how many may be in flight now (0 while paused); configMax = config.maxParallel.
+export type ControlState = Pick<Control, 'paused' | 'maxParallel' | 'updatedAt' | 'by'> & { effective: number; configMax: number };
 export interface ObserverSummary {
   updatedAt: string; running: boolean; alerts24h: { ts: string; text: string }[]; stuck: { id: string; cause: string; evidence: string }[];
   decisions: Diagnosis[]; causes24h: { cause: string; n: number }[]; recurring: { test: string; features: string[] }[];
@@ -46,6 +50,12 @@ const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { 
 const isWorktree = (dir: string) => { try { return statSync(join(dir, '.git')).isFile(); } catch { return false; } };
 
 const HUMAN = ['start', 'done', 'reopen', 'step', 'wait', 'unwait'] as const;
+const CONTROL = ['pause', 'resume', 'lanes'] as const;
+
+export function controlState(dir: string, config: Pick<Config, 'maxParallel'>): ControlState {
+  const c = readControl(dir);
+  return { ...c, effective: effectiveLimit(c, config), configMax: Math.max(1, config.maxParallel) };
+}
 // Page scripts, styles and pixel art under lib/dash/ and lib/assets/, served at /dash/* and /assets/*.
 const ASSET_TYPES: Record<string, string> = { js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png' };
 
@@ -243,7 +253,8 @@ function projectState(dir: string): ProjectState {
       activity: tailLines(paths(dir).activity, 200).map(tryJson).filter(Boolean) as ActivityEvent[], events: events.slice(-80),
       config: { base: config.base, maxParallel: config.maxParallel, maxAttempts: config.maxAttempts, groupBy: config.groupBy,
         builder: config.builder, evaluator: config.evaluator },
-      stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir), observer: observer(dir, features, tasks, all) };
+      stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir), observer: observer(dir, features, tasks, all),
+      control: controlState(dir, config), inFlight: features.filter((f) => IN_FLIGHT.includes(f.status)).length };
   } catch (e) {
     return { ...base, error: errMsg(e) };
   }
@@ -323,11 +334,19 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
           : send(404, { error: 'no project view' });
       }
       const action = ACTIONS.find((a) => req.url === `/api/feature/${a}`);
-      if (req.method !== 'POST' || (!action && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged'].includes(req.url!))) return send(404, { error: 'not found' });
+      const ctl = CONTROL.find((c) => req.url === `/api/control/${c}`);
+      if (req.method !== 'POST' || (!action && !ctl && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged'].includes(req.url!))) return send(404, { error: 'not found' });
       let body = '';
       for await (const c of req) { body += c; if (body.length > 10000) return send(413, { error: 'body too large' }); }
-      const { project, id, step, on, who } = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown };
+      const parsed = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown; maxParallel?: unknown };
+      const { project, id, step, on, who } = parsed;
       if (typeof project !== 'string' || !discover(root).includes(project)) return send(400, { error: 'unknown project' });
+      if (ctl) { // pause / resume new launches, or set the lanes (null = config default); the foreman re-reads control.json every tick
+        if (ctl === 'lanes' && !('maxParallel' in parsed && validLanes(parsed.maxParallel)))
+          return send(400, { error: `maxParallel must be an integer from 0 to ${MAX_LANES}, or null for the config default` });
+        await writeControl(project, ctl === 'lanes' ? { maxParallel: parsed.maxParallel as number | null } : { paused: ctl === 'pause' }, 'dashboard');
+        return send(200, { ok: true, control: controlState(project, loadConfig(project)) });
+      }
       if (typeof id !== 'string') return send(400, { error: 'id must be a string' });
       if (action) {
         const err = (await act(project, action as Action, [id]))[id];

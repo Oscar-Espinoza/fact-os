@@ -278,3 +278,45 @@ test('conflictTimeline: events of different features interleave without bleeding
     ev(5, 'b', 'merged'), ev(6, 'a', 'merged'), ev(7, 'a', 'testing')], now);
   assert.deepEqual(rows.map((r) => [r.feature, r.resolvedBy, r.outcome, r.ms]), [['b', 'builder', 'merged', 4 * 60e3], ['a', 'resolver', 'merged', 6 * 60e3]]);
 });
+
+test('control routes: pause, resume and lanes write control.json; state carries control and the in-flight count', async () => {
+  const shop = join(root, 'shop'), file = join(shop, '.fact-os/control.json'), feats = join(shop, '.fact-os/features.json'), saved = readFileSync(feats, 'utf8');
+  const get = async () => ((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!;
+  const ask = (what: string, body: object = {}, headers: Record<string, string> = { origin: dash.url }) => post('/api/control/' + what, { project: shop, ...body }, headers);
+  writeFileSync(feats, JSON.stringify({ features: [F('pay', { status: 'building' }), F('cart', { status: 'evaluating' }), F('more')] }));
+  try {
+    let p = await get();
+    assert.deepEqual(p.control, { paused: false, maxParallel: null, effective: 3, configMax: 3 });
+    assert.equal(p.inFlight, 2);
+    let r = await ask('pause');
+    assert.equal(r.status, 200);
+    assert.deepEqual(((await r.json()) as { control: unknown }).control, { ...JSON.parse(readFileSync(file, 'utf8')), effective: 0, configMax: 3 });
+    assert.deepEqual([JSON.parse(readFileSync(file, 'utf8')).paused, JSON.parse(readFileSync(file, 'utf8')).by], [true, 'dashboard']);
+    p = await get();
+    assert.deepEqual([p.control!.paused, p.control!.effective, p.control!.maxParallel], [true, 0, null]);
+    const before = readFileSync(file, 'utf8');
+    for (const body of [{ maxParallel: 33 }, { maxParallel: -1 }, { maxParallel: 1.5 }, { maxParallel: '2' }, { maxParallel: true }, {}]) {
+      r = await ask('lanes', body);
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.match(((await r.json()) as { error: string }).error, /maxParallel must be an integer from 0 to 32/);
+    }
+    assert.equal((await ask('pause', {}, { origin: 'https://evil.example' })).status, 403);
+    assert.equal((await ask('lanes', { maxParallel: 9 }, { origin: 'https://evil.example' })).status, 403);
+    assert.equal((await post('/api/control/resume', { project: '/etc' })).status, 400);
+    assert.equal((await post('/api/control/resume', { project: shop + '/' })).status, 400);
+    assert.equal((await fetch(dash.url + '/api/control/pause')).status, 404, 'GET is not a control action');
+    assert.equal((await ask('stop')).status, 404);
+    assert.equal(readFileSync(file, 'utf8'), before, 'refused requests change nothing');
+    assert.equal((await ask('lanes', { maxParallel: 0 })).status, 200);
+    assert.deepEqual([(await get()).control!.paused, (await get()).control!.maxParallel], [true, 0], 'lanes keeps the pause');
+    assert.equal((await ask('resume')).status, 200);
+    assert.equal((await get()).control!.effective, 0, 'lanes 0 launches nothing either');
+    assert.equal((await ask('lanes', { maxParallel: 5 })).status, 200);
+    assert.deepEqual((await get()).control, { ...JSON.parse(readFileSync(file, 'utf8')), effective: 5, configMax: 3 });
+    assert.equal((await ask('lanes', { maxParallel: null })).status, 200);
+    assert.deepEqual([(await get()).control!.maxParallel, (await get()).control!.effective], [null, 3]);
+  } finally {
+    writeFileSync(feats, saved);
+    rmSync(file, { force: true });
+  }
+});
