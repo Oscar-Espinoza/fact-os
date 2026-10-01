@@ -242,8 +242,9 @@ test('state carries the merge conflict timeline from the log: who resolved each 
     const by = (f: string) => o.conflicts24h.filter((c) => c.feature === f);
     assert.deepEqual(o.conflicts24h.map((c) => c.feature + '@' + c.files.length), ['draft@1', 'post@1', 'post@1', 'cart@1', 'pay@2']); // newest first; "old" is over 24 h
     assert.deepEqual(by('pay')[0], { feature: 'pay', title: 'pay', ts: min(0), files: ['src/a.ts', 'src/b.ts'], resolvedBy: 'resolver', outcome: 'merged', outcomeTs: min(42), ms: 42 * 60e3 });
-    assert.deepEqual([by('cart')[0]!.resolvedBy, by('cart')[0]!.outcome], ['builder', 'back in test']);
-    assert.deepEqual(by('post').map((c) => [c.resolvedBy, c.outcome, c.note]), [[null, 'failed', undefined], ['builder', 'conflicted again', 'keep-check: 20 lines lost; lost 3 lines']]);
+    assert.deepEqual([by('cart')[0]!.resolvedBy, by('cart')[0]!.outcome], ['builder', 'resolved']);
+    assert.deepEqual(by('post').map((c) => [c.resolvedBy, c.outcome, c.note]), [[null, 'failed', 'gave up after too many conflicts'], ['builder', 'conflicted again', 'keep-check: 20 lines lost; lost 3 lines']]);
+    assert.deepEqual(by('post').map((c) => c.ms), [60e3, 8 * 60e3]); // failed 20→21, conflicted again 12→20
     assert.deepEqual(by('draft')[0]!.outcome, 'still open');
     assert.ok(Math.abs(by('draft')[0]!.ms - (Date.now() - t0 - 30 * 60e3)) < 5000); // runs to now
   } finally {
@@ -253,8 +254,27 @@ test('state carries the merge conflict timeline from the log: who resolved each 
 });
 
 test('conflictTimeline: a resolver failure hands the conflict to the builder, and the note is kept', () => {
-  const now = Date.parse('2026-10-01T12:00:00Z'), ev = (m: number, event: string, detail = '') => ({ ts: new Date(now - 60 * 60e3 + m * 60e3).toISOString(), feature: 'x', event, detail });
+  const now = Date.parse('2026-10-01T12:00:00Z'), ev = (m: number, event: string, detail = '', feature = 'x') => ({ ts: new Date(now - 60 * 60e3 + m * 60e3).toISOString(), feature, event, detail });
   const [c] = conflictTimeline([ev(0, 'refreshed', 'conflicts in: a.ts'), ev(1, 'resolving', 'a.ts'), ev(2, 'resolve-failed', 'keep-check: 3 lines lost'), ev(3, 'launch'), ev(5, 'keep-check', 'ok: a.ts'), ev(6, 'testing')], now, { x: 'The X' });
-  assert.deepEqual([c!.title, c!.resolvedBy, c!.note, c!.outcome, c!.ms], ['The X', 'builder', 'keep-check: 3 lines lost', 'back in test', 3600e3]);
-  assert.deepEqual(conflictTimeline([ev(0, 'refreshed', 'conflicts in: a.ts'), ev(1, 'resolving', 'a.ts')], now).map((r) => [r.resolvedBy, r.outcome]), [['resolver', 'still open']]);
+  assert.deepEqual([c!.title, c!.resolvedBy, c!.note, c!.outcome, c!.ms], ['The X', 'builder', 'keep-check: 3 lines lost', 'resolved', 3600e3]);
+  // the resolver is still working: not resolved by anyone yet
+  assert.deepEqual(conflictTimeline([ev(0, 'refreshed', 'conflicts in: a.ts'), ev(1, 'resolving', 'a.ts')], now).map((r) => [r.resolvedBy, r.resolving, r.outcome]), [[null, true, 'still open']]);
+});
+
+test('conflictTimeline: a test-gate stuck is not final; only "too many base refreshes" fails the conflict', () => {
+  const now = Date.parse('2026-10-01T12:00:00Z'), ev = (m: number, event: string, detail = '', feature = 'x') => ({ ts: new Date(now - 60 * 60e3 + m * 60e3).toISOString(), feature, event, detail });
+  const gate = 'test command `gate.sh` exited 1:\nFAIL a.test.ts';
+  const base = [ev(0, 'refreshed', 'conflicts in: a.ts'), ev(1, 'launch'), ev(5, 'testing'), ev(9, 'stuck', gate)];
+  assert.deepEqual(conflictTimeline(base, now).map((r) => [r.outcome, r.ms, r.stuckCause!.startsWith('test command')]), [['resolved then stuck', 9 * 60e3, true]]);
+  const [c] = conflictTimeline([...base, ev(20, 'retrying'), ev(21, 'launch'), ev(25, 'testing'), ev(40, 'merged')], now);
+  assert.deepEqual([c!.outcome, c!.ms, c!.stuckCause], ['merged', 40 * 60e3, undefined]);
+  // retried and in flight again: resolved, no longer stuck
+  assert.deepEqual(conflictTimeline([...base, ev(20, 'retrying'), ev(21, 'launch')], now).map((r) => r.outcome), ['resolved']);
+});
+
+test('conflictTimeline: events of different features interleave without bleeding into each other', () => {
+  const now = Date.parse('2026-10-01T12:00:00Z'), ev = (m: number, feature: string, event: string, detail = '') => ({ ts: new Date(now - 60 * 60e3 + m * 60e3).toISOString(), feature, event, detail });
+  const rows = conflictTimeline([ev(0, 'a', 'refreshed', 'conflicts in: a.ts'), ev(1, 'b', 'refreshed', 'conflicts in: b.ts'), ev(2, 'a', 'resolving', 'a.ts'), ev(3, 'b', 'launch'), ev(4, 'a', 'resolved', 'x'),
+    ev(5, 'b', 'merged'), ev(6, 'a', 'merged'), ev(7, 'a', 'testing')], now);
+  assert.deepEqual(rows.map((r) => [r.feature, r.resolvedBy, r.outcome, r.ms]), [['b', 'builder', 'merged', 4 * 60e3], ['a', 'resolver', 'merged', 6 * 60e3]]);
 });

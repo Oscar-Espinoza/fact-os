@@ -259,18 +259,25 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   - **Observer**: what the observer saw and did, one section at a time behind a sticky sub-navigation (Needs you ·
     Health · Failures · Merge conflicts · Stuck · Observer actions · Agents; the last one is remembered in
     localStorage, each tab carries a count). Every section opens with one plain-language answer computed from the
-    data. A search box filters every section by feature id, title or file name (tab counts show the matches; the box
-    keeps its focus through the 2s refresh). Causes, decisions and actions are shown in plain words, times are
-    relative with the local time on hover, long evidence sits in `<details>`, status is a pill with a word (never
-    colour alone). **Merge conflicts** has one row per conflict that started in the last 24h (`conflicts24h` in the
-    observer summary, from `log.jsonl`): feature, when, files (short names, full list in details), who resolved it and
-    the outcome with its duration, plus the hot files. Per feature in log order: a `refreshed` "conflicts in: …"
-    opens a row; `resolving`/`resolved` = the resolver, `resolve-failed` = the builder (note kept), a `launch` with no
-    `resolving` = the builder; a `keep-check` not "ok…" adds a note. Outcome: the next `merged` = merged, `stuck` =
-    failed, another conflict = conflicted again (that one opens its own row); else `testing`/`evaluating` after the
-    resolution = back in test, else still open (duration runs to now). **Agents** shows each rate with its counts,
-    a short label of what changed per prompt version, and marks a rate that moved 5+ points against the previous
-    version (5+ runs each) with an arrow and the word better or worse (bounced: lower is better).
+    data. A search box filters every section except Health and Agents by feature id, title or file name (tab counts
+    show the matches; the box keeps its focus through the 2s refresh, and so does keyboard focus on a re-rendered
+    link or summary). Causes, decisions and actions are shown in plain words, times are relative with the local time
+    on hover, long evidence sits in `<details>`, status is a pill with a word (never colour alone). Repeated alerts
+    are grouped (newest, with how often). **Merge conflicts** (`conflicts24h` in the observer summary, from
+    `log.jsonl`, plus `titles`: feature id → title for filtering) lists the files that conflict most, then the
+    features with conflicts, most first, each expandable to one entry per conflict that started in the last 24h:
+    when, files (short names, full list in details), who handled it and the outcome with its duration. Per feature in
+    log order: a `refreshed` "conflicts in: …" opens an entry; `resolved` = the resolver handled it (`resolving` alone
+    = the resolver is still working), `resolve-failed` = the builder (note kept), a `launch` with no resolver result =
+    the builder; a `keep-check` not "ok…" adds a note. Outcome: the next `merged` = *merged*; another conflict =
+    *conflicted again* (that one opens its own entry; at merge time this is a bounce, not a failure); `stuck` "too many
+    base refreshes" = *gave up* (`failed`); any other `stuck` is not final (a retry picks it up again): until a `launch`
+    or `retrying` clears it, a resolved entry reads *resolved, then stuck* (duration up to the stuck). Otherwise
+    *resolved* once resolved (the view adds the feature's current status), else *still open*; the duration of these
+    runs to now. **Agents** shows each rate with its counts, a short label of what changed per prompt version (a
+    version with fewer than 5 builds is not judged), and marks a rate that moved 5+ points against the previous
+    version, when each side has at least 5 runs behind that rate, with an arrow and the word better or worse
+    (bounced: lower is better).
   - **Project**: `<state dir>/project-view.html` if present, in an iframe with `sandbox="allow-scripts"`
     and served with `Content-Security-Policy: sandbox allow-scripts` (opaque origin: it cannot call
     the API). The dashboard posts `{type: "fact-os-state", project, features: [{id, title, status,

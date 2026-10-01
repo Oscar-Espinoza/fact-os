@@ -88,3 +88,11 @@
   #observer .o-bars li{grid-template-columns:1fr 32px}#observer .o-bar{grid-column:1/-1;order:3}
 }
 #observer .o-more{background:none;border:0;padding:0;color:var(--blue);font:inherit;text-decoration:underline;cursor:pointer}
+#observer time{white-space:nowrap}
+#observer .o-bf,#observer .o-cfs{list-style:none;padding:0;display:flex;flex-direction:column;gap:6px}
+#observer .o-bf>li{padding:8px 10px;background:var(--raised);border:1px solid var(--line);border-radius:var(--r)}
+#observer .o-bf>li>details>summary{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+#observer .o-cfs{margin-top:8px}
+#observer .o-cf{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1.2fr);gap:4px 14px;padding:6px 0;border-top:1px solid var(--line);font-size:12.5px;align-items:start}
+@media (max-width:700px){#observer .o-cf{grid-template-columns:minmax(0,1fr)}}
+#observer .o-bf>li>details.o-d,#observer .o-cf details.o-d{margin-top:0!important}

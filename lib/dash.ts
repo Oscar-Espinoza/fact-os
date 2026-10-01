@@ -30,10 +30,10 @@ export interface ObserverSummary {
   improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; agents: Era[]; proposals: { id: string; title: string }[];
   conflicts24h: Conflict[]; titles: Record<string, string>; // titles: feature id → title, for every id the view shows
 }
-// One merge conflict followed to its outcome (see conflictTimeline).
+// One merge conflict followed to its outcome (see conflictTimeline). `resolving`: the resolver is working on it right now.
 export interface Conflict {
-  feature: string; title?: string; ts: string; files: string[]; resolvedBy: 'resolver' | 'builder' | null; note?: string;
-  outcome: 'merged' | 'back in test' | 'failed' | 'conflicted again' | 'still open'; outcomeTs?: string; ms: number;
+  feature: string; title?: string; ts: string; files: string[]; resolvedBy: 'resolver' | 'builder' | null; resolving?: boolean; note?: string;
+  outcome: 'merged' | 'resolved' | 'resolved then stuck' | 'failed' | 'conflicted again' | 'still open'; outcomeTs?: string; stuckCause?: string; ms: number;
 }
 export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
 export interface Run {
@@ -161,18 +161,23 @@ function foreman(dir: string): ProjectState['foreman'] {
 }
 
 // Every merge conflict that started in the last 24 h, newest first, each followed to its outcome from the feature's own events:
-// `refreshed` "conflicts in: …" opens it; `resolving`/`resolved` = the resolver took it, `resolve-failed` or the next `launch` = the builder
-// (its `keep-check` ok = kept, anything else = lines lost, noted); the first later `merged` / `stuck` / new conflict closes it, else a later
-// `testing`/`evaluating` after the resolution = "back in test", else "still open" (ms runs to now).
+// `refreshed` "conflicts in: …" opens it; `resolved` = the resolver finished it (`resolving` = it is working on it), `resolve-failed` or the
+// next `launch` with no resolver result = the builder (its `keep-check` ok = kept, anything else = lines lost, noted). Outcome: the first
+// later `merged` = merged; another conflict = conflicted again (it opens its own row); `stuck` "too many base refreshes" = failed (the
+// foreman gave up); any other `stuck` is not final (a retry picks it up again): until a `launch`/`retrying` clears it, a resolved row
+// reads "resolved then stuck" (ms up to the stuck). Else "resolved" once resolved, else "still open" (ms runs to now).
 export function conflictTimeline(events: LogEvent[], now: number, titles: Record<string, string> = {}): Conflict[] {
   const since = now - 24 * 3600e3, rows: Conflict[] = [], open = new Map<string, { row: Conflict; done: boolean }>();
-  const close = (f: string, outcome: Conflict['outcome'], ts: string) => { const o = open.get(f)!; o.row.outcome = outcome; o.row.outcomeTs = ts; o.row.ms = Date.parse(ts) - Date.parse(o.row.ts); open.delete(f); };
+  const close = (f: string, outcome: Conflict['outcome'], ts: string) => { const o = open.get(f)!; o.row.outcome = outcome; o.row.outcomeTs = ts; o.row.ms = Date.parse(ts) - Date.parse(o.row.ts); delete o.row.resolving; open.delete(f); };
   const note = (r: Conflict, n: string) => { r.note = r.note ? r.note + '; ' + n : n; };
   for (const e of events) {
     const f = e.feature;
     if (!f) continue;
-    const conflicted = e.event === 'refreshed' && e.detail.startsWith('conflicts in: ');
-    if (open.has(f) && (conflicted || e.event === 'merged' || e.event === 'stuck')) close(f, conflicted ? 'conflicted again' : e.event === 'merged' ? 'merged' : 'failed', e.ts);
+    const conflicted = e.event === 'refreshed' && e.detail.startsWith('conflicts in: '), giveUp = e.event === 'stuck' && e.detail.startsWith('too many base refreshes');
+    if (open.has(f) && (conflicted || e.event === 'merged' || giveUp)) {
+      if (giveUp) note(open.get(f)!.row, 'gave up after too many conflicts');
+      close(f, conflicted ? 'conflicted again' : giveUp ? 'failed' : 'merged', e.ts);
+    }
     if (conflicted) {
       const row: Conflict = { feature: f, ...(titles[f] ? { title: titles[f] } : {}), ts: e.ts, files: e.detail.slice(14).split(',').map((x) => x.trim()).filter(Boolean), resolvedBy: null, outcome: 'still open', ms: 0 };
       open.set(f, { row, done: false });
@@ -181,19 +186,24 @@ export function conflictTimeline(events: LogEvent[], now: number, titles: Record
     }
     const o = open.get(f);
     if (!o) continue;
-    if (e.event === 'resolving') o.row.resolvedBy = 'resolver';
-    else if (e.event === 'resolved') { o.row.resolvedBy = 'resolver'; o.done = true; }
-    else if (e.event === 'resolve-failed') { o.row.resolvedBy = 'builder'; note(o.row, e.detail); }
-    else if (e.event === 'launch') { o.row.resolvedBy ??= 'builder'; o.done = true; }
-    else if (e.event === 'keep-check') { if (e.detail.startsWith('ok')) o.done = true; else note(o.row, e.detail); }
-    else if ((e.event === 'testing' || e.event === 'evaluating') && o.done) o.row.outcome = 'back in test';
+    const r = o.row;
+    if (e.event === 'resolving') r.resolving = true;
+    else if (e.event === 'resolved') { r.resolvedBy = 'resolver'; delete r.resolving; o.done = true; }
+    else if (e.event === 'resolve-failed') { r.resolvedBy = 'builder'; delete r.resolving; note(r, e.detail); }
+    else if (e.event === 'launch') { r.resolvedBy ??= 'builder'; delete r.resolving; o.done = true; delete r.stuckCause; delete r.outcomeTs; }
+    else if (e.event === 'keep-check') { if (e.detail.startsWith('ok')) o.done = true; else note(r, e.detail); }
+    else if (e.event === 'stuck') { r.outcomeTs = e.ts; r.stuckCause = e.detail.split('\n')[0]!.slice(0, 120); }
+    else if (e.event === 'retrying' || e.event === 'resumed') { delete r.stuckCause; delete r.outcomeTs; }
   }
-  for (const { row } of open.values()) if (row.outcome === 'still open' || row.outcome === 'back in test') row.ms = now - Date.parse(row.ts);
+  for (const { row, done } of open.values()) {
+    row.outcome = !done ? 'still open' : row.stuckCause ? 'resolved then stuck' : 'resolved';
+    row.ms = (row.outcome === 'resolved then stuck' ? Date.parse(row.outcomeTs!) : now) - Date.parse(row.ts);
+  }
   return rows.reverse();
 }
 
 // The observer's summary for the Observer view; null when it has not run here or its file is unreadable.
-function observer(dir: string, features: Feature[], tasks: HumanTask[]): ObserverSummary | null {
+function observer(dir: string, features: Feature[], tasks: HumanTask[], events: LogEvent[]): ObserverSummary | null {
   try {
     const O = observerPaths(dir);
     if (!existsSync(O.state)) return null;
@@ -216,7 +226,7 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[]): Observe
       ...(() => { const b = (Array.isArray(o.bounces) ? o.bounces : []).filter((x) => Date.parse(x.ts) >= since); return { bounces24h: b.length, hotFiles: hotFiles(b).slice(0, 5).map(([file, n]) => ({ file, n })) }; })(),
       ...(o.improveAt ? { improveAt: o.improveAt } : {}), agents: Array.isArray(o.agents) ? o.agents : [], ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
       proposals: tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-')).map((t) => ({ id: t.id, title: t.title })),
-      conflicts24h: conflictTimeline(readLog(dir, 20000).filter((e) => Date.parse(e.ts) >= Date.now() - 25 * 3600e3), Date.now(), titles), titles };
+      conflicts24h: conflictTimeline(events.filter((e) => Date.parse(e.ts) >= since - 3600e3), Date.now(), titles), titles };
   } catch { return null; }
 }
 
@@ -228,12 +238,12 @@ function projectState(dir: string): ProjectState {
     stats: { mergedAt: [], costToday: 0, costYesterday: 0 }, observer: null as ObserverSummary | null, ...(repoUrl(dir) ? { repoUrl: repoUrl(dir) } : {}) };
   try {
     const { config, features, tasks } = load(dir);
-    const a = analyze(features, tasks, config.merge), events = readLog(dir, 2000);
+    const a = analyze(features, tasks, config.merge), all = readLog(dir, 20000), events = all.slice(-2000);
     return { ...base, merge: config.merge, branchPrefix: config.branchPrefix, features, tasks, ready: a.ready, waiting: a.waiting,
       activity: tailLines(paths(dir).activity, 200).map(tryJson).filter(Boolean) as ActivityEvent[], events: events.slice(-80),
       config: { base: config.base, maxParallel: config.maxParallel, maxAttempts: config.maxAttempts, groupBy: config.groupBy,
         builder: config.builder, evaluator: config.evaluator },
-      stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir), observer: observer(dir, features, tasks) };
+      stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir), observer: observer(dir, features, tasks, all) };
   } catch (e) {
     return { ...base, error: errMsg(e) };
   }
