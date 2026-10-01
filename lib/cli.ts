@@ -106,6 +106,7 @@ function doctor(): number {
     if (!strs(f?.deps ?? [])) bad('deps must be an array of ids');
     if (typeof (f?.priority ?? 0) !== 'number') bad('priority must be a number');
     if (!STATUS.includes(f?.status as string)) bad(`status must be one of ${STATUS.join('|')}`);
+    if (f?.touches !== undefined && !strs(f.touches)) bad('touches must be an array of repo paths (or dir prefixes ending in "/")');
   }
   for (const t of tasks) {
     const bad = (m: string) => problems.push(`human task ${t?.id ?? '?'}: ${m}`);
@@ -115,6 +116,10 @@ function doctor(): number {
     if (!['open', 'done'].includes(t?.status as string)) bad('status must be open|done');
   }
   if (!['auto', 'manual'].includes(config.merge)) problems.push('config.merge must be "auto" or "manual"');
+  const cl = config.claims as Record<string, unknown> | null;
+  if (cl != null && (typeof cl !== 'object' || !strs(cl.hot ?? []) || typeof (cl.minScore ?? 0) !== 'number' || typeof (cl.days ?? 0) !== 'number'))
+    problems.push('config.claims must be null or {hot: string[], minScore: number, days: number}');
+  if (config.resolver != null && typeof config.resolver !== 'object') problems.push('config.resolver must be null or {model, effort, permissionMode}');
   if (!problems.length) problems.push(...validate(features as unknown as Feature[], tasks as unknown as HumanTask[])); // shapes checked above
   const claude = envVar('CLAUDE') || 'claude';
   for (const [what, cmd] of [['claude', claude], ['git', 'git'], ['test command', String(config.test || '').trim().split(/\s+/)[0]]])

@@ -6,7 +6,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
-import type { ClaudeResult, Config, Feature, Finding, HumanTask, Paths, Role, Status, Verdict } from './types.ts';
+import { DEFAULT_CLAIMS, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
+import type { ClaudeResult, Config, Feature, Finding, HumanTask, LogEvent, Paths, Role, Status, Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const IN_FLIGHT: Status[] = ['building', 'testing', 'evaluating'];
@@ -116,9 +117,10 @@ export function appendLesson(file: string, lesson: string, date = now().slice(0,
 }
 
 // Run files of one pipeline pass: "<attempt>" for the first pass of an attempt, "<attempt>.<k>" for later passes (a
-// base refresh starts a new pass without spending an attempt), so earlier runs are never overwritten.
+// base refresh or an inline conflict resolution starts a new pass without spending an attempt), so earlier runs are
+// never overwritten.
 export function runTag(existing: string[], attempt: number): string {
-  const has = (t: string) => existing.includes(`${t}-build.json`);
+  const has = (t: string) => existing.some((n) => n.startsWith(`${t}-`));
   if (!has(String(attempt))) return String(attempt);
   let k = 2;
   while (has(`${attempt}.${k}`)) k++;
@@ -140,9 +142,10 @@ const briefs = (root: string, config: Config) => (config.briefFiles || []).map((
   return c == null ? '' : `\n## Brief: ${f}\n\n${c}`;
 }).join('\n');
 
+const RUN_FILE: Record<Role, string> = { builder: 'build', evaluator: 'eval', resolver: 'resolve' };
 const REFRESH_SEP = '\n\nThis failure is not fixed yet. Also: ';
 
-function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[]): string {
+function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = []): string {
   const lessons = readIf(resolve(root, config.lessonsFile));
   return [`You are the builder for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}, created from ${config.base}.`, '', f.description || '', '',
@@ -150,6 +153,8 @@ function builderPrompt(root: string, config: Config, f: Feature, branch: string,
     mockTasks.length ? 'ON MOCK: these human tasks are still open, so build against a clearly isolated mock/fake of what they ' +
       `provide, easy to swap for the real thing later:\n${mockTasks.map((t) => `- ${t.title}`).join('\n')}\n` : '',
     f.lastFeedback ? `Feedback on your previous attempt:\n${f.lastFeedback}\n` : '',
+    hotHeld.length ? `Hot files: merge conflicts keep sending work back on these, and other features in flight are changing them:\n${
+      hotHeld.map((h) => `- ${h}`).join('\n')}\nKeep your edits there small and additive (never reorder or reformat them); do not skip a change the feature needs.\n` : '',
     'Rules:', '- Commit your work on this branch (git add + git commit). Uncommitted changes are not evaluated.',
     '- Do not weaken or delete tests to make them pass.', '- Do not stub behavior the acceptance checks require.',
     '- You may run parallel subagents when that clearly helps. Give each one a disjoint set of files, so that no two ever',
@@ -160,13 +165,15 @@ function builderPrompt(root: string, config: Config, f: Feature, branch: string,
     lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config)].join('\n');
 }
 
-function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }): string {
+function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, resolved = ''): string {
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
     'You did not write this code. Judge it skeptically. You may read files and run commands, but do not modify or commit anything.',
     '', f.description || '', '', 'Acceptance checks (verify each one):', ...(f.acceptance || []).map((a) => `- ${a}`), '',
     'Look explicitly for pass-through implementations, tests that cannot fail, skipped or deleted tests, and hard-coded results. ' +
     'Report any under "cheating".', '',
     `Test command \`${config.test}\` exited ${test.code}. Output tail:\n\`\`\`\n${test.tail}\n\`\`\``, '',
+    resolved ? `This branch resolved a merge conflict with ${config.base} in this pass. Also verify that the features merged into ` +
+      `${config.base} it conflicted with still behave as their acceptance checks say (a failure there fails this feature):\n${resolved}\n` : '',
     `Diff ${config.base}...${branch}:\n\`\`\`diff\n${tail(diff, 150000)}\n\`\`\``, '',
     'Answer with ONLY a JSON object: {"pass": boolean, "findings": [{"check": string, "ok": boolean, "evidence": string}], ' +
     '"cheating": string[], "lesson": string|null}. One finding per acceptance check; "pass" only if every check is ok and ' +
@@ -174,8 +181,24 @@ function evaluatorPrompt(root: string, config: Config, f: Feature, branch: strin
     briefs(root, config)].join('\n');
 }
 
+function resolverPrompt(root: string, config: Config, f: Feature, branch: string, brief: string): string {
+  return [`You are the merge resolver for feature "${f.id}": ${f.title}`,
+    `You work in a git worktree on branch ${branch}. The foreman started merging ${config.base} into it and the merge conflicts; ` +
+    'the merge is in progress. Your only job is to finish it so that both sides keep working.', '', brief, '',
+    'Rules:', '- Resolve every conflict keeping both behaviours: this feature\'s and each feature listed above. Read the code around the ' +
+    'hunks, not just the markers. Where both sides add entries to one list or object, keep every entry, each with its own closing lines.',
+    '- Keep every line either side added. If one must go or change (a duplicate, a key or number both sides used), list each such ' +
+    'line in the merge commit message as `dropped: <file>: <the line as it was>`, followed by why. A check compares the lines both ' +
+    'sides added with your result and sends unlisted losses back.',
+    '- Change nothing beyond what the merge needs. Do not weaken or delete tests.',
+    '- Run the quickest checks that cover the files you touched (type-check, the tests next to them) and fix what the merge broke.',
+    `- Finish with git add and git commit (the merge commit). Do not abort the merge, and do not start another merge, rebase, reset or ` +
+    `switch branches. The full test command \`${config.test}\` and an independent evaluator run after you.`,
+    briefs(root, config)].join('\n');
+}
+
 export function claudeArgs(config: Config, role: Role, root: string): string[] {
-  const r = config[role] || {};
+  const r = (role === 'resolver' ? config.resolver ?? config.builder : config[role]) || {};
   const hook = [{ matcher: '*', hooks: [{ type: 'command', command: `"${process.execPath}" "${BIN}" hook` }] }];
   return ['-p', '--output-format', 'json', ...(r.model ? ['--model', r.model] : []), ...(r.effort ? ['--effort', r.effort] : []),
     ...(r.permissionMode ? ['--permission-mode', r.permissionMode] : []),
@@ -299,6 +322,16 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       !git(['rev-list', '--first-parent', config.base], root).out.split('\n').includes(tip);
   };
   const waitingSince = new Map<string, number>(); // feature id → when this foreman first found its orphaned child alive
+  const pendingBrief = new Map<string, { text: string; others: string }>(); // feature id → brief of its last conflicted refresh
+  // File claims (config.claims): what a feature changes or is about to, and the log the hot files are scored from.
+  const claimsCfg = config.claims ? { ...DEFAULT_CLAIMS, ...config.claims } : null, claimWait = new Map<string, string>();
+  const filesOf = (f: Feature) => { const wt = resolve(root, config.worktreesDir, f.id); return featureFiles(root, f, config.base, f.branch || config.branchPrefix + f.id, existsSync(wt) ? wt : null); };
+  let logCache = { size: -1, events: [] as LogEvent[] };
+  const readEvents = (): LogEvent[] => {
+    let size = 0; try { size = statSync(P.log).size; } catch {}
+    if (size !== logCache.size) logCache = { size, events: (readIf(P.log) || '').split('\n').flatMap((l) => { try { return l ? [JSON.parse(l) as LogEvent] : []; } catch { return []; } }) };
+    return logCache.events;
+  };
   const orphanAlive = (f: Feature) => {
     if (!childAlive(f)) return false;
     if (!waitingSince.has(f.id)) waitingSince.set(f.id, Date.now());
@@ -317,7 +350,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   type Fail = (fb: string) => Promise<void>;
   const failer = (id: string): Fail => (fb) => edit(id, (x) => { applyFailure(x, fb, config.maxAttempts); log(root, id, x.status === 'stuck' ? 'stuck' : 'failed', fb); out(`${x.status === 'stuck' ? 'stuck' : 'retry'} ${id}: ${fb.split('\n')[0]}`); });
 
-  async function pipeline(f: Feature, config: Config, mockTasks: HumanTask[]): Promise<unknown> {
+  async function pipeline(f: Feature, config: Config, mockTasks: HumanTask[], hotHeld: string[]): Promise<unknown> {
     const id = f.id, attempt = (f.attempts || 0) + 1, branch = f.branch || config.branchPrefix + id;
     const wt = resolve(root, config.worktreesDir, id), runDir = join(P.runs, id);
     const env = { ...process.env, ...featureEnv({ FEATURE: id }) };
@@ -336,10 +369,39 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     };
 
     mkdirSync(runDir, { recursive: true });
-    const tag = runTag(readdirSync(runDir), attempt);
+    let tag = runTag(readdirSync(runDir), attempt);
     const recordPrompt = (role: Role, prompt: string) => {
-      writeFileSync(join(runDir, `${tag}-${role === 'builder' ? 'build' : 'eval'}.prompt.md`), prompt);
-      log(root, id, 'prompt', promptFingerprint(role, config[role] || {}, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config)));
+      writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
+      log(root, id, 'prompt', promptFingerprint(role, (role === 'resolver' ? config.resolver : config[role]) || {}, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config)));
+    };
+    // A conflicted refresh resolved at once by a resolver run (config.resolver), in this same pass: the feature keeps its slot
+    // and its claims, and goes on to test and evaluation. Returns the note for the evaluator, or null when the feature went
+    // back to todo (the builder then finishes the merge with the same brief, and its resolution is checked) or the run stopped.
+    const resolveNow = async (): Promise<string | null> => {
+      const cur = load(root).features.find((x) => x.id === id)!, rec = cur.conflict!, pending = pendingBrief.get(id);
+      tag = runTag(readdirSync(runDir), attempt);
+      log(root, id, 'resolving', rec.files.join(', '));
+      out(`resolve ${id}: ${rec.files.join(', ')}`);
+      const rp = resolverPrompt(root, config, f, branch, pending?.text || cur.lastFeedback || '');
+      recordPrompt('resolver', rp);
+      const r = await claude('resolver', rp, `${tag}-resolve.json`);
+      if (await stopped()) return null;
+      const tip = git(['rev-parse', branch], wt).out, has = (c: string) => git(['merge-base', '--is-ancestor', c, tip], wt).code === 0;
+      const why = !r.ok ? `the resolver failed: ${r.error}`
+        : git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 ? 'the resolver left the merge uncommitted'
+        : git(['status', '--porcelain'], wt).out ? 'the resolver left uncommitted changes'
+        : !has(rec.ours) || !has(rec.theirs) ? `the resolver did not commit the merge of ${config.base}` : null;
+      const k = why ? null : keepCheck(wt, rec.ours, rec.theirs, tip, rec.files);
+      if (why || !k!.ok) {
+        log(root, id, 'resolve-failed', why ?? `keep-check: ${k!.missing.length} lines lost`);
+        out(`retry ${id}: ${why ?? 'the resolution lost lines one side added'}`);
+        const fb = why ? `${why}; finish it yourself.` : keepFeedback(config.base, k!.missing);
+        await set(id, { status: 'todo', lastFeedback: `${cur.lastFeedback || ''}\n\nA resolver run tried first: ${fb}` });
+        return null;
+      }
+      log(root, id, 'resolved', tip);
+      await set(id, { conflict: undefined });
+      return pending?.others || rec.files.join(', ');
     };
     const wtErr = await serial(() => {
       if (existsSync(wt)) return null;
@@ -365,7 +427,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       if (pr.code !== 0) return fail(`prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`);
     }
 
-    const bp = builderPrompt(root, config, f, branch, mockTasks);
+    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld);
     recordPrompt('builder', bp);
     const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
@@ -376,35 +438,60 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     const merging = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 ? `the merge of ${config.base} the foreman started is not committed; ` : '';
     if (merging || status.length || git(['rev-list', '--count', `${config.base}..${branch}`], wt).out === '0')
       return fail(`commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`);
-    // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
-    if (config.refreshBeforeTest) {
-      const r = await serial<'halted' | 'current' | 'clean' | void>(() => tampered() ? 'halted'
-        : git(['merge-base', '--is-ancestor', baseSha, branch], wt).code === 0 ? 'current' : refresh(id, branch, fail, true));
-      if (r === 'halted') { log(root, id, 'refresh-skipped', `${halted}; back to todo`); return set(id, { status: 'todo' }); }
-      if (r !== 'current' && r !== 'clean') return; // conflicted (back to todo), stuck, or failed
+    // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
+    const rc = await checkResolution(id, branch, wt);
+    if (rc.lost) return fail(rc.lost);
+    const inline = !!config.resolver;
+    let resolved = rc.note; // after a resolution in this pass: what the evaluator must also check
+    for (;;) { // one round per inline resolution; maxRefreshes bounds it
+      // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
+      if (config.refreshBeforeTest) {
+        const r = await serial<'halted' | 'current' | 'clean' | 'conflicted' | void>(() => tampered() ? 'halted'
+          : git(['merge-base', '--is-ancestor', baseSha, branch], wt).code === 0 ? 'current' : refresh(id, branch, fail, true, inline));
+        if (r === 'halted') { log(root, id, 'refresh-skipped', `${halted}; back to todo`); return set(id, { status: 'todo' }); }
+        if (r === 'conflicted') { const note = await resolveNow(); if (note == null) return; resolved = note; continue; }
+        if (r !== 'current' && r !== 'clean') return; // conflicted (back to todo), stuck, or failed
+      }
+      const sha = git(['rev-parse', branch], wt).out; // what gets tested, evaluated and merged
+
+      await set(id, { status: 'testing' });
+      log(root, id, 'testing', sha);
+      const t = await exec('sh', ['-c', `exec 2>&1\n${config.test}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
+      if (await stopped()) return;
+      const test = { code: t.code, tail: tail(t.out + t.err) + (t.timedOut ? `\n(timed out after ${config.timeoutMin} min)` : '') };
+      if (t.code !== 0) return fail(`test command \`${config.test}\` exited ${t.code}:\n${test.tail}`);
+
+      await set(id, { status: 'evaluating' });
+      log(root, id, 'evaluating', '');
+      const diff = git(['diff', '--text', '--no-ext-diff', '--no-textconv', `${config.base}...${sha}`], wt).out;
+      const ep = evaluatorPrompt(root, config, f, branch, diff, test, resolved);
+      recordPrompt('evaluator', ep);
+      const e = await claude('evaluator', ep, `${tag}-eval.json`);
+      if (await stopped()) return;
+      const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], lesson: null, error: `evaluator failed: ${e.error}` };
+      const lesson = v.lesson;
+      if (lesson) await serial(() => compound(id, lesson));
+      if (!v.pass) return fail(feedbackFromVerdict(v));
+      if (config.merge === 'manual') { log(root, id, 'ready', branch); out(`ready ${id} (${branch})`); return set(id, { status: 'ready', sha, lastFeedback: undefined }); }
+      if (await serial(() => merge(f, branch, sha, fail, inline)) !== 'conflicted') return;
+      const note = await resolveNow(); // bounced: resolve now, then test and evaluate again
+      if (note == null) return;
+      resolved = note;
     }
-    const sha = git(['rev-parse', branch], wt).out; // what gets tested, evaluated and merged
+  }
 
-    await set(id, { status: 'testing' });
-    log(root, id, 'testing', sha);
-    const t = await exec('sh', ['-c', `exec 2>&1\n${config.test}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
-    if (await stopped()) return;
-    const test = { code: t.code, tail: tail(t.out + t.err) + (t.timedOut ? `\n(timed out after ${config.timeoutMin} min)` : '') };
-    if (t.code !== 0) return fail(`test command \`${config.test}\` exited ${t.code}:\n${test.tail}`);
-
-    await set(id, { status: 'evaluating' });
-    log(root, id, 'evaluating', '');
-    const diff = git(['diff', '--text', '--no-ext-diff', '--no-textconv', `${config.base}...${sha}`], wt).out;
-    const ep = evaluatorPrompt(root, config, f, branch, diff, test);
-    recordPrompt('evaluator', ep);
-    const e = await claude('evaluator', ep, `${tag}-eval.json`);
-    if (await stopped()) return;
-    const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], lesson: null, error: `evaluator failed: ${e.error}` };
-    const lesson = v.lesson;
-    if (lesson) await serial(() => compound(id, lesson));
-    if (!v.pass) return fail(feedbackFromVerdict(v));
-    if (config.merge === 'manual') { log(root, id, 'ready', branch); out(`ready ${id} (${branch})`); return set(id, { status: 'ready', sha, lastFeedback: undefined }); }
-    return serial(() => merge(f, branch, sha, fail));
+  // The keep-lines check of a conflicted refresh the builder resolved and committed (conflictBrief or resolver on): `lost` is
+  // feedback when lines one side added are gone; `note` tells the evaluator what else to check after a good resolution.
+  async function checkResolution(id: string, branch: string, wt: string): Promise<{ lost?: string; note: string }> {
+    const rec = load(root).features.find((x) => x.id === id)?.conflict;
+    if (!rec) return { note: '' };
+    const tip = git(['rev-parse', branch], wt).out, has = (c: string) => git(['merge-base', '--is-ancestor', c, tip], wt).code === 0;
+    if (!has(rec.ours) || !has(rec.theirs)) { log(root, id, 'keep-check', `skipped: ${branch} does not contain the conflicted merge`); await set(id, { conflict: undefined }); return { note: '' }; }
+    const k = keepCheck(wt, rec.ours, rec.theirs, tip, rec.files);
+    log(root, id, 'keep-check', k.ok ? `ok: ${rec.files.join(', ')}` : `${k.missing.length} lines lost`);
+    if (!k.ok) return { lost: keepFeedback(config.base, k.missing), note: '' };
+    await set(id, { conflict: undefined });
+    return { note: pendingBrief.get(id)?.others || `(conflicts were in ${rec.files.join(', ')})` };
   }
 
   function compound(id: string, lesson: string): void {
@@ -422,7 +509,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   // After a conflicting merge into base (or before the test, with refreshBeforeTest), the foreman (never the builder)
   // merges the verified base sha into the feature's clean worktree; a conflict there is left for the next build to
   // resolve and commit. No attempt is spent. beforeTest: a clean merge returns 'clean' and the pipeline goes on.
-  function refresh(id: string, branch: string, fail: Fail, beforeTest = false): Promise<void> | 'clean' {
+  // With conflictBrief or a resolver, the conflict feedback carries the both-sides brief and the conflict is recorded for
+  // the keep-lines check; inline (a resolver is set and a pipeline is waiting): the feature stays in flight, 'conflicted'.
+  function refresh(id: string, branch: string, fail: Fail, beforeTest = false, inline = false): Promise<void | 'conflicted'> | 'clean' {
     const wt = resolve(root, config.worktreesDir, id), base = config.base;
     const cur = load(root).features.find((x) => x.id === id), n = cur?.refreshes || 0;
     // A refresh must not drop the failure the builder still has to fix (e.g. a gate failure): keep it, minus any older
@@ -437,18 +526,27 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     if (n >= config.maxRefreshes && !beforeTest) return tooMany();
     const st = git(['status', '--porcelain'], wt);
     if (st.code || st.out) return fail(`merge conflict with ${base}; the foreman could not merge ${base} into your branch because the worktree is not clean`);
-    const m = git(['merge', '--no-edit', '-m', `${NAME}: merge ${base} into ${branch}`, baseSha], wt);
+    const both = config.conflictBrief || !!config.resolver, ours = git(['rev-parse', 'HEAD'], wt).out;
+    const m = git([...(both ? ['-c', 'merge.conflictStyle=diff3'] : []), 'merge', '--no-edit', '-m', `${NAME}: merge ${base} into ${branch}`, baseSha], wt);
     const conflicted = m.code !== 0 && git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0;
     if (m.code && !conflicted) return fail(`merge conflict with ${base}; merging ${base} into your branch did not start: ${m.err}`);
     if (beforeTest && !conflicted) { log(root, id, 'refreshed', 'before test, conflict-free'); out(`refresh ${id}: merged ${base} into ${branch} before test`); return 'clean'; }
     if (n >= config.maxRefreshes) { git(['merge', '--abort'], wt); return tooMany(); }
-    const files = git(['diff', '--name-only', '--diff-filter=U'], wt).out.split('\n').filter(Boolean).join(', ');
-    const fb = conflicted
+    const list = git(['diff', '--name-only', '--diff-filter=U'], wt).out.split('\n').filter(Boolean), files = list.join(', ');
+    let fb = conflicted
       ? `the foreman started merging ${base} into your branch and it conflicts in: ${files}. Resolve the conflicts preserving both sides' intent, run the tests, and commit the merge (git add + git commit). Do not abort it and do not start another merge or rebase.`
       : `the foreman merged ${base} into your branch (conflict-free); re-run the tests and fix anything the new base broke`;
+    const rec = conflicted && both ? { ours, theirs: baseSha, files: list } : undefined;
+    if (rec) {
+      const b = conflictBrief({ wt, base, branch, ours, theirs: baseSha, files: list, feature: cur!, features: load(root).features });
+      pendingBrief.set(id, b);
+      fb += ` Keep every line either side added; list any line you must drop or change in a commit message as \`dropped: <file>: <line>\` (a check compares).\n\n${b.text}`;
+    }
     log(root, id, 'refreshed', conflicted ? `conflicts in: ${files}` : 'conflict-free');
     out(`refresh ${id}: merged ${base} into ${branch}${conflicted ? `, conflicts in: ${files}` : ''}`);
-    return set(id, { status: 'todo', refreshes: n + 1, lastFeedback: keepPrior + fb, parked: undefined });
+    const patch = { refreshes: n + 1, lastFeedback: keepPrior + fb, parked: undefined, ...(rec ? { conflict: rec } : {}) };
+    if (rec && inline) return set(id, patch).then(() => 'conflicted' as const); // the pipeline's resolver takes it from here
+    return set(id, { status: 'todo', ...patch });
   }
 
   const checkoutProblem = (): string | null => { // why the main checkout can't take a merge now, or null
@@ -458,7 +556,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   };
   const isParked = (f: Feature) => config.merge === 'auto' && f.status === 'ready' && f.parked && f.sha;
   // A feature parked by merge-skipped: merge its evaluated sha if the branch still points to it, else rebuild it.
-  function retryMerge(f: Feature): Promise<void> {
+  function retryMerge(f: Feature): Promise<void | 'conflicted'> {
     const branch = f.branch || config.branchPrefix + f.id;
     if (git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).out === f.sha) return merge(f, branch, f.sha, failer(f.id));
     log(root, f.id, 'unparked', `${branch} moved since it was evaluated; back to todo`);
@@ -466,7 +564,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     return set(f.id, { status: 'todo', parked: undefined, sha: undefined });
   }
 
-  async function merge(f: Feature, branch: string, sha: string, fail: Fail): Promise<void> {
+  async function merge(f: Feature, branch: string, sha: string, fail: Fail, inline = false): Promise<void | 'conflicted'> {
     const id = f.id;
     if (tampered()) { log(root, id, 'merge-skipped', `${halted}; back to todo`); return set(id, { status: 'todo', parked: undefined }); }
     const why = checkoutProblem();
@@ -485,7 +583,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
         return set(id, { status: 'ready', sha, parked: undefined });
       }
       git(['merge', '--abort'], root);
-      return refresh(id, branch, fail) as Promise<void>; // 'clean' only comes back with beforeTest
+      return refresh(id, branch, fail, false, inline) as Promise<void | 'conflicted'>; // 'clean' only comes back with beforeTest
     }
     if (hook) { // e.g. assigns migration numbers; what it stages becomes part of the merge commit
       const h = await exec('sh', ['-c', `exec 2>&1\n${hook}`], { cwd: root, env: { ...process.env, ...featureEnv({ FEATURE: id, BRANCH: branch }) }, children, timeoutMin: config.timeoutMin });
@@ -523,11 +621,28 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       const overBudget = config.budgetUsdTotal != null && spent >= config.budgetUsdTotal; // null = unlimited
       const capped = () => opts.maxFeatures != null && launched >= opts.maxFeatures;
       if (!stopping && !overBudget && !onceDone && !tampered()) {
-        const busy = new Set(features.filter((f) => IN_FLIGHT.includes(f.status) || inflight.has(f.id)).map((f) => groupOf(f, config.groupBy)));
+        const running = features.filter((f) => IN_FLIGHT.includes(f.status) || inflight.has(f.id));
+        const busy = new Set(running.map((f) => groupOf(f, config.groupBy)));
+        let claims: { hot: (file: string) => boolean; held: [string, string[]][] } | null = null; // this tick's, computed on first use
         for (const id of a.ready) {
           if (inflight.size >= Math.max(1, config.maxParallel) || capped()) break;
           const g = groupOf(features.find((x) => x.id === id)!, config.groupBy);
           if (inflight.has(id) || (g != null && busy.has(g))) continue; // its group is in flight: try the next-best one
+          // File claims: never run two features that change one hot file; only features in flight hold claims, so nothing
+          // ever waits on a feature that is not running.
+          let hotHeld: string[] = [];
+          if (claimsCfg) {
+            claims ??= { hot: hotTest(hotScores(readEvents(), Date.now() - claimsCfg.days * 86400e3), claimsCfg), held: running.map((x) => [x.id, filesOf(x)]) };
+            const mine = filesOf(features.find((x) => x.id === id)!), c = claimBlock(mine, claims.held, claims.hot);
+            if (c) {
+              const why = `${c.file} is claimed by ${c.by}`;
+              if (claimWait.get(id) !== why) { claimWait.set(id, why); log(root, id, 'claim-wait', why); out(`waiting ${id}: ${why}`); }
+              continue;
+            }
+            claimWait.delete(id);
+            hotHeld = claims.held.flatMap(([by, files]) => files.filter(claims!.hot).map((x) => `${x} (${by})`));
+            claims.held.push([id, mine]);
+          }
           busy.add(g);
           launched++;
           const mockTasks = tasks.filter((t) => t.status === 'open' && t.mockable && (t.unblocks || []).includes(id));
@@ -536,7 +651,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
           out(`building ${id}${a.mock.has(id) ? ' (on mock)' : ''}`);
           if (!acceptance.has(id)) acceptance.set(id, features.find((x) => x.id === id)!.acceptance);
           const f = { ...features.find((x) => x.id === id)!, acceptance: acceptance.get(id)! };
-          inflight.set(id, pipeline(f, config, mockTasks)
+          inflight.set(id, pipeline(f, config, mockTasks, hotHeld)
             .catch((e: unknown) => { log(root, id, 'error', (e as Error | undefined)?.stack || String(e)); return set(id, { status: 'todo' }); })
             .finally(() => inflight.delete(id)));
         }

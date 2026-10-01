@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 // Fake `claude -p --output-format json` for the end-to-end tests. Builder mode commits a file;
-// evaluator mode answers with the next scripted verdict from $FAKE_VERDICTS (default: pass).
+// evaluator mode answers with the next scripted verdict from $FAKE_VERDICTS (default: pass); resolver mode finishes the
+// merge the foreman started, keeping both sides.
 // $FAKE_SCENARIO = {"<feature id>": "flag,flag"} makes it misbehave (see the flags below;
-// plain flags apply to the builder, "eval:<flag>" to the evaluator).
+// plain flags apply to the builder, "eval:<flag>" to the evaluator, "resolve:<flag>" to the resolver).
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -11,9 +12,9 @@ import type { FeaturesFile, Verdict } from '../lib/types.ts';
 const prompt = readFileSync(0, 'utf8');
 const id = process.env.FACTOS_FEATURE as string;
 const log = process.env.FAKE_LOG as string;
-const mode = prompt.startsWith('You are the builder') ? 'build' : 'eval';
+const mode = prompt.startsWith('You are the builder') ? 'build' : prompt.startsWith('You are the merge resolver') ? 'resolve' : 'eval';
 const flags = ((JSON.parse(process.env.FAKE_SCENARIO || '{}') as Record<string, string>)[id] || '').split(',');
-const has = (f: string) => flags.includes(mode === 'build' ? f : `eval:${f}`);
+const has = (f: string) => flags.includes(mode === 'build' ? f : `${mode}:${f}`);
 const git = (...a: string[]) => execFileSync('git', a, { encoding: 'utf8' }).trim();
 const root = () => dirname(git('rev-parse', '--path-format=absolute', '--git-common-dir'));
 const commit = (file: string, text: string) => { writeFileSync(file, text); git('add', file); git('commit', '-qm', `${mode} ${id}: ${file}`); };
@@ -28,7 +29,21 @@ if (has('hang')) { // never answers; leaves a grandchild in its process group
 }
 await new Promise((r) => setTimeout(r, Number(process.env.FAKE_DELAY_MS ?? 400)));
 let result = 'done', extra: Record<string, unknown> = {};
-if (mode === 'build') {
+const conflicted = () => git('diff', '--name-only', '--diff-filter=U').split('\n').filter(Boolean);
+if (mode === 'resolve') {
+  // keep both sides of each conflicted file (ours, then theirs) and commit the merge; "drop": keep only ours (loses
+  // theirs' lines); "declare": the same, but the commit message lists theirs' lines as dropped; "leave": do nothing
+  if (!has('leave')) {
+    const dropped: string[] = [];
+    for (const f of conflicted()) {
+      const ours = git('show', `:2:${f}`), theirs = git('show', `:3:${f}`);
+      writeFileSync(f, has('drop') || has('declare') ? ours + '\n' : ours + '\n' + theirs + '\n');
+      if (has('declare')) for (const l of theirs.split('\n').filter((x) => x.trim())) dropped.push(`dropped: ${f}: ${l.trim()}`);
+      git('add', f);
+    }
+    git('commit', '-q', '-m', ['resolve the merge', ...dropped].join('\n'));
+  }
+} else if (mode === 'build') {
   if (has('acceptance')) { // rewrite its own acceptance checks in features.json
     const file = join(root(), '.fact-os/features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
     d.features.find((f) => f.id === id)!.acceptance = ['nothing to check'];

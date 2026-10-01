@@ -5,7 +5,7 @@ export type Status = 'todo' | 'building' | 'testing' | 'evaluating' | 'ready' | 
 export const STATUSES: Status[] = ['todo', 'building', 'testing', 'evaluating', 'ready', 'merged', 'stuck', 'paused'];
 export type Surface = 'web' | 'api' | 'ios' | 'android' | 'desktop' | 'any';
 export type MergeMode = 'auto' | 'manual';
-export type Role = 'builder' | 'evaluator';
+export type Role = 'builder' | 'evaluator' | 'resolver';
 
 export interface RoleConfig { model?: string; effort?: string; permissionMode?: string }
 
@@ -31,8 +31,15 @@ export interface Config {
   mergeHook: string | null;
   groupBy: string | null;             // null or "idPrefix:<n>"
   restoreFrom: string | null;         // null or a ref with "{id}", e.g. "archive/task/{id}": earlier work for a branch with none
+  claims: Partial<ClaimsConfig> | null; // null = schedule by group only; set = also never run two features that share a hot file
+  conflictBrief: boolean;             // a conflicting refresh's feedback carries both sides' context; resolutions get the keep-lines check
+  resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
   observer?: Partial<ObserverConfig>; // read only by `fact-os observe`
 }
+
+// File claims (docs/merge-process.md): a file is hot when listed in `hot` (a path, or a dir prefix ending in "/") or
+// when its conflicting refreshes in the last `days` days score at least `minScore` (1 each, 2 for a bounce).
+export interface ClaimsConfig { hot: string[]; minScore: number; days: number }
 
 export interface ObserverConfig {
   pollSec: number;                    // how often the log is read
@@ -73,6 +80,8 @@ export interface Feature {
   parked?: boolean;
   pausedAt?: string;                  // ISO, while paused
   issue?: number;                     // GitHub issue number
+  touches?: string[];                 // files (or dir prefixes ending in "/") it is expected to change: claimed while it runs
+  conflict?: { ours: string; theirs: string; files: string[] }; // a conflicted base refresh whose committed resolution is not checked yet
   pid?: number;                       // current child
   pidStart?: string;                  // /proc/<pid>/stat field 22
   foremanPid?: number;

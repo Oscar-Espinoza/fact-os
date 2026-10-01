@@ -206,11 +206,11 @@ export function runCosts(runsDir: string): RunCost[] {
     let names: string[] = [];
     try { names = readdirSync(join(runsDir, f)); } catch { continue; }
     for (const n of names) {
-      const m = /-(build|eval)\.json$/.exec(n);
+      const m = /-(build|eval|resolve)\.json$/.exec(n); // a resolver run is making code: counted with the builds
       if (!m) continue;
       try {
         const file = join(runsDir, f, n), j = JSON.parse(readFileSync(file, 'utf8')) as { total_cost_usd?: unknown; duration_ms?: unknown };
-        out.push({ ts: new Date(statSync(file).mtimeMs).toISOString(), role: m[1] as 'build' | 'eval', cost: Number(j.total_cost_usd) || 0, ms: Number(j.duration_ms) || 0 });
+        out.push({ ts: new Date(statSync(file).mtimeMs).toISOString(), role: m[1] === 'eval' ? 'eval' : 'build', cost: Number(j.total_cost_usd) || 0, ms: Number(j.duration_ms) || 0 });
       } catch {}
     }
   }
