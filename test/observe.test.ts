@@ -327,3 +327,62 @@ test('agentStats: a resolver run continues the pass that hit the conflict; its m
   assert.deepEqual([era!.resolves, era!.merged, era!.resolvedMerged], [2, 1, 1]);
   assert.deepEqual(era!.builderFailures, [['merge conflict before the test', 1]]);
 });
+
+test('observe: the active model profile picks the improver\'s and the curator\'s model and effort; an invalid control.json keeps the last good one', async () => {
+  const root = repo(), fake = join(root, 'fake-claude.sh'), args = join(root, 'args.txt'), ctl = join(root, '.fact-os/control.json');
+  const prev = process.env.FACTOS_CLAUDE;
+  try {
+    const old = Array.from({ length: 40 }, (_, i) => `- lesson ${i} with enough words to pass the size limit`).join('\n');
+    const cfg = (o: object = {}) => writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh', lessonsFile: '.fact-os/lessons.md',
+      observer: { agent: { model: 'x', effort: 'low', permissionMode: 'auto' }, lessonsMaxBytes: 500, curateEveryHours: 0, improveEveryHours: 0 }, ...o }));
+    cfg();
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: ['F01-01-a', 'F01-02-b'].map((id) => F(id, { status: 'todo' })) }));
+    writeFileSync(join(root, '.fact-os/.foreman'), String(process.pid));
+    const curated = '### Testing\\n' + Array.from({ length: 6 }, (_, i) => `- Rule ${i}.`).join('\\n');
+    // the curator's prompt starts "You curate", the improver's "You improve"; each call's role and argv go to args.txt
+    writeFileSync(fake, `#!/bin/sh\nin=$(cat)\ncase "$in" in "You curate"*) echo "curator $*" >> ${args}; printf '%s' '{"type":"result","is_error":false,"result":"<lessons>\\n${curated}\\n</lessons>","total_cost_usd":0}';;\n` +
+      `*) echo "improver $*" >> ${args}; printf '%s' '{"type":"result","is_error":false,"result":"{\\"features\\":[],\\"humanTasks\\":[],\\"notes\\":\\"\\"}","total_cost_usd":0}';;\nesac\n`, { mode: 0o755 });
+    process.env.FACTOS_CLAUDE = fake;
+    const pass = async (profile: { last: string | null }) => {
+      writeFileSync(args, '');
+      writeFileSync(join(root, '.fact-os/lessons.md'), `## fact-os lessons\n\n${old}\n`);
+      writeFileSync(join(root, '.fact-os/log.jsonl'), ['F01-01-a', 'F01-02-b'].map((id) => ev(id, 'evaluating', '') + ev(id, 'refreshed', 'conflicts in: pkg/registry.ts')).join(''));
+      rmSync(observerPaths(root).state, { force: true });
+      await observeOnce(root, { out: () => {}, profile });
+      const lines = readFileSync(args, 'utf8').split('\n').filter(Boolean);
+      const of = (role: string) => { const l = lines.find((x) => x.startsWith(role + ' ')); assert.ok(l, `${role} ran: ${lines.join(' | ')}`); return l!; };
+      return { curator: of('curator'), improver: of('improver') };
+    };
+    const mem = { last: null as string | null };
+    let r = await pass(mem);
+    assert.match(r.curator, /--model x --effort low --permission-mode auto/, 'no profile: the agent config');
+    assert.match(r.improver, /--model x --effort low --permission-mode plan/);
+    writeFileSync(ctl, JSON.stringify({ profile: 'fable-sonnet' }));
+    r = await pass(mem);
+    assert.match(r.curator, /--model fable --effort medium --permission-mode auto/);
+    assert.match(r.improver, /--model fable --effort high --permission-mode plan/, 'the improver stays read-only');
+    writeFileSync(ctl, '{"profile":"nope"}');
+    r = await pass(mem);
+    assert.match(r.improver, /--model fable --effort high/, 'invalid control.json: the last good profile');
+    assert.equal(mem.last, 'fable-sonnet');
+    cfg({ profiles: { half: { curator: { model: 'c' } } } });
+    writeFileSync(ctl, JSON.stringify({ profile: 'half' }));
+    r = await pass(mem);
+    assert.match(r.curator, /--model c --effort low --permission-mode auto/, 'entry fields override only when present');
+    assert.match(r.improver, /--model x --effort low --permission-mode plan/, 'a role the profile does not name: the agent config');
+  } finally {
+    if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('agentStats: a profile switch starts a new prompt version; a risky feature\'s escalated effort does not', () => {
+  const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
+  const e = (min: number, feature: string | null, event: string, detail = '') => ({ ts: at(min), feature, event, detail });
+  const opus = 'builder model=opus effort=medium lessons=aaaaaaaa briefs=-', fs = 'builder model=sonnet effort=medium lessons=bbbbbbbb briefs=- profile=fable-sonnet';
+  const events = [e(0, 'a', 'launch'), e(0, 'a', 'prompt', opus), e(10, 'b', 'launch'), e(10, 'b', 'prompt', fs),
+    e(20, 'c', 'launch'), e(20, 'c', 'prompt', 'builder model=sonnet effort=high lessons=bbbbbbbb briefs=- profile=fable-sonnet risk=high'),
+    e(30, 'd', 'launch'), e(30, 'd', 'prompt', fs)];
+  const eras = agentStats(events, [], T0 - 60e3);
+  assert.deepEqual(eras.map((x) => [x.change, x.launches]), [['start of the window', 1], ['builder model=sonnet effort=medium briefs=- profile=fable-sonnet', 3]]);
+});

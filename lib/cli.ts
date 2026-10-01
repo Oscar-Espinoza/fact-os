@@ -8,6 +8,7 @@ import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLoc
 import { analyze, validate, SLUG } from './ready.ts';
 import { STATUSES, IN_FLIGHT, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
+import { profileNames, profileLabel, profileProblems, roleTable } from './profiles.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const USAGE = `usage: ${NAME} <command>
@@ -18,6 +19,8 @@ const USAGE = `usage: ${NAME} <command>
   pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
   lanes <n|default>               how many features may be in flight (0-${MAX_LANES}); default = config.maxParallel
+  profile [<name|default>]        model profile for new launches (opus = each role's config; fable-sonnet; config.profiles);
+                                  without a name: the active profile and its role → model/effort table
   doctor                          validate state files and tools
   dash [--root DIR] [--port 7420] dashboard on 127.0.0.1
   observe [--watch] [--agent]
@@ -72,7 +75,11 @@ function status(): void {
   const open = tasks.filter((t) => t.status === 'open');
   console.log(open.length ? '\nOpen human tasks:' : '\nNo open human tasks.');
   for (const t of open) console.log(`  ${t.id}: ${t.title} → unblocks ${(t.unblocks || []).join(', ')}${t.mockable ? ' (mockable)' : ''}`);
+  const cr = readControlFile(root, config);
+  console.log(`\nModel profile: ${cr.ok ? profileLine(cr.control.profile ?? null) : `unknown (${cr.error})`}`);
 }
+
+const profileLine = (p: string | null) => `${p ?? 'opus'} (${profileLabel(p)})`;
 
 async function done(id: string | undefined): Promise<void> {
   const root = needRoot();
@@ -109,6 +116,7 @@ function doctor(): number {
     if (typeof (f?.priority ?? 0) !== 'number') bad('priority must be a number');
     if (!STATUS.includes(f?.status as string)) bad(`status must be one of ${STATUS.join('|')}`);
     if (f?.touches !== undefined && !strs(f.touches)) bad('touches must be an array of repo paths (or dir prefixes ending in "/")');
+    if (f?.risk !== undefined && !['high', 'normal'].includes(f.risk as string)) bad('risk must be "high" or "normal" (absent: decided from the title and description)');
   }
   for (const t of tasks) {
     const bad = (m: string) => problems.push(`human task ${t?.id ?? '?'}: ${m}`);
@@ -122,22 +130,30 @@ function doctor(): number {
   if (cl != null && (typeof cl !== 'object' || !strs(cl.hot ?? []) || typeof (cl.minScore ?? 0) !== 'number' || typeof (cl.days ?? 0) !== 'number'))
     problems.push('config.claims must be null or {hot: string[], minScore: number, days: number}');
   if (config.resolver != null && typeof config.resolver !== 'object') problems.push('config.resolver must be null or {model, effort, permissionMode}');
-  const cr = readControlFile(root);
-  if (!cr.ok) problems.push(`${cr.error} (the foreman keeps its last good control, or holds all new work; fix it, or rewrite it with pause-all, resume-all or lanes)`);
+  problems.push(...profileProblems(config.profiles));
+  const cr = readControlFile(root, config);
+  if (!cr.ok) problems.push(`${cr.error} (the foreman keeps its last good control, or holds all new work; fix it, or rewrite it with pause-all, resume-all, lanes or profile)`);
   if (!problems.length) problems.push(...validate(features as unknown as Feature[], tasks as unknown as HumanTask[])); // shapes checked above
   const claude = envVar('CLAUDE') || 'claude';
   for (const [what, cmd] of [['claude', claude], ['git', 'git'], ['test command', String(config.test || '').trim().split(/\s+/)[0]]])
     if (!resolves(cmd)) problems.push(`${what}: "${cmd}" not found on PATH`);
   for (const p of problems) console.log(`✗ ${p}`);
   console.log(problems.length ? `${problems.length} problem(s)` : `ok: ${features.length} features, ${tasks.length} human tasks`);
+  if (cr.ok) console.log(`model profile: ${profileLine(cr.control.profile ?? null)}`);
   return problems.length ? 1 : 0;
 }
 
-// pause-all / resume-all / lanes: write control.json (the foreman re-reads it every tick) and print the resulting state.
+// pause-all / resume-all / lanes / profile: write control.json (the foreman re-reads it every tick) and print the resulting state.
 async function control(cmd: string, args: string[]): Promise<void> {
   const root = needRoot(), [arg] = args;
-  let patch: Partial<Pick<Control, 'paused' | 'maxParallel'>>;
-  if (cmd === 'lanes') {
+  let patch: Partial<Pick<Control, 'paused' | 'maxParallel' | 'profile'>>;
+  if (cmd === 'profile') {
+    const config = loadConfig(root), names = profileNames(config);
+    if (args.length > 1) throw new Error(`usage: ${NAME} profile [<name|default>]  (names: ${names.join(', ')})`);
+    if (!args.length) return showProfile(root, config);
+    if (arg !== 'default' && !names.includes(arg!)) throw new Error(`profile: unknown profile "${arg}" (known: ${names.join(', ')}, or default)`);
+    patch = { profile: arg! };
+  } else if (cmd === 'lanes') {
     if (args.length !== 1) throw new Error(`usage: ${NAME} lanes <n|default>  (n: 0-${MAX_LANES})`);
     if (arg !== 'default' && !/^\d+$/.test(arg!)) throw new Error(`lanes: "${arg}" is not a number from 0 to ${MAX_LANES} or "default"`);
     patch = { maxParallel: arg === 'default' ? null : Number(arg) };
@@ -146,7 +162,7 @@ async function control(cmd: string, args: string[]): Promise<void> {
     patch = { paused: cmd === 'pause-all' };
   }
   const config = loadConfig(root), def = Math.max(1, config.maxParallel), before = readControlFile(root);
-  const c = await writeControl(root, patch, 'cli');
+  const c = await writeControl(root, patch, 'cli', config);
   if (!before.ok) console.log(`note: ${before.error}; rewritten (the other setting is back to its default)`);
   const running = load(root).features.filter((f) => IN_FLIGHT.includes(f.status)).length, limit = effectiveLimit(c, config);
   const state = c.paused ? 'paused: no new features start' : limit === 0 ? 'lanes 0: no new features start' : `up to ${limit} in flight`;
@@ -156,6 +172,18 @@ async function control(cmd: string, args: string[]): Promise<void> {
   let foreman = false;
   try { foreman = pidAlive(parseInt(readFileSync(paths(root).foreman, 'utf8'), 10)); } catch {} // no .foreman: none running
   console.log(`${state}; lanes ${lanes}; ${note}${foreman ? '' : ' (no foreman running; applies when one starts)'}`);
+  if (cmd === 'profile') await showProfile(root, config, foreman);
+}
+
+// The active profile and what each role runs with under it (new launches only: running features keep the one they started with).
+async function showProfile(root: string, config: Config, foreman?: boolean): Promise<void> {
+  const cr = readControlFile(root, config), { observerConfig } = await import('./observe.ts');
+  if (!cr.ok) console.log(`note: ${cr.error}; the foreman keeps its last good profile`);
+  const p = cr.ok ? cr.control.profile ?? null : null;
+  console.log(`profile ${profileLine(p)}${foreman === undefined ? '' : `: applies to new launches${foreman ? '; running features keep theirs' : ''}`}`);
+  for (const r of roleTable(config, p, observerConfig(config, { agent: true }).agent))
+    console.log(`  ${r.role.padEnd(10)}${(r.model ?? '-').padEnd(8)}${r.effort ?? '-'}${r.effortHigh ? ` (${r.effortHigh} when risky)` : ''}`);
+  console.log(`profiles: ${profileNames(config).join(', ')}`);
 }
 
 // Claude Code hook: never prints, never fails.
@@ -200,7 +228,7 @@ try {
       if (Object.values(r).some(Boolean)) process.exitCode = 1;
       break;
     }
-    case 'pause-all': case 'resume-all': case 'lanes': await control(argv[0], argv.slice(1)); break;
+    case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
     case 'doctor': process.exitCode = doctor(); break;
     case 'hook': await hook(); process.exit(0); break;
     case 'run': {

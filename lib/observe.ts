@@ -8,7 +8,8 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
+import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
+import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import { SLUG } from './ready.ts';
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
@@ -149,8 +150,8 @@ export interface Era { since: string; change: string; launches: number; setup: n
 const median = (xs: number[]): number | null => { if (!xs.length) return null; const a = [...xs].sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m]! : (a[m - 1]! + a[m]!) / 2; };
 const top = (xs: string[], n = 5): [string, number][] => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]).slice(0, n);
 
-// How the agents did, per prompt version. A version starts at a lessons curation or when the builder's model, effort or
-// briefs change (from `prompt` events). Each `launch` is one pass: did the build reach the test, the test pass, the
+// How the agents did, per prompt version. A version starts at a lessons curation or when the builder's model, effort,
+// briefs or model profile change (from `prompt` events; a risky feature's effortHigh does not start one). Each `launch` is one pass: did the build reach the test, the test pass, the
 // evaluator pass, and did it merge or bounce on a merge conflict. Costs come from the run files, by completion time.
 // A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's version: counted in `resolves`,
 // and a merge after it in `merged` and `resolvedMerged`; its gate and evaluation are not counted again.
@@ -160,7 +161,8 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
   let setup = '';
   for (const e of events) {
     if (e.event === 'observer-lessons' && /^curated /.test(e.detail)) changes.push({ ts: e.ts, change: `lessons ${e.detail.split(';')[0]}` });
-    if (e.event === 'prompt' && e.detail.startsWith('builder ')) {
+    // A risky feature's escalated effort (` risk=high`) is a per-feature choice inside the same profile, not a new version.
+    if (e.event === 'prompt' && e.detail.startsWith('builder ') && !/ risk=high$/.test(e.detail)) {
       const key = e.detail.replace(/ lessons=\S+/, '');
       if (key !== setup) { if (setup) changes.push({ ts: e.ts, change: key }); setup = key; }
     }
@@ -264,11 +266,16 @@ export function readNew(file: string, offset: number): { events: LogEvent[]; off
 
 // ---- one pass ----
 
-export interface ObserveOptions { agent?: boolean; out?: (s: string) => void; children?: Set<ChildProcess> }
+// `profile`: the observe loop's memory of the last valid control.json profile, kept when the file turns invalid.
+export interface ObserveOptions { agent?: boolean; out?: (s: string) => void; children?: Set<ChildProcess>; profile?: { last: string | null } }
 
 export async function observeOnce(root: string, opts: ObserveOptions = {}): Promise<ObserverState> {
   const out = opts.out || ((s: string) => console.log(s));
   const P = paths(root), O = observerPaths(root), config = loadConfig(root), cfg = observerConfig(config, opts);
+  // The model profile (control.json), re-read every pass; it only picks the agent's model and effort, never turns it on.
+  const cr = readControlFile(root, config), mem = opts.profile ?? { last: null };
+  if (cr.ok) mem.last = cr.control.profile ?? null;
+  const profile = mem.last;
   const state: ObserverState = { ...fresh(), ...(readJson(O.state, {}) as Partial<ObserverState>) };
   const { events, offset } = readNew(P.log, state.offset);
   state.offset = offset;
@@ -362,8 +369,8 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
 
   for (const [file, n] of hotFiles(state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < DAY)))
     if (n >= 5) alert(`merge conflicts in ${file} keep sending features that passed evaluation back to the builder (5 or more in 24h); make it merge-friendly`, now(), DAY);
-  if (cfg.agent) await curateLessons(root, config, cfg, state, out, opts.children ?? new Set());
-  if (cfg.agent && cfg.improve) await improvePass(root, config, cfg, state, out, opts.children ?? new Set());
+  if (cfg.agent) await curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, opts.children ?? new Set());
+  if (cfg.agent && cfg.improve) await improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, opts.children ?? new Set());
 
   state.agents = agentStats(readNew(P.log, 0).events, runCosts(P.runs), Date.now() - 7 * DAY);
   state.diagnoses = state.diagnoses.slice(-500);
@@ -376,7 +383,8 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
 
 // ---- lessons ----
 
-async function curateLessons(root: string, config: Config, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
+// `agent`: the curator's resolved model/effort (the observer agent config, or the active profile's `curator` entry).
+async function curateLessons(root: string, config: Config, agent: RoleConfig, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
   const file = resolve(root, config.lessonsFile);
   const text = existsSync(file) ? readFileSync(file, 'utf8') : '', sec = lessonSection(text);
   if (!sec || Buffer.byteLength(sec.body) <= cfg.lessonsMaxBytes) return;
@@ -398,7 +406,7 @@ async function curateLessons(root: string, config: Config, cfg: ObserverConfig, 
     ...recurringTests(state.diagnoses, since, 2).slice(0, 10).map(([t, fs]) => `- ${t} failed in ${fs.length} features`), '',
     'The lessons:', '', sec.body.trim(), '', 'Answer with the curated lessons only, between <lessons> and </lessons>.'].join('\n');
   out(`observer: curating ${bulletsOf(sec.body).length} lessons (${Buffer.byteLength(sec.body)} bytes)`);
-  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs({ ...config, builder: cfg.agent! }, 'builder', root),
+  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, agent, root),
     { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
   const p = parseClaudeOutput(r.out), c = p.ok ? parseCurated(p.text, cfg.lessonsMaxBytes) : { error: `agent failed: ${p.error}` };
   if ('error' in c) { log(root, null, 'observer-lessons', `not curated: ${c.error}`); out(`observer: lessons not curated: ${c.error}`); return; }
@@ -420,7 +428,8 @@ async function curateLessons(root: string, config: Config, cfg: ObserverConfig, 
 
 // Turns what the observer saw into work: improvement features the foreman builds like any other (test gate,
 // evaluator, merge) and human tasks for what lies outside the repo. The analysis runs read-only (plan mode).
-async function improvePass(root: string, config: Config, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
+// `agent`: the improver's resolved model/effort (the observer agent config, or the active profile's `observer` entry).
+async function improvePass(root: string, config: Config, agent: RoleConfig, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
   if (state.improveAt && Date.now() - Date.parse(state.improveAt) < cfg.improveEveryHours * 3600e3) return;
   const { features, tasks } = load(root);
   const open = features.filter((f) => state.improvements.includes(f.id) && f.status !== 'merged');
@@ -456,8 +465,7 @@ async function improvePass(root: string, config: Config, cfg: ObserverConfig, st
     'Answer with ONLY a JSON object: {"features": [{"title": string, "description": string, "acceptance": string[]}], ' +
     '"humanTasks": [{"title": string, "why": string, "steps": string[]}], "notes": string}.'].filter((l) => l !== '').join('\n');
   out('observer: improver looking at the last 24 hours');
-  const role = { ...cfg.agent!, permissionMode: 'plan' };
-  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs({ ...config, builder: role }, 'builder', root),
+  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root),
     { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
   const p = parseClaudeOutput(r.out), a = parseImprover(p.ok ? p.text : '');
   const room = cfg.maxOpenImprovements - open.length, queued: string[] = [];
@@ -541,9 +549,10 @@ export async function observe(root: string, opts: ObserveOptions & { watch?: boo
   const onSignal = () => { if (stopping) process.exit(130); stopping = true; out('observer: stopping…'); for (const c of children) { try { process.kill(-c.pid!, 'SIGTERM'); } catch {} } };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
+  const profile = { last: null as string | null };
   try {
     for (;;) {
-      await observeOnce(root, { ...opts, out, children });
+      await observeOnce(root, { ...opts, out, children, profile });
       if (!opts.watch || stopping) break;
       const cfg = observerConfig(loadConfig(root), opts);
       for (let t = 0; t < cfg.pollSec * 1000 && !stopping; t += 1000) await sleep(1000);

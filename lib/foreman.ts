@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
-import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type Verdict } from './types.ts';
+import { escalates, resolveRole } from './profiles.ts';
+import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
@@ -130,11 +131,14 @@ export function runTag(existing: string[], attempt: number): string {
   return `${attempt}.${k}`;
 }
 
-// What a prompt was made of, to compare agents across prompt versions: role, model, effort and short hashes of the
-// lessons and briefs it included (the feature's own text is left out).
-export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string): string {
+// What a prompt was made of, to compare agents across prompt versions: role, the model and effort actually passed, and short
+// hashes of the lessons and briefs it included (the feature's own text is left out). Under a model profile it ends with
+// ` profile=<name>`, plus ` risk=high` when the builder got the profile's effortHigh for a risky feature (opus adds nothing,
+// so its fingerprints are unchanged).
+export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string, profile: string | null = null, risky = false): string {
   const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 8);
-  return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}`;
+  return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}` +
+    (profile ? ` profile=${profile}` : '') + (risky ? ' risk=high' : '');
 }
 
 // The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
@@ -153,8 +157,10 @@ export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'd
   return end.last === 'interrupted' ? end.sha : null;
 }
 
-// A control state in words, for the log: "paused, lanes default" / "running, lanes 2".
-export const describeControl = (c: Pick<Control, 'paused' | 'maxParallel'>): string => `${c.paused ? 'paused' : 'running'}, lanes ${c.maxParallel ?? 'default'}`;
+// A control state in words, for the log: "paused, lanes default" / "running, lanes 2, profile fable-sonnet". The profile is
+// named when one is set, or always with `profile` true (a change back to opus says so).
+export const describeControl = (c: Pick<Control, 'paused' | 'maxParallel' | 'profile'>, profile = false): string =>
+  `${c.paused ? 'paused' : 'running'}, lanes ${c.maxParallel ?? 'default'}${c.profile || profile ? `, profile ${c.profile ?? 'opus'}` : ''}`;
 
 // ---- prompts ----
 
@@ -251,8 +257,9 @@ function resolverPrompt(root: string, config: Config, f: Feature, branch: string
     briefs(root, config)].join('\n');
 }
 
-export function claudeArgs(config: Config, role: Role, root: string): string[] {
-  const r = (role === 'resolver' ? config.resolver ?? config.builder : config[role]) || {};
+// `role` is the resolved RoleConfig the launch uses (resolveRole), or a role name for its plain config (as in opus mode).
+export function claudeArgs(config: Config, role: Role | RoleConfig, root: string): string[] {
+  const r = typeof role === 'string' ? resolveRole(config, null, role) : role;
   const hook = [{ matcher: '*', hooks: [{ type: 'command', command: `"${process.execPath}" "${BIN}" hook` }] }];
   return ['-p', '--output-format', 'json', ...(r.model ? ['--model', r.model] : []), ...(r.effort ? ['--effort', r.effort] : []),
     ...(r.permissionMode ? ['--permission-mode', r.permissionMode] : []),
@@ -409,15 +416,18 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   type Fail = (fb: string) => Promise<void>;
   const failer = (id: string): Fail => (fb) => edit(id, (x) => { applyFailure(x, fb, config.maxAttempts); log(root, id, x.status === 'stuck' ? 'stuck' : 'failed', fb); out(`${x.status === 'stuck' ? 'stuck' : 'retry'} ${id}: ${fb.split('\n')[0]}`); });
 
-  async function pipeline(f: Feature, config: Config, mockTasks: HumanTask[], hotHeld: string[]): Promise<unknown> {
+  // `profile`: the model profile applied when this pass launched. Every claude run of the pass (builder, resolver, evaluator)
+  // uses it, never the live control.json value, so a switch mid-pass never changes a feature's models halfway.
+  async function pipeline(f: Feature, config: Config, mockTasks: HumanTask[], hotHeld: string[], profile: string | null): Promise<unknown> {
     const id = f.id, attempt = (f.attempts || 0) + 1, branch = f.branch || config.branchPrefix + id;
     const wt = resolve(root, config.worktreesDir, id), runDir = join(P.runs, id);
     const env = { ...process.env, ...featureEnv({ FEATURE: id }) };
     const onSpawn = (pid: number) => edit(id, (x) => { Object.assign(x, { pid, pidStart: procStart(pid) ?? undefined, foremanPid: process.pid }); }).catch(() => {}); // lets a later foreman see the child is alive
     const fail = failer(id);
     const stopped = async () => { if (!stopping) return false; await set(id, { status: 'todo' }); log(root, id, 'interrupted'); return true; };
+    const roleCfg = (role: Role) => resolveRole(config, profile, role, { feature: f });
     const claude = async (role: Role, prompt: string, file: string): Promise<ClaudeResult> => {
-      const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, role, root),
+      const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, roleCfg(role), root),
         { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin, onSpawn });
       writeFileSync(join(runDir, file), tryJson(r.out) ? r.out : JSON.stringify({ exitCode: r.code, stdout: r.out, stderr: tail(r.err) }));
       const p = parseClaudeOutput(r.out);
@@ -431,7 +441,8 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     let tag = runTag(readdirSync(runDir), attempt);
     const recordPrompt = (role: Role, prompt: string) => {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
-      log(root, id, 'prompt', promptFingerprint(role, (role === 'resolver' ? config.resolver : config[role]) || {}, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config)));
+      log(root, id, 'prompt', promptFingerprint(role, roleCfg(role), role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
+        profile, role === 'builder' && escalates(config, profile, f)));
     };
     // A conflicted refresh resolved at once by a resolver run (config.resolver), in this same pass: the feature keeps its slot
     // and its claims, and goes on to test and evaluation. Returns the note for the evaluator, or null when the feature went
@@ -686,11 +697,11 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       // interrupted, and parked merges below still merge while paused.
       // A missing file means the defaults; an invalid one never lifts a pause: it keeps the last good control, or, with none
       // read yet (an invalid file at startup), holds all new work.
-      const cr = readControlFile(root);
+      const cr = readControlFile(root, config);
       let control: Control;
       if (cr.ok) { control = lastGood = cr.control; lastBad = null; }
       else {
-        control = lastGood ?? { paused: true, maxParallel: null };
+        control = lastGood ?? { paused: true, maxParallel: null, profile: null };
         if (cr.text !== lastBad) {
           lastBad = cr.text;
           const detail = `${cr.error}; ${lastGood ? `keeping the last good control (${describeControl(lastGood)})` : 'no good control read yet: treated as paused'}`;
@@ -699,9 +710,10 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
         }
       }
       const limit = effectiveLimit(control, config);
-      if (!lastControl ? control.paused || control.maxParallel !== null
-        : control.paused !== lastControl.paused || control.maxParallel !== lastControl.maxParallel) {
-        const detail = lastControl ? `${describeControl(lastControl)} → ${describeControl(control)}; launch limit ${effectiveLimit(lastControl, config)} → ${limit}${control.by ? ` (by ${control.by})` : ''}`
+      const profileChanged = (control.profile ?? null) !== (lastControl?.profile ?? null);
+      if (!lastControl ? control.paused || control.maxParallel !== null || profileChanged
+        : control.paused !== lastControl.paused || control.maxParallel !== lastControl.maxParallel || profileChanged) {
+        const detail = lastControl ? `${describeControl(lastControl, profileChanged)} → ${describeControl(control, profileChanged)}; launch limit ${effectiveLimit(lastControl, config)} → ${limit}${control.by ? ` (by ${control.by})` : ''}`
           : `at start: ${describeControl(control)}; launch limit ${limit}`;
         log(root, null, 'control', detail);
         out(`control: ${detail}`);
@@ -754,7 +766,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
           out(`building ${id}${a.mock.has(id) ? ' (on mock)' : ''}`);
           if (!acceptance.has(id)) acceptance.set(id, features.find((x) => x.id === id)!.acceptance);
           const f = { ...features.find((x) => x.id === id)!, acceptance: acceptance.get(id)! };
-          inflight.set(id, pipeline(f, config, mockTasks, hotHeld)
+          inflight.set(id, pipeline(f, config, mockTasks, hotHeld, control.profile ?? null)
             .catch((e: unknown) => { log(root, id, 'error', (e as Error | undefined)?.stack || String(e)); return set(id, { status: 'todo' }); })
             .finally(() => inflight.delete(id)));
         }

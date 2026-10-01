@@ -97,6 +97,7 @@ if (mode === 'resolve') {
   result = 'Verdict:\n```json\n' + JSON.stringify(scripted ?? { pass: true,
     findings: [{ check: 'works', ok: true, evidence: 'fake' }], cheating: [], lesson: null }) + '\n```';
 }
-appendFileSync(log, JSON.stringify({ mode, id, t0, t1: Date.now(), prompt, args: process.argv.slice(2) }) + '\n');
+const args = process.argv.slice(2), arg = (k: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : null); // model/effort: what this launch ran with
+appendFileSync(log, JSON.stringify({ mode, id, t0, t1: Date.now(), model: arg('--model'), effort: arg('--effort'), prompt, args }) + '\n');
 process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result, total_cost_usd: 0.01,
   session_id: 'fake', ...extra }));
