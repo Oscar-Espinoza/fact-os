@@ -269,7 +269,7 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
 `--watch` repeats every `observer.pollSec` (60). `--as <id>` sets `featureId` (for projects whose `prepare` needs a
 particular id). Config (`observer` in `config.json`, all optional): `pollSec`, `retry` (true), `maxRetries` (1),
 `infraPatterns` ([]), `recurring` (2), `agent` (null or `{model, effort, permissionMode}`), `agentEveryMin` (120),
-`featureId` ("observer"), `lessonsMaxBytes` (12000), `curateEveryHours` (24). The foreman ignores the key, but editing `config.json` during a run still halts it.
+`featureId` ("observer"), `lessonsMaxBytes` (12000), `curateEveryHours` (4). The foreman ignores the key, but editing `config.json` during a run still halts it.
 
 ## Skills copied by init
 

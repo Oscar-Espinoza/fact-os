@@ -13,7 +13,7 @@ import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from 
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
 
 export const DEFAULT_OBSERVER: ObserverConfig = { pollSec: 60, retry: true, maxRetries: 1, infraPatterns: [], recurring: 2,
-  agent: null, agentEveryMin: 120, featureId: 'observer', lessonsMaxBytes: 12000, curateEveryHours: 24 };
+  agent: null, agentEveryMin: 120, featureId: 'observer', lessonsMaxBytes: 12000, curateEveryHours: 4 };
 export const DEFAULT_AGENT: RoleConfig = { model: 'opus', effort: 'high' };
 const INFRA = ['out of shared memory', 'no space left on device', 'enospc', 'too many clients', 'econnrefused',
   'connection terminated unexpectedly', 'terminating connection due to administrator command',
