@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFile
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failingTests, resolveTests, classify, signature, recurringTests, testOnly, parseAgentReport, readNew, observeOnce, observerPaths, lessonSection, parseCurated, bulletsOf } from '../lib/observe.ts';
+import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, observeOnce, observerPaths, lessonSection, parseCurated, bulletsOf } from '../lib/observe.ts';
 import type { Diagnosis, Feature } from '../lib/types.ts';
 
 const VITEST = `test command \`gate.sh\` exited 1:
@@ -53,18 +53,18 @@ test('recurringTests: tests failing outside the feature in at least n features s
   assert.deepEqual(recurringTests(diags, Date.now() - 3600e3, 2), [['t1', ['F1', 'F2']]]);
 });
 
-test('testOnly accepts test files, helpers and fixtures only', () => {
-  assert.ok(testOnly(['a/src/x.test.ts', 'a/test/helpers.ts', 'b/fixtures/one.json', 'c/src/testing/fake.ts']));
-  assert.ok(!testOnly(['a/src/x.test.ts', 'a/src/x.ts']));
-  assert.ok(!testOnly([]));
+test('improvementId follows the project\'s id style and takes the next free number', () => {
+  assert.equal(improvementId(['F01-02-a', 'F99-01-x'], 'Make provisioning.ts merge-friendly!'), 'F99-02-make-provisioning-ts-merge-friendly');
+  assert.equal(improvementId(['login', 'cart'], 'Stabilize the cart test'), 'imp-01-stabilize-the-cart-test');
+  assert.equal(improvementId([], '???'), 'imp-01-improvement');
 });
 
-test('parseAgentReport tolerates fences and drops incomplete entries', () => {
-  const r = parseAgentReport('Done.\n```json\n{"fixed":[{"test":"t","summary":"raise timeout"},{"test":"u"}],"proposals":[{"title":"Raise locks","why":"w","steps":["a"]},{"why":"no title"}],"notes":"n"}\n```');
-  assert.deepEqual(r.fixed, [{ test: 't', summary: 'raise timeout' }]);
-  assert.deepEqual(r.proposals, [{ title: 'Raise locks', why: 'w', steps: ['a'] }]);
-  assert.equal(r.notes, 'n');
-  assert.deepEqual(parseAgentReport('no json'), { fixed: [], proposals: [], notes: '' });
+test('parseImprover keeps complete features and human tasks only', () => {
+  const a = parseImprover('```json\n{"features":[{"title":"Split grants","description":"d","acceptance":["a"]},{"title":"No checks","description":"d","acceptance":[]}],' +
+    '"humanTasks":[{"title":"Raise locks","why":"w","steps":["s"]},{"why":"untitled"}],"notes":"n"}\n```');
+  assert.deepEqual(a.features, [{ title: 'Split grants', description: 'd', acceptance: ['a'] }]);
+  assert.deepEqual(a.humanTasks, [{ title: 'Raise locks', why: 'w', steps: ['s'] }]);
+  assert.deepEqual(parseImprover('nope'), { features: [], humanTasks: [], notes: '' });
 });
 
 test('readNew returns only complete new lines and starts over when the log is replaced', () => {
@@ -252,4 +252,40 @@ test('observeOnce counts features sent back by a merge conflict after passing ev
     assert.ok(s.alerts.some((a) => /merge conflicts in pkg\/registry\.ts keep sending features that passed evaluation back/.test(a.text)));
     assert.match(readFileSync(observerPaths(root).report, 'utf8'), /Passed evaluation but sent back by a merge conflict: 5\.\n\n- pkg\/registry\.ts: 5/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the improver queues improvement features ahead of the rest and files outside work as human tasks, read-only', async () => {
+  const root = repo(), fake = join(root, 'fake-claude.sh'), args = join(root, 'args.txt');
+  const prev = process.env.FACTOS_CLAUDE;
+  try {
+    writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh', observer: { agent: { model: 'x' } } }));
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: ['F01-01-a', 'F01-02-b', 'F01-03-c', 'F01-04-d', 'F01-05-e'].map((id) => F(id, { status: 'todo', priority: 3 })) }));
+    let log = '';
+    for (const id of ['F01-01-a', 'F01-02-b', 'F01-03-c', 'F01-04-d', 'F01-05-e']) log += ev(id, 'evaluating', '') + ev(id, 'refreshed', 'conflicts in: pkg/registry.ts');
+    writeFileSync(join(root, '.fact-os/log.jsonl'), log);
+    writeFileSync(join(root, '.fact-os/.foreman'), String(process.pid));
+    const answer = JSON.stringify({ features: [{ title: 'Split the registry', description: 'Five bounces.', acceptance: ['one file per entry', 'existing tests pass'] }],
+      humanTasks: [{ title: 'Raise Postgres locks', why: 'out of shared memory', steps: ['edit compose'] }], notes: 'registry is the hot spot' });
+    writeFileSync(fake, `#!/bin/sh\necho "$@" > ${args}\ncat >/dev/null\nprintf '%s' '${JSON.stringify({ type: 'result', is_error: false, result: answer, total_cost_usd: 0.3 }).replace(/'/g, "'\\''")}'\n`, { mode: 0o755 });
+    process.env.FACTOS_CLAUDE = fake;
+    const s = await observeOnce(root, { out: () => {} });
+    assert.match(readFileSync(args, 'utf8'), /--permission-mode plan/);
+    const fs = (JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')) as { features: Feature[] }).features;
+    const imp = fs.find((f) => f.id === 'F99-01-split-the-registry')!;
+    assert.ok(imp, 'queued in the project\'s id style');
+    assert.equal(imp.status, 'todo');
+    assert.ok(imp.priority < 3, 'ahead of the other features');
+    assert.deepEqual(imp.acceptance, ['one file per entry', 'existing tests pass']);
+    assert.deepEqual(s.improvements, ['F99-01-split-the-registry']);
+    const tasks = (JSON.parse(readFileSync(join(root, '.fact-os/human.json'), 'utf8')) as { tasks: { title: string; steps: string[] }[] }).tasks;
+    assert.deepEqual(tasks.map((t) => [t.title, t.steps]), [['Raise Postgres locks', ['out of shared memory', 'edit compose']]]);
+    assert.match(readFileSync(observerPaths(root).report, 'utf8'), /## Improvements queued by the observer\n\n- F99-01-split-the-registry: Split the registry \(todo\)/);
+    // Within improveEveryHours it does not run again.
+    writeFileSync(fake, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    await observeOnce(root, { out: () => {} });
+    assert.equal((JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')) as { features: Feature[] }).features.length, 6);
+  } finally {
+    if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

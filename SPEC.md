@@ -220,7 +220,7 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   of the discovered paths (no arbitrary paths). Requests with an `Origin` header other than the dash's
   own origin, or an unexpected `Host` header (DNS rebinding), are rejected.
 
-## Observer — `fact-os observe [--watch] [--agent] [--as <id>]`
+## Observer — `fact-os observe [--watch] [--agent]`
 
 A second process beside the foreman (one per project, pid in `<state dir>/.observer`). Each pass reads the new
 complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter log starts over) and:
@@ -246,14 +246,15 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    uncommitted files); a file whose merge conflicts sent 5+ features back in 24h after they passed evaluation (at most
    once a day per file). Such "bounces" (a `refreshed` with conflicts right after `evaluating`, a `lesson` in
    between allowed) are kept 7 days and reported with their files.
-5. **Agent pass** (`observer.agent`, or `--agent` with opus/high): at most every `agentEveryMin`, when a test failed
-   `untouched`/`infra` in at least `recurring` features in 24h and the agent has not looked at it in 24h. It runs
-   `claude -p` (the builder's deny rules) in `<worktreesDir>/<featureId>` on branch `fact-os-observer`, reset to base,
-   after `prepare` (run as `featureId`). Rules: change tests, test helpers and fixtures only; never skip, delete or
-   weaken a test; run what it changes; commit; describe anything else as a proposal. Its commits are merged into
-   base (`--no-ff`, `fact-os: observer fix: …`, logged `observer-fix`) only when every changed file is a test,
-   helper or fixture and the main checkout is on base and clean; otherwise a human task asks for a review.
-   Proposals become open human tasks with ids `observer-<time>-<n>` (deduplicated by title).
+5. **Improves** (with an agent, `observer.improve`, at most every `improveEveryHours` (6), while fewer than
+   `maxOpenImprovements` (2) of its features are unmerged, and only when the last 24h show something systemic: bounces,
+   alerts, recurring tests, or failures outside the features' own code): `claude -p` in **plan mode** (read-only) reads
+   the observations and the repository and answers with at most two improvements. Changes inside the repo become
+   features in `features.json` (`todo`, ahead of every other feature, ids in the project's style: `<L>99-<nn>-<slug>`
+   when every id looks like `<L><dd>-<dd>…`, else `imp-<nn>-<slug>`; logged `observer-improve`), so the foreman builds,
+   gates, evaluates and merges them like any feature. Anything outside the repo (machine or database settings, gate
+   scripts, the factory's config) becomes an open human task `observer-<time>-<n>`. It never proposes skipping or
+   weakening tests or checks, and the observer itself never commits code.
 6. **Curates the lessons** (with an agent, at most every `curateEveryHours`): when the lessons section of
    `lessonsFile` grows past `lessonsMaxBytes` (12000), `claude -p` rewrites it into at most that many bytes of bullets
    under 3–8 `### topic` headings, favoring lessons that prevent the recent failure causes. The answer must sit between
@@ -266,10 +267,10 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    person (alerts, stuck features with their cause, open proposals), the last 24h (failures by cause, tests failing
    in several features, retries, fixes) and the last 15 decisions. Times are local.
 
-`--watch` repeats every `observer.pollSec` (60). `--as <id>` sets `featureId` (for projects whose `prepare` needs a
-particular id). Config (`observer` in `config.json`, all optional): `pollSec`, `retry` (true), `maxRetries` (1),
-`infraPatterns` ([]), `recurring` (2), `agent` (null or `{model, effort, permissionMode}`), `agentEveryMin` (120),
-`featureId` ("observer"), `lessonsMaxBytes` (12000), `curateEveryHours` (4). The foreman ignores the key, but editing `config.json` during a run still halts it.
+`--watch` repeats every `observer.pollSec` (60). `--agent` turns on the agent (opus, high effort) when the config has none.
+Config (`observer` in `config.json`, all optional): `pollSec`, `retry` (true), `maxRetries` (1),
+`infraPatterns` ([]), `recurring` (2), `agent` (null or `{model, effort, permissionMode}`), `improve` (true), `improveEveryHours` (6),
+`maxOpenImprovements` (2), `lessonsMaxBytes` (12000), `curateEveryHours` (4). The foreman ignores the key, but editing `config.json` during a run still halts it.
 
 ## Skills copied by init
 

@@ -1,19 +1,21 @@
 // Observer: a second loop beside the foreman. It reads log.jsonl, sorts every stuck feature by cause, sends back
 // the ones stuck for a reason outside the feature (a failing test the feature does not change, an infrastructure
 // error) with a note for the next build, re-parks features whose merge never started, and writes a report.
-// With an agent it also runs a fresh Claude session on tests that keep failing across features: a fix that only
-// touches test files is merged into base; anything else it would change becomes a human task. It also keeps the
-// lessons builders read short: once their section grows past a limit, the agent rewrites it into a curated set and
-// the full text goes to an archive. The observer itself never edits config, gates or product code.
+// With an agent it also acts on what it saw: the improver turns recurring causes of lost work into improvement
+// features (built, gated, evaluated and merged by the foreman like any other) and human tasks for what lies outside
+// the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). The
+// observer itself never changes code: every code change goes through the factory's own checks.
 import { existsSync, readFileSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
+import { SLUG } from './ready.ts';
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
 
 export const DEFAULT_OBSERVER: ObserverConfig = { pollSec: 60, retry: true, maxRetries: 1, infraPatterns: [], recurring: 2,
-  agent: null, agentEveryMin: 120, featureId: 'observer', lessonsMaxBytes: 12000, curateEveryHours: 4 };
+  agent: null, lessonsMaxBytes: 12000, curateEveryHours: 4,
+  improve: true, improveEveryHours: 6, maxOpenImprovements: 2 };
 export const DEFAULT_AGENT: RoleConfig = { model: 'opus', effort: 'high' };
 const INFRA = ['out of shared memory', 'no space left on device', 'enospc', 'too many clients', 'econnrefused',
   'connection terminated unexpectedly', 'terminating connection due to administrator command',
@@ -83,21 +85,6 @@ export function recurringTests(diags: Diagnosis[], since: number, n: number): [s
   return [...by].filter(([, f]) => f.size >= n).map(([t, f]) => [t, [...f].sort()] as [string, string[]]).sort((a, b) => b[1].length - a[1].length);
 }
 
-// A change the agent may merge on its own: test files, test helpers and fixtures only.
-const TESTISH = /(^|\/)(test|tests|__tests__|fixtures|testing|test-support|test-utils)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
-export const testOnly = (files: string[]): boolean => files.length > 0 && files.every((f) => TESTISH.test(f));
-
-export function parseAgentReport(text: string): { fixed: { test: string; summary: string }[]; proposals: { title: string; why: string; steps: string[] }[]; notes: string } {
-  const tryJson = (s: string | undefined): Record<string, unknown> | undefined => { try { const v = s && JSON.parse(s); return v && typeof v === 'object' && !Array.isArray(v) ? v : undefined; } catch { return undefined; } };
-  const v = tryJson(text) ?? tryJson(text.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1]) ?? tryJson(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) ?? {};
-  const arr = (x: unknown): Record<string, unknown>[] => (Array.isArray(x) ? x.filter((e) => e && typeof e === 'object') : []);
-  return {
-    fixed: arr(v.fixed).map((f) => ({ test: String(f.test ?? ''), summary: String(f.summary ?? '') })).filter((f) => f.summary),
-    proposals: arr(v.proposals).map((p) => ({ title: String(p.title ?? '').trim(), why: String(p.why ?? ''), steps: Array.isArray(p.steps) ? p.steps.map(String) : [] })).filter((p) => p.title),
-    notes: typeof v.notes === 'string' ? v.notes : '',
-  };
-}
-
 // The lessons section of a lessons file: from its heading to the next level-1/2 heading (as appendLesson writes it).
 export function lessonSection(text: string): { before: string; heading: string; body: string; after: string } | null {
   const lines = text.split('\n'), h = lines.findIndex((l) => [HEADING, ...OLD_HEADINGS].includes(l.trim()));
@@ -127,6 +114,31 @@ export function hotFiles(bounces: { files: string[] }[]): [string, number][] {
   return [...n].sort((a, b) => b[1] - a[1]);
 }
 
+// Ids for improvement features in the project's own id style: "<L>99-<nn>-<slug>" when every id looks like
+// "<L><dd>-<dd>…" (so per-feature tooling that parses ids keeps working), else "imp-<nn>-<slug>".
+export function improvementId(existing: string[], title: string): string {
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'improvement';
+  const style = existing.length && existing.every((id) => /^[A-Z]\d\d-\d\d/.test(id)) ? `${existing[0]![0]}99-` : 'imp-';
+  const used = new Set(existing.map((id) => id.startsWith(style) ? id.slice(style.length, style.length + 2) : '').filter(Boolean));
+  let n = 1;
+  while (used.has(String(n).padStart(2, '0'))) n++;
+  return `${style}${String(n).padStart(2, '0')}-${slug}`;
+}
+
+export interface ImproverAnswer { features: { title: string; description: string; acceptance: string[] }[]; humanTasks: { title: string; why: string; steps: string[] }[]; notes: string }
+export function parseImprover(text: string): ImproverAnswer {
+  const tryJson = (s: string | undefined): Record<string, unknown> | undefined => { try { const v = s && JSON.parse(s); return v && typeof v === 'object' && !Array.isArray(v) ? v : undefined; } catch { return undefined; } };
+  const v = tryJson(text) ?? tryJson(text.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1]) ?? tryJson(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) ?? {};
+  const arr = (x: unknown): Record<string, unknown>[] => (Array.isArray(x) ? x.filter((e) => e && typeof e === 'object') : []);
+  const strs = (x: unknown): string[] => (Array.isArray(x) ? x.map(String).map((t) => t.trim()).filter(Boolean) : []);
+  return {
+    features: arr(v.features).map((f) => ({ title: String(f.title ?? '').trim(), description: String(f.description ?? '').trim(), acceptance: strs(f.acceptance) }))
+      .filter((f) => f.title && f.description && f.acceptance.length),
+    humanTasks: arr(v.humanTasks).map((t) => ({ title: String(t.title ?? '').trim(), why: String(t.why ?? ''), steps: strs(t.steps) })).filter((t) => t.title),
+    notes: typeof v.notes === 'string' ? v.notes : '',
+  };
+}
+
 // ---- state ----
 
 export interface ObserverState {
@@ -134,21 +146,19 @@ export interface ObserverState {
   retried: Record<string, string[]>;            // feature → signatures it was sent back for
   diagnoses: Diagnosis[];                       // newest last, capped
   alerts: { ts: string; text: string }[];
-  fixes: { ts: string; commit: string; summary: string }[];
-  agentAt?: string;
-  agentTargets: Record<string, string>;         // test → when the agent last looked at it
   lastEvent: Record<string, string>;            // feature → its previous log event, across passes
   bounces: { ts: string; feature: string; files: string[] }[]; // passed evaluation, then sent back by a merge conflict
   agentNotes?: string;
   lessonsAt?: string;                           // last curation
+  improveAt?: string;                           // last improver run
+  improvements: string[];                       // feature ids the improver queued
 }
-const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], fixes: [], agentTargets: {}, lastEvent: {}, bounces: [] });
+const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], lastEvent: {}, bounces: [], improvements: [] });
 export const observerPaths = (root: string) => { const d = paths(root).dir; return { state: join(d, 'observer.json'), report: join(d, 'observer-report.md'), pid: join(d, '.observer') }; };
 
-export function observerConfig(config: Config, opts: { agent?: boolean; as?: string } = {}): ObserverConfig {
+export function observerConfig(config: Config, opts: { agent?: boolean } = {}): ObserverConfig {
   const c = { ...DEFAULT_OBSERVER, ...(config.observer || {}) };
   if (opts.agent && !c.agent) c.agent = { ...DEFAULT_AGENT, permissionMode: config.builder?.permissionMode };
-  if (opts.as) c.featureId = opts.as;
   return c;
 }
 
@@ -167,7 +177,7 @@ export function readNew(file: string, offset: number): { events: LogEvent[]; off
 
 // ---- one pass ----
 
-export interface ObserveOptions { agent?: boolean; as?: string; out?: (s: string) => void; children?: Set<ChildProcess> }
+export interface ObserveOptions { agent?: boolean; out?: (s: string) => void; children?: Set<ChildProcess> }
 
 export async function observeOnce(root: string, opts: ObserveOptions = {}): Promise<ObserverState> {
   const out = opts.out || ((s: string) => console.log(s));
@@ -265,8 +275,8 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
 
   for (const [file, n] of hotFiles(state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < DAY)))
     if (n >= 5) alert(`merge conflicts in ${file} keep sending features that passed evaluation back to the builder (${n >= 10 ? '10+' : '5+'} in 24h); make it merge-friendly`, now(), DAY);
-  if (cfg.agent) await agentPass(root, config, cfg, state, out, opts.children ?? new Set());
   if (cfg.agent) await curateLessons(root, config, cfg, state, out, opts.children ?? new Set());
+  if (cfg.agent && cfg.improve) await improvePass(root, config, cfg, state, out, opts.children ?? new Set());
 
   state.diagnoses = state.diagnoses.slice(-500);
   state.bounces = state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < 7 * DAY);
@@ -274,90 +284,6 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   writeJsonAtomic(O.state, state);
   writeFileSync(O.report, renderReport(root, state, load(root).features, load(root).tasks, pidAlive(foremanPid)));
   return state;
-}
-
-// ---- the agent ----
-
-async function agentPass(root: string, config: Config, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
-  if (state.agentAt && Date.now() - Date.parse(state.agentAt) < cfg.agentEveryMin * 60e3) return;
-  const targets = recurringTests(state.diagnoses, Date.now() - DAY, cfg.recurring)
-    .filter(([t]) => !state.agentTargets[t] || Date.now() - Date.parse(state.agentTargets[t]!) > DAY);
-  const infra = state.alerts.filter((a) => Date.now() - Date.parse(a.ts) < DAY).map((a) => a.text);
-  if (!targets.length) return;
-  state.agentAt = now();
-  for (const [t] of targets) state.agentTargets[t] = state.agentAt;
-
-  const wt = resolve(root, config.worktreesDir, cfg.featureId), branch = `${NAME}-observer`;
-  const add = existsSync(wt) ? (git(['reset', '--hard', '-q'], wt), git(['checkout', '-q', '-B', branch, config.base], wt))
-    : git(['worktree', 'add', '-q', '-B', branch, wt, config.base], root);
-  if (add.code) { out(`observer: agent worktree: ${add.err}`); log(root, null, 'observer-agent', `worktree: ${add.err}`); return; }
-  const env = { ...process.env, ...featureEnv({ FEATURE: cfg.featureId }) };
-  let setup = '';
-  if (config.prepare) {
-    const p = await exec('sh', ['-c', `exec 2>&1\n${config.prepare}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin });
-    setup = p.code === 0 ? '' : `The project's prepare command \`${config.prepare}\` failed here (exit ${p.code}):\n${tail(p.out + p.err, 1500)}\n`;
-  }
-  const examples = (t: string) => state.diagnoses.filter((d) => d.tests.includes(t)).slice(-2).map((d) => `${d.feature} at ${d.ts}`).join('; ');
-  const detailOf = (t: string) => {
-    const d = [...state.diagnoses].reverse().find((x) => x.tests.includes(t));
-    const ev = d && [...readNew(paths(root).log, 0).events].reverse().find((e) => e.feature === d.feature && e.ts === d.ts);
-    return ev ? tail(ev.detail, 2500) : '';
-  };
-  const prompt = [`You are the ${NAME} observer agent for this repository. Features are built in parallel by other agents; each`,
-    'runs the test command before it may merge. The tests below keep failing in features that do not change them, so the',
-    'problem is in the test, a shared fixture or the environment, not in those features.', '',
-    ...targets.map(([t, fs]) => `## ${t}\nFailed in ${fs.length} features in the last 24 hours (${fs.join(', ')}; latest: ${examples(t)}).\nLatest failure output:\n\`\`\`\n${detailOf(t)}\n\`\`\``),
-    infra.length ? `\n## Recent alerts\n${infra.map((a) => `- ${a}`).join('\n')}` : '', setup, '',
-    `You work in a git worktree on branch ${branch}, created from ${config.base}. Find the root cause of each failure.`,
-    'Rules:',
-    '- You may change test files, test helpers and fixtures only. Never change product code, the test command, gate or CI scripts,',
-    '  configuration, or anything outside this worktree.',
-    '- Never skip, delete or weaken a test or an assertion. Raising a timeout is fine only when the evidence shows the code was',
-    '  correct but slow under load; say so in the commit message.',
-    '- Run each test file you change, more than once, and commit only what passes (git add + git commit on this branch). Do not',
-    '  merge, push or switch branches.',
-    '- When the cause is outside what you may change (database or machine settings, scripts, product code), change nothing for',
-    '  it and describe it as a proposal for a person: what is wrong, the evidence, and the steps to fix it.', '',
-    'Answer with ONLY a JSON object: {"fixed": [{"test": string, "summary": string}], "proposals": [{"title": string, "why": string, ' +
-    '"steps": string[]}], "notes": string}.'].join('\n');
-
-  out(`observer: agent looking at ${targets.map(([t]) => t).join(', ')}`);
-  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs({ ...config, builder: cfg.agent! }, 'builder', root),
-    { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin });
-  const p = parseClaudeOutput(r.out);
-  const report = parseAgentReport(p.text);
-  state.agentNotes = report.notes || (p.ok ? '' : `agent failed: ${p.error}`);
-  log(root, null, 'observer-agent', `${p.ok ? 'done' : `failed: ${p.error}`}; $${p.cost.toFixed(2)}; ${report.fixed.length} fixed, ${report.proposals.length} proposals`);
-
-  // Merge its commits into base only when they touch test files alone and the main checkout is clean.
-  const changed = git(['diff', '--name-only', `${config.base}...${branch}`], root).out.split('\n').filter(Boolean);
-  if (git(['rev-list', '--count', `${config.base}..${branch}`], root).out !== '0') {
-    const summary = report.fixed.map((f) => f.summary).join('; ') || 'test fixes';
-    const head = git(['symbolic-ref', '--quiet', '--short', 'HEAD'], root).out;
-    const dirty = git(['status', '--porcelain', '--untracked-files=no', '--', '.', `:(exclude)${paths(root).name}`], root).out;
-    if (!testOnly(changed)) report.proposals.push({ title: `Review the observer's fix on branch ${branch}`, why: `It changes files other than tests (${changed.join(', ')}), so it was not merged: ${summary}`, steps: [`git diff ${config.base}...${branch}`, `git merge --no-ff ${branch} if it is right`] });
-    else if (head !== config.base || dirty) out(`observer: fix on ${branch} not merged: the main checkout is ${head !== config.base ? `on ${head}` : 'dirty'}; next pass`);
-    else {
-      const m = git(['merge', '--no-ff', '-m', `${NAME}: observer fix: ${summary}`, branch], root);
-      if (m.code) {
-        if (git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], root).code === 0) git(['merge', '--abort'], root);
-        out(`observer: merging ${branch} failed: ${firstLine(m.err)}`);
-      } else {
-        const commit = git(['rev-parse', '--short', 'HEAD'], root).out;
-        state.fixes.push({ ts: now(), commit, summary });
-        log(root, null, 'observer-fix', `${commit}: ${summary}`);
-        out(`observer: merged fix ${commit}: ${summary}`);
-      }
-    }
-  }
-  if (report.proposals.length) await mutate(root, 'human', (d) => {
-    for (const [i, pr] of report.proposals.entries()) {
-      if (d.tasks.some((t) => t.status === 'open' && t.title === pr.title)) continue;
-      const t: HumanTask = { id: `observer-${Date.now().toString(36)}-${i}`, title: pr.title, steps: [pr.why, ...pr.steps].filter(Boolean), unblocks: [], mockable: false, status: 'open' };
-      d.tasks.push(t);
-      log(root, null, 'observer-proposal', `${t.id}: ${t.title}`);
-    }
-  });
 }
 
 // ---- lessons ----
@@ -402,6 +328,72 @@ async function curateLessons(root: string, config: Config, cfg: ObserverConfig, 
   out(`observer: curated lessons: ${bulletsOf(sec.body).length} → ${bulletsOf(c.body).length + added.length}, ${size} bytes`);
 }
 
+// ---- the improver ----
+
+// Turns what the observer saw into work: improvement features the foreman builds like any other (test gate,
+// evaluator, merge) and human tasks for what lies outside the repo. The analysis runs read-only (plan mode).
+async function improvePass(root: string, config: Config, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
+  if (state.improveAt && Date.now() - Date.parse(state.improveAt) < cfg.improveEveryHours * 3600e3) return;
+  const { features, tasks } = load(root);
+  const open = features.filter((f) => state.improvements.includes(f.id) && f.status !== 'merged');
+  if (open.length >= cfg.maxOpenImprovements) return;
+  const since = Date.now() - DAY, recent = state.diagnoses.filter((d) => Date.parse(d.ts) >= since);
+  const bounces = state.bounces.filter((b) => Date.parse(b.ts) >= since), alerts = state.alerts.filter((a) => Date.parse(a.ts) >= since);
+  const recurring = recurringTests(state.diagnoses, since, cfg.recurring);
+  if (!bounces.length && !alerts.length && !recurring.length && !recent.some((d) => d.cause !== 'own')) return; // nothing systemic to fix
+  state.improveAt = now();
+  const causes = Object.entries(recent.reduce<Record<string, number>>((m, d) => ((m[d.cause] = (m[d.cause] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
+  const examples = recent.filter((d) => d.cause !== 'own').slice(-8).map((d) => `- ${d.ts} ${d.feature}: ${d.cause} (${d.evidence})`);
+  const prompt = [`You improve the ${NAME} software factory that builds this repository: many builders work on features in parallel`,
+    'worktrees, each feature passes a test gate and an independent evaluator, then merges into ' + config.base + '. Below is what',
+    'the observer saw in the last 24 hours. Find the causes that waste the most work across features and decide what would remove',
+    'them. Read the repository as needed. Do not modify anything: your answer is a plan that others carry out.', '',
+    `Failures by cause: ${causes.map(([c, n]) => `${c} ${n}`).join(', ') || 'none'}.`,
+    `Finished features sent back by merge conflicts: ${bounces.length}.`, ...hotFiles(bounces).slice(0, 8).map(([f, n]) => `- ${f}: ${n}`),
+    recurring.length ? 'Tests failing in several features that do not change them:' : '', ...recurring.slice(0, 8).map(([t, fs]) => `- ${t}: ${fs.join(', ')}`),
+    alerts.length ? 'Alerts:' : '', ...alerts.map((a) => `- ${a.text}`),
+    examples.length ? 'Recent failures outside the features\' own code:' : '', ...examples, '',
+    'Already queued or waiting (do not repeat them):', ...open.map((f) => `- feature ${f.id}: ${f.title}`),
+    ...tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-')).map((t) => `- human task: ${t.title}`), '',
+    'Answer with at most two improvements, the ones that would save the most work, as:',
+    '- "features": changes inside this repository (tests, tooling, structure of shared files). Each is built by a builder and',
+    '  checked by an evaluator, so write it like a feature: a title, a description with the evidence above, what to change and',
+    '  what must not change, and acceptance checks an independent evaluator can verify (always including that the existing',
+    '  tests and checks still pass). Never propose skipping, deleting or weakening tests or checks.',
+    '- "humanTasks": anything outside the repository (machine or database settings, CI or gate scripts, the factory\'s own',
+    '  config): a title, why (with the evidence), and the steps.', '',
+    'Answer with ONLY a JSON object: {"features": [{"title": string, "description": string, "acceptance": string[]}], ' +
+    '"humanTasks": [{"title": string, "why": string, "steps": string[]}], "notes": string}.'].filter((l) => l !== '').join('\n');
+  out('observer: improver looking at the last 24 hours');
+  const role = { ...cfg.agent!, permissionMode: 'plan' };
+  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs({ ...config, builder: role }, 'builder', root),
+    { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
+  const p = parseClaudeOutput(r.out), a = parseImprover(p.ok ? p.text : '');
+  const room = cfg.maxOpenImprovements - open.length, queued: string[] = [];
+  if (a.features.length && room > 0) await mutate(root, 'features', (d) => {
+    for (const f of a.features.slice(0, room)) {
+      if (d.features.some((x) => x.title.toLowerCase() === f.title.toLowerCase() && x.status !== 'merged')) continue;
+      const id = improvementId(d.features.map((x) => x.id), f.title);
+      if (!SLUG.test(id)) continue;
+      const priority = Math.min(0, ...d.features.map((x) => x.priority ?? 0)) - 1; // ahead of everything else
+      d.features.push({ id, title: f.title, description: `${f.description}\n\n(Queued by the ${NAME} observer from what it saw in the factory.)`,
+        acceptance: f.acceptance, surface: 'any', deps: [], priority, status: 'todo', attempts: 0, updatedAt: now() });
+      queued.push(id);
+    }
+  });
+  for (const id of queued) { state.improvements.push(id); log(root, id, 'observer-improve', 'queued as an improvement feature'); out(`observer: queued improvement ${id}`); }
+  if (a.humanTasks.length) await mutate(root, 'human', (d) => {
+    for (const [i, t] of a.humanTasks.entries()) {
+      if (d.tasks.some((x) => x.status === 'open' && x.title === t.title)) continue;
+      const task: HumanTask = { id: `observer-${Date.now().toString(36)}-${i}`, title: t.title, steps: [t.why, ...t.steps].filter(Boolean), unblocks: [], mockable: false, status: 'open' };
+      d.tasks.push(task);
+      log(root, null, 'observer-proposal', `${task.id}: ${task.title}`);
+    }
+  });
+  if (a.notes) state.agentNotes = a.notes;
+  log(root, null, 'observer-agent', `improver ${p.ok ? 'done' : `failed: ${p.error}`}; $${p.cost.toFixed(2)}; ${queued.length} features, ${a.humanTasks.length} human tasks`);
+}
+
 // ---- report ----
 
 const at = (iso: string): string => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -429,11 +421,11 @@ export function renderReport(root: string, state: ObserverState, features: Featu
       ...stuck.map((f) => { const d = lastFor(f.id); return `- ${f.id} is stuck: ${d ? `${CAUSE[d.cause]} (${d.evidence})` : firstLine(f.lastFeedback || '')}`; }),
       ...proposals.map((t) => `- Proposal ${t.id}: ${t.title}`)] : ['Nothing.']), '',
     '## Last 24 hours', '',
-    `Failures: ${recent.length}. Sent back by the observer: ${sent.length}. Fixes merged: ${state.fixes.filter((f) => Date.parse(f.ts) >= since).length}.`, '',
+    `Failures: ${recent.length}. Sent back by the observer: ${sent.length}. Improvements queued: ${state.improvements.length}.`, '',
     ...(causes.length ? ['| Cause | Failures |', '| --- | --- |', ...causes.map(([c, n]) => `| ${CAUSE[c as Cause]} | ${n} |`), ''] : []),
     ...(bounces.length ? [`Passed evaluation but sent back by a merge conflict: ${bounces.length}.`, '', ...hot.slice(0, 5).map(([f, n]) => `- ${f}: ${n}`), ''] : []),
     ...(recurring.length ? ['Tests failing in several features:', '', ...recurring.map(([t, fs]) => `- ${t}: ${fs.join(', ')}`), ''] : []),
-    ...(state.fixes.length ? ['## Fixes merged by the observer', '', ...state.fixes.slice(-10).reverse().map((f) => `- ${at(f.ts)} ${f.commit}: ${f.summary}`), ''] : []),
+    ...(state.improvements.length ? ['## Improvements queued by the observer', '', ...state.improvements.slice(-10).reverse().map((id) => { const f = features.find((x) => x.id === id); return `- ${id}: ${f ? `${f.title} (${f.status})` : 'removed'}`; }), ''] : []),
     ...(state.agentNotes ? ['## Agent notes', '', state.agentNotes, ''] : []),
     '## Recent decisions', '',
     ...state.diagnoses.filter((d) => d.action && d.action !== 'none: the foreman retries it').slice(-15).reverse()

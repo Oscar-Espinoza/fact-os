@@ -40,9 +40,10 @@ export interface ObserverConfig {
   maxRetries: number;                 // per feature and failure signature
   infraPatterns: string[];            // extra substrings (case-insensitive) that mark an infrastructure failure
   recurring: number;                  // a test failing in this many features (24h) is recurring
-  agent: RoleConfig | null;           // null = no agent pass
-  agentEveryMin: number;
-  featureId: string;                  // id the agent's worktree runs `prepare` as
+  agent: RoleConfig | null;           // null = observe and send back only; set = also curate lessons and improve
+  improve: boolean;                   // with an agent: turn observations into improvement features and human tasks
+  improveEveryHours: number;
+  maxOpenImprovements: number;        // improvement features not merged yet
   lessonsMaxBytes: number;            // the agent curates the lessons section once it grows past this
   curateEveryHours: number;           // at most this often
 }

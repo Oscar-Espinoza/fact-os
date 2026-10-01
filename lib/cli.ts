@@ -18,9 +18,9 @@ const USAGE = `usage: ${NAME} <command>
   pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
   doctor                          validate state files and tools
   dash [--root DIR] [--port 7420] dashboard on 127.0.0.1
-  observe [--watch] [--agent] [--as <id>]
+  observe [--watch] [--agent]
                                   sort stuck features by cause, send back the ones stuck for a reason outside
-                                  them, report; --agent also fixes tests that keep failing across features
+                                  them, report; --agent also curates lessons and queues improvements
   hook                            (internal) Claude Code hook: stdin payload → activity.jsonl`;
 
 // Main checkout of the repo containing dir (works from worktrees), or null.
@@ -151,9 +151,9 @@ async function hook(): Promise<void> {
 const argv = process.argv.slice(2);
 const { values, positionals } = parseArgs({ args: argv.slice(1), allowPositionals: true, options: {
   test: { type: 'string' }, watch: { type: 'boolean' }, once: { type: 'boolean' }, 'max-features': { type: 'string' },
-  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' }, as: { type: 'string' } }, strict: argv[0] !== 'hook' });
+  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' } }, strict: argv[0] !== 'hook' });
 // strict parsing (every command but hook, which ignores o) guarantees these types.
-const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean; as?: string };
+const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean };
 try {
   switch (argv[0]) {
     case 'init': init(o.test); break;
@@ -176,7 +176,7 @@ try {
     }
     case 'observe': {
       const { observe } = await import('./observe.ts');
-      process.exitCode = await observe(needRoot(), { watch: o.watch, agent: o.agent, as: o.as });
+      process.exitCode = await observe(needRoot(), { watch: o.watch, agent: o.agent });
       break;
     }
     case 'dash': {
