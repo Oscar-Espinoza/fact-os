@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="/dash/factory.css">
 <link rel="stylesheet" href="/dash/board.css">
 <link rel="stylesheet" href="/dash/you.css">
+<link rel="stylesheet" href="/dash/observer.css">
 <link rel="stylesheet" href="/dash/detail.css">
 </head>
 <body data-name="{{NAME}}">
@@ -18,6 +19,7 @@
   <nav class="tabs" aria-label="Views">
     <a href="#factory" data-v="factory">Factory</a>
     <a href="#board" data-v="board">Board</a>
+    <a href="#observer" data-v="observer">Observer</a>
     <a href="#project" data-v="project">Project</a>
     <a href="#you" data-v="you">Only you <span class="badge" id="you-n"></span></a>
   </nav>
@@ -32,6 +34,7 @@
 <main>
   <section class="view" id="v-factory"><div id="factory"></div></section>
   <section class="view" id="v-board"><div id="board"></div></section>
+  <section class="view" id="v-observer"><div id="observer"></div></section>
   <section class="view" id="v-project"><div id="project"></div></section>
   <section class="view" id="v-you"><div id="you"></div></section>
   <section class="view" id="v-detail"><div id="detail"></div></section>
@@ -42,6 +45,7 @@
 <script src="/dash/factory.js"></script>
 <script src="/dash/board.js"></script>
 <script src="/dash/you.js"></script>
+<script src="/dash/observer.js"></script>
 <script src="/dash/detail.js"></script>
 <script>F.boot();</script>
 </body>

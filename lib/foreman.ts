@@ -179,10 +179,10 @@ export function git(args: string[], cwd: string): { code: number; out: string; e
 // Children run in their own process group, so a signal reaches everything they started.
 const killGroup = (cp: ChildProcess, sig: NodeJS.Signals) => { try { process.kill(-cp.pid!, sig); } catch {} }; // no pid: -NaN throws
 
-interface ExecOptions { cwd: string; env: NodeJS.ProcessEnv; input?: string; children: Set<ChildProcess>; timeoutMin: number | null; onSpawn?: (pid: number) => unknown }
-interface ExecResult { code: number; out: string; err: string; timedOut: boolean }
+export interface ExecOptions { cwd: string; env: NodeJS.ProcessEnv; input?: string; children: Set<ChildProcess>; timeoutMin: number | null; onSpawn?: (pid: number) => unknown }
+export interface ExecResult { code: number; out: string; err: string; timedOut: boolean }
 
-function exec(cmd: string, args: string[], { cwd, env, input = '', children, timeoutMin, onSpawn }: ExecOptions): Promise<ExecResult> {
+export function exec(cmd: string, args: string[], { cwd, env, input = '', children, timeoutMin, onSpawn }: ExecOptions): Promise<ExecResult> {
   return new Promise((res) => {
     let out = '', err = '', done = false, timedOut = false;
     const cp = spawn(cmd, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });

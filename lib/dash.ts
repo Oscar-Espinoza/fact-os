@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { paths, load, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson } from './state.ts';
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
-import type { ActivityEvent, Config, Feature, HumanTask, LogEvent, MergeMode, RoleConfig } from './types.ts';
+import { observerPaths, recurringTests, type ObserverState } from './observe.ts';
+import type { ActivityEvent, Config, Diagnosis, Feature, HumanTask, LogEvent, MergeMode, RoleConfig } from './types.ts';
 
 // Median durations (ms) of each pipeline stage, for the dashboard's estimated progress; null = no history yet.
 export interface Estimates { build: number | null; test: number | null; eval: number | null }
@@ -21,6 +22,12 @@ export interface ProjectState {
   hasProjectView: boolean;
   repoUrl?: string;                    // https://github.com/<owner>/<repo>, from the origin remote
   stats: Stats;
+  observer: ObserverSummary | null;    // null when the observer has never run here
+}
+export interface ObserverSummary {
+  updatedAt: string; running: boolean; alerts24h: { ts: string; text: string }[]; stuck: { id: string; cause: string; evidence: string }[];
+  decisions: Diagnosis[]; causes24h: { cause: string; n: number }[]; recurring: { test: string; features: string[] }[];
+  fixes: ObserverState['fixes']; sentBack24h: number; agentAt?: string; agentNotes?: string; proposals: { id: string; title: string }[];
 }
 export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
 export interface Run {
@@ -147,12 +154,37 @@ function foreman(dir: string): ProjectState['foreman'] {
   } catch { return { running: false, since: null }; }
 }
 
+// The observer's summary for the Observer view; null when it has not run here or its file is unreadable.
+function observer(dir: string, features: Feature[], tasks: HumanTask[]): ObserverSummary | null {
+  try {
+    const O = observerPaths(dir);
+    if (!existsSync(O.state)) return null;
+    const o = readJson(O.state, null) as Partial<ObserverState> | null;
+    if (!o || typeof o !== 'object') return null;
+    const diags = Array.isArray(o.diagnoses) ? o.diagnoses : [], since = Date.now() - 24 * 3600e3, recent = diags.filter((d) => Date.parse(d.ts) >= since);
+    let running = false;
+    try { running = pidAlive(parseInt(readFileSync(O.pid, 'utf8'), 10)); } catch {}
+    const lastFor = (id: string) => [...diags].reverse().find((d) => d.feature === id && d.action !== 'none: the foreman retries it');
+    const causes = new Map<string, number>();
+    for (const d of recent) causes.set(d.cause, (causes.get(d.cause) ?? 0) + 1);
+    return { updatedAt: new Date(statSync(O.state).mtimeMs).toISOString(), running,
+      alerts24h: (Array.isArray(o.alerts) ? o.alerts : []).filter((a) => Date.parse(a.ts) >= since).reverse(),
+      stuck: features.filter((f) => f.status === 'stuck').map((f) => { const d = lastFor(f.id); return { id: f.id, cause: d?.cause ?? 'unknown', evidence: d?.evidence ?? (f.lastFeedback || '').split('\n')[0]!.slice(0, 200) }; }),
+      decisions: diags.filter((d) => d.action && d.action !== 'none: the foreman retries it').slice(-15).reverse(),
+      causes24h: [...causes].map(([cause, n]) => ({ cause, n })).sort((a, b) => b.n - a.n),
+      recurring: recurringTests(diags, since, 2).map(([test, features]) => ({ test, features })),
+      fixes: (Array.isArray(o.fixes) ? o.fixes : []).slice(-10).reverse(), sentBack24h: recent.filter((d) => d.action === 'sent back').length,
+      ...(o.agentAt ? { agentAt: o.agentAt } : {}), ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
+      proposals: tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-')).map((t) => ({ id: t.id, title: t.title })) };
+  } catch { return null; }
+}
+
 const projectViewFile = (dir: string) => join(paths(dir).dir, 'project-view.html');
 
 function projectState(dir: string): ProjectState {
   const base = { path: dir, name: basename(dir), features: [], tasks: [], ready: [], waiting: [], activity: [], events: [],
     foreman: foreman(dir), stageSince: {}, estimates: { build: null, test: null, eval: null }, hasProjectView: existsSync(projectViewFile(dir)),
-    stats: { mergedAt: [], costToday: 0, costYesterday: 0 }, ...(repoUrl(dir) ? { repoUrl: repoUrl(dir) } : {}) };
+    stats: { mergedAt: [], costToday: 0, costYesterday: 0 }, observer: null as ObserverSummary | null, ...(repoUrl(dir) ? { repoUrl: repoUrl(dir) } : {}) };
   try {
     const { config, features, tasks } = load(dir);
     const a = analyze(features, tasks, config.merge), events = readLog(dir, 2000);
@@ -160,7 +192,7 @@ function projectState(dir: string): ProjectState {
       activity: tailLines(paths(dir).activity, 200).map(tryJson).filter(Boolean) as ActivityEvent[], events: events.slice(-80),
       config: { base: config.base, maxParallel: config.maxParallel, maxAttempts: config.maxAttempts, groupBy: config.groupBy,
         builder: config.builder, evaluator: config.evaluator },
-      stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir) };
+      stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir), observer: observer(dir, features, tasks) };
   } catch (e) {
     return { ...base, error: errMsg(e) };
   }

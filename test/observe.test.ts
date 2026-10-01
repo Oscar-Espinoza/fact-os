@@ -1,0 +1,166 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFileSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { failingTests, resolveTests, classify, signature, recurringTests, testOnly, parseAgentReport, readNew, observeOnce, observerPaths } from '../lib/observe.ts';
+import type { Diagnosis, Feature } from '../lib/types.ts';
+
+const VITEST = `test command \`gate.sh\` exited 1:
+| packages/a/src/ok.test.ts | pass | 0.4 |
+| packages/b/src/refresh.db.test.ts | FAIL | 6.1 |
+ FAIL  src/refresh.db.test.ts > crash windows > reclaimed after the lease
+ ❯ src/refresh.db.test.ts:338:5
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @x/b test: \`node run-test.ts src/refresh.db.test.ts\``;
+
+test('failingTests reads test files only from failure lines, not passing rows', () => {
+  assert.deepEqual(failingTests(VITEST).sort(), ['packages/b/src/refresh.db.test.ts', 'src/refresh.db.test.ts']);
+  assert.deepEqual(failingTests('not ok 3 - t/x.test.js\n✓ y.test.js'), ['t/x.test.js']);
+});
+
+test('resolveTests maps package-relative names to repo paths and drops ambiguous ones', () => {
+  const files = ['packages/b/src/refresh.db.test.ts', 'apps/x/src/util.test.ts', 'apps/y/src/util.test.ts'];
+  assert.deepEqual(resolveTests(['src/refresh.db.test.ts', 'packages/b/src/refresh.db.test.ts'], files), ['packages/b/src/refresh.db.test.ts']);
+  assert.deepEqual(resolveTests(['src/util.test.ts', 'nope.test.ts'], files), []);
+});
+
+test('classify: a failing test the feature does not change is untouched; one in a directory it changes is its own', () => {
+  const tests = ['packages/b/src/refresh.db.test.ts'];
+  assert.equal(classify(VITEST, tests, ['apps/api/src/promo.ts']).cause, 'untouched');
+  assert.equal(classify(VITEST, tests, ['packages/b/src/refresh.ts']).cause, 'own');
+  assert.equal(classify(VITEST, tests, ['packages/b/src/refresh.db.test.ts']).cause, 'own');
+  assert.equal(classify('test command `g` exited 1:\nsomething broke', [], []).cause, 'unknown');
+});
+
+test('classify: infrastructure errors win, then the foreman\'s own failure kinds', () => {
+  assert.deepEqual(classify(`${VITEST}\nerror: out of shared memory`, ['x.test.ts'], ['x.test.ts']), { cause: 'infra', evidence: 'out of shared memory' });
+  assert.equal(classify('test command `g` exited 1:\nDisk Quota hit', [], [], ['disk quota']).cause, 'infra');
+  assert.equal(classify('merge conflict with main: too many base refreshes (10)', [], []).cause, 'conflict-loop');
+  assert.equal(classify('prepare `p.sh` exited 1:\nno slot', [], []).cause, 'setup');
+  assert.equal(classify('builder failed: timed out', [], []).cause, 'builder');
+  assert.equal(classify('FAILED check 2: missing route', [], []).cause, 'own');
+});
+
+test('signature: infra by its pattern, test failures by their tests in any order', () => {
+  assert.equal(signature({ cause: 'untouched', tests: ['b', 'a'], evidence: '' }), signature({ cause: 'untouched', tests: ['a', 'b'], evidence: 'x' }));
+  assert.notEqual(signature({ cause: 'infra', tests: [], evidence: 'enospc' }), signature({ cause: 'infra', tests: [], evidence: 'econnrefused' }));
+});
+
+test('recurringTests: tests failing outside the feature in at least n features since a time', () => {
+  const d = (feature: string, tests: string[], cause: Diagnosis['cause'] = 'untouched', ts = new Date().toISOString()): Diagnosis => ({ ts, feature, cause, tests, evidence: '', action: '' });
+  const diags = [d('F1', ['t1']), d('F2', ['t1', 't2']), d('F2', ['t2']), d('F3', ['t3'], 'own'), d('F4', ['t3'], 'own'), d('F5', ['t1'], 'untouched', '2020-01-01T00:00:00Z')];
+  assert.deepEqual(recurringTests(diags, Date.now() - 3600e3, 2), [['t1', ['F1', 'F2']]]);
+});
+
+test('testOnly accepts test files, helpers and fixtures only', () => {
+  assert.ok(testOnly(['a/src/x.test.ts', 'a/test/helpers.ts', 'b/fixtures/one.json', 'c/src/testing/fake.ts']));
+  assert.ok(!testOnly(['a/src/x.test.ts', 'a/src/x.ts']));
+  assert.ok(!testOnly([]));
+});
+
+test('parseAgentReport tolerates fences and drops incomplete entries', () => {
+  const r = parseAgentReport('Done.\n```json\n{"fixed":[{"test":"t","summary":"raise timeout"},{"test":"u"}],"proposals":[{"title":"Raise locks","why":"w","steps":["a"]},{"why":"no title"}],"notes":"n"}\n```');
+  assert.deepEqual(r.fixed, [{ test: 't', summary: 'raise timeout' }]);
+  assert.deepEqual(r.proposals, [{ title: 'Raise locks', why: 'w', steps: ['a'] }]);
+  assert.equal(r.notes, 'n');
+  assert.deepEqual(parseAgentReport('no json'), { fixed: [], proposals: [], notes: '' });
+});
+
+test('readNew returns only complete new lines and starts over when the log is replaced', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'factos-obs-')), f = join(dir, 'log.jsonl');
+  try {
+    writeFileSync(f, '{"ts":"1","feature":null,"event":"a","detail":""}\n{"ts":"2"');
+    const a = readNew(f, 0);
+    assert.deepEqual(a.events.map((e) => e.event), ['a']);
+    appendFileSync(f, ',"feature":null,"event":"b","detail":""}\n');
+    assert.deepEqual(readNew(f, a.offset).events.map((e) => e.event), ['b']);
+    writeFileSync(f, '{"ts":"3","feature":null,"event":"c","detail":""}\n');
+    assert.deepEqual(readNew(f, 1000).events.map((e) => e.event), ['c']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---- one pass over a real repo ----
+
+const sh = (cwd: string, ...args: string[]) => { const r = spawnSync('git', args, { cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: id, description: '', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
+  status: 'stuck', attempts: 2, updatedAt: new Date().toISOString(), ...o });
+
+function repo() {
+  const root = mkdtempSync(join(tmpdir(), 'factos-obs-repo-'));
+  sh(root, 'init', '-q', '-b', 'main');
+  sh(root, 'config', 'user.email', 't@t'); sh(root, 'config', 'user.name', 't');
+  for (const f of ['pkg/a/src/x.test.ts', 'pkg/b/src/y.test.ts', 'pkg/b/src/y.ts']) { mkdirSync(join(root, f, '..'), { recursive: true }); writeFileSync(join(root, f), '//\n'); }
+  sh(root, 'add', '.'); sh(root, 'commit', '-qm', 'base');
+  for (const [id, file] of [['F1', 'pkg/b/src/y.ts'], ['F2', 'pkg/a/src/x.ts'], ['F3', 'pkg/b/src/z.ts']]) {
+    sh(root, 'checkout', '-q', '-b', `ship/${id}`); writeFileSync(join(root, file), `// ${id}\n`);
+    sh(root, 'add', '.'); sh(root, 'commit', '-qm', id); sh(root, 'checkout', '-q', 'main');
+  }
+  mkdirSync(join(root, '.fact-os'));
+  writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh' }));
+  writeFileSync(join(root, '.fact-os/human.json'), JSON.stringify({ tasks: [] }));
+  return root;
+}
+const ev = (feature: string, event: string, detail: string) => JSON.stringify({ ts: new Date().toISOString(), feature, event, detail }) + '\n';
+const failOn = (t: string) => `test command \`gate.sh\` exited 1:\n FAIL  ${t} > broke\n`;
+
+test('observeOnce sends back features stuck on tests they do not change, once per failure, and leaves the rest', async () => {
+  const root = repo();
+  try {
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [
+      F('F1', { lastFeedback: failOn('a/src/x.test.ts') }), F('F2', { lastFeedback: failOn('a/src/x.test.ts') }),
+      F('F3', { lastFeedback: 'test command `gate.sh` exited 1:\nerror: out of shared memory' }), F('F4', { status: 'merged' })] }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), ev('F1', 'stuck', failOn('a/src/x.test.ts')) + ev('F2', 'stuck', failOn('a/src/x.test.ts'))
+      + ev('F3', 'stuck', 'test command `gate.sh` exited 1:\nerror: out of shared memory'));
+    const lines: string[] = [];
+    const s = await observeOnce(root, { out: (l) => lines.push(l) });
+    const fs = (JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')) as { features: Feature[] }).features;
+    const st = (id: string) => fs.find((f) => f.id === id)!;
+    assert.equal(st('F1').status, 'todo', 'F1 changes pkg/b only: pkg/a/src/x.test.ts is not its own');
+    assert.equal(st('F1').attempts, 0);
+    assert.match(st('F1').lastFeedback!, /observer: your last attempt failed on pkg\/a\/src\/x\.test\.ts, which this feature does not change/);
+    assert.match(st('F1').lastFeedback!, /That failure was:\ntest command/);
+    assert.equal(st('F2').status, 'stuck', 'F2 changes pkg/a/src: the test is its own');
+    assert.equal(st('F3').status, 'todo', 'infrastructure failure');
+    assert.deepEqual(s.diagnoses.map((d) => [d.feature, d.cause, d.action]),
+      [['F1', 'untouched', 'sent back'], ['F2', 'own', 'left for a person'], ['F3', 'infra', 'sent back']]);
+    const log = readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8');
+    assert.match(log, /"feature":"F1","event":"observer-retry"/);
+    assert.ok(existsSync(observerPaths(root).report));
+    const report = readFileSync(observerPaths(root).report, 'utf8');
+    assert.match(report, /F2 is stuck: its own code or tests \(pkg\/a\/src\/x\.test\.ts\)/);
+    assert.match(report, /Sent back by the observer: 2/);
+
+    // The same failure again after the retry: left for a person this time.
+    fs.find((f) => f.id === 'F1')!.status = 'stuck';
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: fs }));
+    appendFileSync(join(root, '.fact-os/log.jsonl'), ev('F1', 'stuck', failOn('a/src/x.test.ts')));
+    const s2 = await observeOnce(root, { out: () => {} });
+    assert.equal(s2.diagnoses.at(-1)!.action, 'left for a person: it already failed this way after a retry');
+    assert.equal((JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')) as { features: Feature[] }).features.find((f) => f.id === 'F1')!.status, 'stuck');
+    assert.ok(lines.some((l) => /sent back F1/.test(l)));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('observeOnce parks a ready feature whose merge never started, so the foreman merges it again', async () => {
+  const root = repo();
+  try {
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [F('F1', { status: 'ready', sha: 'abc' }), F('F2', { status: 'merged' })] }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), ev('F1', 'merge-failed', 'Unable to create index.lock; left as ready'));
+    await observeOnce(root, { out: () => {} });
+    const f = (JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')) as { features: Feature[] }).features[0]!;
+    assert.equal(f.parked, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('observeOnce alerts when the foreman is not running and features are left', async () => {
+  const root = repo();
+  try {
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [F('F1', { status: 'todo' })] }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), '');
+    const s = await observeOnce(root, { out: () => {} });
+    assert.match(s.alerts[0]!.text, /the foreman is not running/);
+    const again = await observeOnce(root, { out: () => {} });
+    assert.equal(again.alerts.length, 1, 'the same alert is not repeated within the hour');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -31,7 +31,23 @@ export interface Config {
   mergeHook: string | null;
   groupBy: string | null;             // null or "idPrefix:<n>"
   restoreFrom: string | null;         // null or a ref with "{id}", e.g. "archive/task/{id}": earlier work for a branch with none
+  observer?: Partial<ObserverConfig>; // read only by `fact-os observe`
 }
+
+export interface ObserverConfig {
+  pollSec: number;                    // how often the log is read
+  retry: boolean;                     // send back features stuck for a cause outside them
+  maxRetries: number;                 // per feature and failure signature
+  infraPatterns: string[];            // extra substrings (case-insensitive) that mark an infrastructure failure
+  recurring: number;                  // a test failing in this many features (24h) is recurring
+  agent: RoleConfig | null;           // null = no agent pass
+  agentEveryMin: number;
+  featureId: string;                  // id the agent's worktree runs `prepare` as
+}
+
+// What the observer decided about one stuck feature.
+export type Cause = 'untouched' | 'infra' | 'own' | 'conflict-loop' | 'setup' | 'builder' | 'unknown';
+export interface Diagnosis { ts: string; feature: string; cause: Cause; tests: string[]; evidence: string; action: string }
 
 export interface Feature {
   id: string;

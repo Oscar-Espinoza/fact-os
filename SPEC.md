@@ -220,6 +220,47 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   of the discovered paths (no arbitrary paths). Requests with an `Origin` header other than the dash's
   own origin, or an unexpected `Host` header (DNS rebinding), are rejected.
 
+## Observer — `fact-os observe [--watch] [--agent] [--as <id>]`
+
+A second process beside the foreman (one per project, pid in `<state dir>/.observer`). Each pass reads the new
+complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter log starts over) and:
+
+1. **Diagnoses** every `stuck` and `failed` event. Failing test files are the `*.test|spec.*` paths on failure lines
+   of the feedback (`FAIL`, `×`, `✗`, `not ok`, `(fail)`), resolved to repo paths against the feature branch's tree
+   (an exact path, or the single file ending in `/<name>`). What the feature changes is `base...<branch>`, or, once
+   the branch is gone, its merge commit `M^1...M^2` on base. Causes, first match wins: `infra` (feedback contains an
+   infrastructure pattern: out of shared memory, ENOSPC, too many clients, ECONNREFUSED, a terminated or restarting
+   database, cannot allocate memory, plus `observer.infraPatterns`); `conflict-loop` (too many base refreshes);
+   `setup` (prepare or worktree); `builder` (builder or evaluator run, uncommitted work); for a failed test command,
+   `own` when the feature changes a failing test or a file in its directory, else `untouched` (`unknown` when no
+   test file is recognized); `own` for an evaluator rejection; otherwise `unknown`.
+2. **Sends back** a feature whose latest event is `stuck` with cause `untouched` or `infra` (`observer.retry`), at most
+   `maxRetries` times per failure signature (cause + sorted tests, or the infra pattern): under the lock, only if it
+   is still `stuck`, `todo` with `attempts`/`refreshes` 0 and `lastFeedback` = a note that the failure was outside the
+   feature followed by the original feedback. Logged `observer-retry`. Anything else is "left for a person". A feature that is no longer stuck
+   when the observer looks is left alone.
+3. **Re-parks** a `ready` feature whose merge never started (`merge-failed`), so an auto-merge foreman retries it
+   (`observer-parked`).
+4. **Alerts** (logged `observer-alert`, shown for 24h, not repeated within an hour): the foreman is not running while
+   features are left; a foreman `alert` event; features parked for over 10 minutes (with the main checkout's
+   uncommitted files).
+5. **Agent pass** (`observer.agent`, or `--agent` with opus/high): at most every `agentEveryMin`, when a test failed
+   `untouched`/`infra` in at least `recurring` features in 24h and the agent has not looked at it in 24h. It runs
+   `claude -p` (the builder's deny rules) in `<worktreesDir>/<featureId>` on branch `fact-os-observer`, reset to base,
+   after `prepare` (run as `featureId`). Rules: change tests, test helpers and fixtures only; never skip, delete or
+   weaken a test; run what it changes; commit; describe anything else as a proposal. Its commits are merged into
+   base (`--no-ff`, `fact-os: observer fix: …`, logged `observer-fix`) only when every changed file is a test,
+   helper or fixture and the main checkout is on base and clean; otherwise a human task asks for a review.
+   Proposals become open human tasks with ids `observer-<time>-<n>` (deduplicated by title).
+6. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
+   person (alerts, stuck features with their cause, open proposals), the last 24h (failures by cause, tests failing
+   in several features, retries, fixes) and the last 15 decisions. Times are local.
+
+`--watch` repeats every `observer.pollSec` (60). `--as <id>` sets `featureId` (for projects whose `prepare` needs a
+particular id). Config (`observer` in `config.json`, all optional): `pollSec`, `retry` (true), `maxRetries` (1),
+`infraPatterns` ([]), `recurring` (2), `agent` (null or `{model, effort, permissionMode}`), `agentEveryMin` (120),
+`featureId` ("observer"). The foreman ignores the key, but editing `config.json` during a run still halts it.
+
 ## Skills copied by init
 
 - `intake/SKILL.md` — interview the user briefly (at most 5 questions), then write `features.json`

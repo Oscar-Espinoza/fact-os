@@ -196,3 +196,29 @@ test('feature history includes parsed runs, builds before evals', async () => {
   const none = await (await fetch(dash.url + '/api/feature?project=' + encodeURIComponent(join(root, 'shop')) + '&id=..%2F..')).json() as { runs: Run[] };
   assert.deepEqual(none.runs, []);
 });
+
+test('state carries the observer summary from observer.json, and null without it', async () => {
+  const dir = join(root, 'shop/.fact-os'), ago = (h: number) => new Date(Date.now() - h * 3600e3).toISOString();
+  const d = (feature: string, h: number, cause: string, action: string) => ({ ts: ago(h), feature, cause, tests: ['t/a.test.ts'], evidence: 'boom', action });
+  const get = async () => ((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!.observer;
+  assert.equal(await get(), null);
+  writeFileSync(join(dir, 'observer.json'), JSON.stringify({ offset: 0, retried: {}, agentTargets: {}, agentNotes: 'looked',
+    diagnoses: [d('pay', 30, 'infra', 'sent back'), d('pay', 2, 'untouched', 'sent back'), d('cart', 1, 'untouched', 'none: the foreman retries it'), d('cart', 0.5, 'untouched', 'sent back')],
+    alerts: [{ ts: ago(1), text: 'new' }, { ts: ago(40), text: 'old' }], fixes: [{ ts: ago(3), commit: 'abc', summary: 'fix a' }, { ts: ago(2), commit: 'def', summary: 'fix b' }] }));
+  const human = readFileSync(join(dir, 'human.json'), 'utf8');
+  writeFileSync(join(dir, 'human.json'), JSON.stringify({ tasks: [{ id: 'observer-x', title: 'Do x', steps: [], unblocks: [], mockable: false, status: 'open' }] }));
+  const o = (await get())!;
+  assert.equal(o.running, false);
+  assert.deepEqual(o.alerts24h.map((a) => a.text), ['new']);
+  assert.deepEqual(o.causes24h, [{ cause: 'untouched', n: 3 }]);
+  assert.equal(o.sentBack24h, 2);
+  assert.deepEqual(o.decisions.map((x) => x.feature + x.cause), ['cartuntouched', 'payuntouched', 'payinfra']);
+  assert.deepEqual(o.recurring, [{ test: 't/a.test.ts', features: ['cart', 'pay'] }]);
+  assert.deepEqual(o.fixes.map((f) => f.commit), ['def', 'abc']);
+  assert.deepEqual(o.proposals, [{ id: 'observer-x', title: 'Do x' }]);
+  assert.equal(o.agentNotes, 'looked');
+  writeFileSync(join(dir, 'observer.json'), '{not json');
+  assert.equal(await get(), null);
+  rmSync(join(dir, 'observer.json'));
+  writeFileSync(join(dir, 'human.json'), human);
+});
