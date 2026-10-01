@@ -247,7 +247,7 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
 - `fact-os dash [--root DIR] [--port 7420]` — HTTP server on 127.0.0.1 only. Discovers every
   `*/.fact-os/features.json` up to depth 3 under `--root` (default: cwd). The page is `lib/dash.html`
   (inline CSS/JS, no dependencies, light and dark, phone width), polling `GET /api/state` every 2s,
-  one project at a time (picker in the header) with four views:
+  one project at a time (picker in the header) with these views:
   - **Factory**: intake (ready queue, blocked/waiting/paused counts) → build bays (one per
     `maxParallel`; pixel-art worker building a house as the build progresses; idle bays as empty lots)
     → test bench → inspection (evaluator) → dock (merged/ready), a stuck list with Retry, and a live
@@ -256,6 +256,21 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
     height rows, status filters and search; a row opens a side panel with progress, actions
     (pause/resume/retry), feedback, description, acceptance, deps, dependents, human tasks, details
     and the feature's timeline (`GET /api/feature?project=&id=`).
+  - **Observer**: what the observer saw and did, one section at a time behind a sticky sub-navigation (Needs you ·
+    Health · Failures · Merge conflicts · Stuck · Observer actions · Agents; the last one is remembered in
+    localStorage, each tab carries a count). Every section opens with one plain-language answer computed from the
+    data. A search box filters every section by feature id, title or file name (tab counts show the matches; the box
+    keeps its focus through the 2s refresh). Causes, decisions and actions are shown in plain words, times are
+    relative with the local time on hover, long evidence sits in `<details>`, status is a pill with a word (never
+    colour alone). **Merge conflicts** has one row per conflict that started in the last 24h (`conflicts24h` in the
+    observer summary, from `log.jsonl`): feature, when, files (short names, full list in details), who resolved it and
+    the outcome with its duration, plus the hot files. Per feature in log order: a `refreshed` "conflicts in: …"
+    opens a row; `resolving`/`resolved` = the resolver, `resolve-failed` = the builder (note kept), a `launch` with no
+    `resolving` = the builder; a `keep-check` not "ok…" adds a note. Outcome: the next `merged` = merged, `stuck` =
+    failed, another conflict = conflicted again (that one opens its own row); else `testing`/`evaluating` after the
+    resolution = back in test, else still open (duration runs to now). **Agents** shows each rate with its counts,
+    a short label of what changed per prompt version, and marks a rate that moved 5+ points against the previous
+    version (5+ runs each) with an arrow and the word better or worse (bounced: lower is better).
   - **Project**: `<state dir>/project-view.html` if present, in an iframe with `sandbox="allow-scripts"`
     and served with `Content-Security-Policy: sandbox allow-scripts` (opaque origin: it cannot call
     the API). The dashboard posts `{type: "fact-os-state", project, features: [{id, title, status,
