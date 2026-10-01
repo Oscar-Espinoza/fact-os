@@ -83,6 +83,12 @@ HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
 `.fact-os/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
 `.fact-os/runs/<feature>/<tag>-{build,eval,resolve}.json` — raw `claude -p --output-format json` results (tag: see Observer 7).
 `.fact-os/.foreman` — pid of the running foreman (one per repo).
+`.fact-os/control.json` — a person's runtime limits on new launches (CLI `pause-all`/`resume-all`/`lanes`, or the dashboard):
+```
+Control { paused: boolean, maxParallel: number|null /* integer 0–32; null = config.maxParallel */, updatedAt: ISO, by: "dashboard"|"cli" }
+```
+Missing, unreadable or invalid (file or field) means not paused and the config's lanes. Written atomically under the lock.
+It is not `config.json`, so changing it during a run never trips the tamper halt.
 
 ## Readiness rule (pure function, heavily tested)
 
@@ -104,7 +110,13 @@ Each tick:
    to `todo` (worktree kept and reused).
 2. Under `merge: "auto"`, if any feature is `parked` and the main checkout is now clean and on `base`, merge
    each one's recorded `sha` if its branch still points to it (else back to `todo`), then reload.
-   Launch ready features, in readiness order, until `maxParallel` are in flight (a ceiling, not a target). A feature
+   **Launch limit:** `control.json` is re-read every tick; the limit is 0 while `paused`, else `control.maxParallel`, else
+   `config.maxParallel` (at least 1). It only gates new launches: nothing in flight is interrupted (a lower limit waits for
+   the in-flight count to drop below it; a feature that falls back to `todo` mid-pipeline is a new launch, so it waits too),
+   parked merges above still merge while paused, and a `control.json` change wakes the loop even with every lane busy, so
+   more lanes or a resume launch at once. A change is logged `control` (old → new, with the launch limit); ready features
+   held by a person's limit are logged `paused-launch` once per limit and held set.
+   Launch ready features, in readiness order, until the launch limit is in flight (a ceiling, not a target). A feature
    whose conflict group (`group`, else per `groupBy`; none when both are unset) already has a feature in flight
    (`building|testing|evaluating`, including a previous foreman's live orphan) is skipped for the next-best ready
    feature of another group, so features touching the same hot files never run at the same time.
@@ -215,8 +227,9 @@ Each tick:
      `merged` feature's recorded `sha` do not count, so merging a `ready` branch by hand is fine; nor do commits of
      `base` that reach a feature branch through a base refresh (they are reachable from the recorded base). Other
      `base` moves are logged and re-recorded.
-4. Stop conditions: nothing in flight and nothing ready → if `--watch` and some feature is
-   waiting-on-human or `paused`, sleep and re-check whenever `human.json`/`features.json` mtime changes (poll 5s), and
+4. Stop conditions: nothing in flight and nothing ready (or ready features held by a launch limit of 0: paused or lanes 0) →
+   if `--watch` and some feature is waiting-on-human or `paused`, or ready features are held by that limit, sleep and re-check
+   whenever `human.json`/`features.json`/`control.json` mtime changes (poll 5s), and
    while some feature is `parked`, re-check every poll;
    otherwise exit printing a summary. Also stop launching when `budgetUsdTotal` is reached, or on
    SIGINT/SIGTERM (SIGTERM to each child's process group; in-flight features back to `todo` without
@@ -229,7 +242,8 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
 
 - `fact-os init [--test "<cmd>"]` — creates `.fact-os/` with default config and empty
   features/human files, copies skills into `.claude/skills/`, adds `.fact-os/runs/`,
-  `.fact-os/*.jsonl` and `.fact-os/.lock` to `.git/info/exclude`. Idempotent; never overwrites.
+  `.fact-os/*.jsonl`, `.fact-os/.lock`, `.fact-os/control.json` and the other runtime files to `.git/info/exclude`.
+  Idempotent; never overwrites.
 - `fact-os status` — table of features and open human tasks.
 - `fact-os done <human-task-id>` — marks a human task done.
 - `fact-os pause|resume|retry <feature-id>...` — `pause`: `todo`/`stuck` → `paused` (in-flight features
@@ -238,6 +252,10 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   `lastFeedback` is kept so the next build sees it. Each applied action is logged (`paused`,
   `resumed`, `retrying`). A paused feature is never ready, so its dependents wait too; `run --watch`
   keeps waiting while any feature is paused. Exit 1 if any id was refused.
+- `fact-os pause-all|resume-all` and `fact-os lanes <n|default>` — write `control.json` (`by: "cli"`): stop or restart
+  launching new features, or set how many may be in flight (0–32; `default` = `config.maxParallel`). Nothing running is
+  interrupted. Each prints the resulting state (paused or the launch limit, lanes and default, how many run); bad input
+  exits 1 with a message. Per-feature `pause`/`resume` are unchanged.
 - `fact-os doctor` — validates the files (schema, unknown deps, cycles, duplicate ids) and that
   `claude`, `git` and the test command's first word resolve.
 - `fact-os hook` — reads a Claude Code hook JSON payload on stdin; finds the project via
@@ -247,9 +265,13 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
 - `fact-os dash [--root DIR] [--port 7420]` — HTTP server on 127.0.0.1 only. Discovers every
   `*/.fact-os/features.json` up to depth 3 under `--root` (default: cwd). The page is `lib/dash.html`
   (inline CSS/JS, no dependencies, light and dark, phone width), polling `GET /api/state` every 2s,
-  one project at a time (picker in the header) with these views:
-  - **Factory**: intake (ready queue, blocked/waiting/paused counts) → build bays (one per
-    `maxParallel`; pixel-art worker building a house as the build progresses; idle bays as empty lots)
+  one project at a time (picker in the header; next to the foreman status, the **controls**: "− 6 of 8 lanes +" (running of
+  allowed, "(default n)" when the lanes differ from config; − disabled at 0, + at 32) and "Pause new work" / "Resume", real
+  buttons with labels and visible focus, each confirmed by a toast; lowering below the number running says "N running will
+  finish; no new ones start until fewer than M are running"; the header stays on one line from 901px, two rows below) with
+  these views:
+  - **Factory**: while paused (or at lanes 0) a banner "Paused: no new features start. N still running will finish." with
+    Resume; intake (ready queue, blocked/waiting/paused counts) → build bays (one per allowed lane; pixel-art worker building a house as the build progresses; idle bays as empty lots)
     → test bench → inspection (evaluator) → dock (merged/ready), a stuck list with Retry, and a live
     feed of `log.jsonl` events and hook activity.
   - **Board**: every feature grouped by epic (`group`, `groupBy`, or the id up to its first `-`), fixed
@@ -296,6 +318,10 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   `{n, role: build|eval, at, ms, cost, turns, model, pass?, findings?, summary}` from `runs/<id>/`.
   `POST /api/human/wait {project, id, who}` (who: 1-200 chars, else 400; 409 if done) sets `waitingOn`/`waitingSince`;
   `/api/human/unwait` clears them; `reopen` and `done` clear them too.
+  `/api/state` projects carry `control {paused, maxParallel, effective /* the launch limit now */, configMax, updatedAt?, by?}`
+  and `inFlight` (features building, testing or evaluating). `POST /api/control/pause {project}`, `/api/control/resume
+  {project}` and `/api/control/lanes {project, maxParallel: 0–32 | null}` write `control.json` (`by: "dashboard"`; 400 on an
+  invalid `maxParallel`) and answer the new `control`.
   POST bodies are JSON `{project, id}` (`/api/feature/{pause,resume,retry}` too); `project` must be one
   of the discovered paths (no arbitrary paths). Requests with an `Origin` header other than the dash's
   own origin, or an unexpected `Host` header (DNS rebinding), are rejected.
