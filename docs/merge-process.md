@@ -143,7 +143,7 @@ provisioning.test.ts 70 → 2 conflicts after it merged), and `apps/api/src/app.
   conflicted state; a resolver that drops the other side's line sent back and the line never merged; a declared drop
   merged; a resolver that leaves the merge unfinished handing it to the builder, whose resolution is checked;
   `conflictBrief` alone; claims keeping two features on one hot file apart while a third runs beside them, with the
-  hot file declared, and with it scored from the log and known from a re-run's branch diff. The existing 110 tests
+  hot file declared, and with it scored from the log and known from a re-run's branch diff. All earlier tests
   pass unchanged (defaults keep today's behaviour).
 - **Replay** (`bun scripts/replay-conflicts.ts <repo> [--json out] [--only claims]`, read-only: `git show`, `git log`,
   `git merge-file` on temp files and the state dir's log; never a checkout).
