@@ -243,7 +243,9 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    (`observer-parked`).
 4. **Alerts** (logged `observer-alert`, shown for 24h, not repeated within an hour): the foreman is not running while
    features are left; a foreman `alert` event; features parked for over 10 minutes (with the main checkout's
-   uncommitted files).
+   uncommitted files); a file whose merge conflicts sent 5+ features back in 24h after they passed evaluation (at most
+   once a day per file). Such "bounces" (a `refreshed` with conflicts right after `evaluating`, a `lesson` in
+   between allowed) are kept 7 days and reported with their files.
 5. **Agent pass** (`observer.agent`, or `--agent` with opus/high): at most every `agentEveryMin`, when a test failed
    `untouched`/`infra` in at least `recurring` features in 24h and the agent has not looked at it in 24h. It runs
    `claude -p` (the builder's deny rules) in `<worktreesDir>/<featureId>` on branch `fact-os-observer`, reset to base,

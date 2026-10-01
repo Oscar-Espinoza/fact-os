@@ -236,3 +236,20 @@ test('observeOnce leaves the lessons alone when the agent answers with something
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('observeOnce counts features sent back by a merge conflict after passing evaluation, and alerts on a hot file', async () => {
+  const root = repo();
+  try {
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: ['F1', 'F2', 'F3', 'F4', 'F5', 'F6'].map((id) => F(id, { status: 'todo' })) }));
+    let log = '';
+    for (const id of ['F1', 'F2', 'F3', 'F4', 'F5'])
+      log += ev(id, 'evaluating', '') + ev(id, 'lesson', 'x') + ev(id, 'refreshed', 'conflicts in: pkg/registry.ts, pkg/b.ts');
+    log += ev('F6', 'launch', '') + ev('F6', 'refreshed', 'conflicts in: pkg/registry.ts'); // not after an evaluation
+    writeFileSync(join(root, '.fact-os/log.jsonl'), log);
+    writeFileSync(join(root, '.fact-os/.foreman'), String(process.pid));
+    const s = await observeOnce(root, { out: () => {} });
+    assert.deepEqual(s.bounces.map((b) => b.feature), ['F1', 'F2', 'F3', 'F4', 'F5']);
+    assert.ok(s.alerts.some((a) => /merge conflicts in pkg\/registry\.ts keep sending features that passed evaluation back/.test(a.text)));
+    assert.match(readFileSync(observerPaths(root).report, 'utf8'), /Passed evaluation but sent back by a merge conflict: 5\.\n\n- pkg\/registry\.ts: 5/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

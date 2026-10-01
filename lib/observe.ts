@@ -120,6 +120,13 @@ export function parseCurated(text: string, maxBytes: number): { body: string } |
   return { body };
 }
 
+// Files whose merge conflicts sent finished features back, most first.
+export function hotFiles(bounces: { files: string[] }[]): [string, number][] {
+  const n = new Map<string, number>();
+  for (const b of bounces) for (const f of b.files) n.set(f, (n.get(f) ?? 0) + 1);
+  return [...n].sort((a, b) => b[1] - a[1]);
+}
+
 // ---- state ----
 
 export interface ObserverState {
@@ -130,10 +137,12 @@ export interface ObserverState {
   fixes: { ts: string; commit: string; summary: string }[];
   agentAt?: string;
   agentTargets: Record<string, string>;         // test → when the agent last looked at it
+  lastEvent: Record<string, string>;            // feature → its previous log event, across passes
+  bounces: { ts: string; feature: string; files: string[] }[]; // passed evaluation, then sent back by a merge conflict
   agentNotes?: string;
   lessonsAt?: string;                           // last curation
 }
-const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], fixes: [], agentTargets: {} });
+const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], fixes: [], agentTargets: {}, lastEvent: {}, bounces: [] });
 export const observerPaths = (root: string) => { const d = paths(root).dir; return { state: join(d, 'observer.json'), report: join(d, 'observer-report.md'), pid: join(d, '.observer') }; };
 
 export function observerConfig(config: Config, opts: { agent?: boolean; as?: string } = {}): ObserverConfig {
@@ -189,6 +198,11 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   const latestStuck = new Map<string, Diagnosis>();
   for (const e of events) {
     if (!e.feature) continue;
+    // A merge conflict right after a passing evaluation (its lesson may sit in between) sends finished work back.
+    const prev = state.lastEvent[e.feature];
+    if (e.event !== 'lesson') state.lastEvent[e.feature] = e.event;
+    if (e.event === 'refreshed' && prev === 'evaluating' && /conflicts in: /.test(e.detail || ''))
+      state.bounces.push({ ts: e.ts, feature: e.feature, files: e.detail.split('conflicts in: ')[1]!.split(', ').map((f) => f.trim()).filter(Boolean) });
     if (e.event === 'merge-failed') latestStuck.delete(e.feature);
     if (e.event !== 'stuck' && e.event !== 'failed') continue;
     const { files, changed } = filesOf(byId.get(e.feature));
@@ -232,8 +246,8 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   }
 
   // Alerts: things only a person (or the agent's proposals) can fix.
-  const alert = (text: string, ts = now()) => {
-    if (Date.now() - Date.parse(ts) > DAY || state.alerts.some((a) => a.text === text && Date.now() - Date.parse(a.ts) < 3600e3)) return;
+  const alert = (text: string, ts = now(), quietMs = 3600e3) => {
+    if (Date.now() - Date.parse(ts) > DAY || state.alerts.some((a) => a.text === text && Date.now() - Date.parse(a.ts) < quietMs)) return;
     state.alerts.push({ ts, text });
     log(root, null, 'observer-alert', text);
     out(`observer: ALERT ${text}`);
@@ -249,10 +263,13 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
     alert(`${parked.length} features wait to merge for over 10 minutes${dirty ? `; uncommitted changes in the main checkout: ${dirty.split('\n').map((l) => l.slice(3)).join(', ')}` : ''}`);
   }
 
+  for (const [file, n] of hotFiles(state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < DAY)))
+    if (n >= 5) alert(`merge conflicts in ${file} keep sending features that passed evaluation back to the builder (${n >= 10 ? '10+' : '5+'} in 24h); make it merge-friendly`, now(), DAY);
   if (cfg.agent) await agentPass(root, config, cfg, state, out, opts.children ?? new Set());
   if (cfg.agent) await curateLessons(root, config, cfg, state, out, opts.children ?? new Set());
 
   state.diagnoses = state.diagnoses.slice(-500);
+  state.bounces = state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < 7 * DAY);
   state.alerts = state.alerts.filter((a) => Date.now() - Date.parse(a.ts) < 7 * DAY);
   writeJsonAtomic(O.state, state);
   writeFileSync(O.report, renderReport(root, state, load(root).features, load(root).tasks, pidAlive(foremanPid)));
@@ -401,6 +418,7 @@ export function renderReport(root: string, state: ObserverState, features: Featu
   const causes = Object.entries(recent.reduce<Record<string, number>>((m, d) => ((m[d.cause] = (m[d.cause] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
   const recurring = recurringTests(state.diagnoses, since, 2);
   const sent = recent.filter((d) => d.action === 'sent back');
+  const bounces = state.bounces.filter((b) => Date.parse(b.ts) >= since), hot = hotFiles(bounces);
   return [`# ${NAME} observer: ${root.split('/').pop()}`, '',
     `Updated ${at(now())}. Foreman: ${foreman ? 'running' : '**not running**'}.`, '',
     '## Features', '',
@@ -413,6 +431,7 @@ export function renderReport(root: string, state: ObserverState, features: Featu
     '## Last 24 hours', '',
     `Failures: ${recent.length}. Sent back by the observer: ${sent.length}. Fixes merged: ${state.fixes.filter((f) => Date.parse(f.ts) >= since).length}.`, '',
     ...(causes.length ? ['| Cause | Failures |', '| --- | --- |', ...causes.map(([c, n]) => `| ${CAUSE[c as Cause]} | ${n} |`), ''] : []),
+    ...(bounces.length ? [`Passed evaluation but sent back by a merge conflict: ${bounces.length}.`, '', ...hot.slice(0, 5).map(([f, n]) => `- ${f}: ${n}`), ''] : []),
     ...(recurring.length ? ['Tests failing in several features:', '', ...recurring.map(([t, fs]) => `- ${t}: ${fs.join(', ')}`), ''] : []),
     ...(state.fixes.length ? ['## Fixes merged by the observer', '', ...state.fixes.slice(-10).reverse().map((f) => `- ${at(f.ts)} ${f.commit}: ${f.summary}`), ''] : []),
     ...(state.agentNotes ? ['## Agent notes', '', state.agentNotes, ''] : []),
