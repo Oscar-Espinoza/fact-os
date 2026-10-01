@@ -7,6 +7,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { Feature, FeaturesFile } from '../lib/types.ts';
 import type { ProjectState } from '../lib/dash.ts';
+import { reap } from './reap.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.ts', import.meta.url));
@@ -16,8 +17,8 @@ const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: `Feat
 
 test('end to end: parallel builds, eval retry, human wait/resume, onMock, dash', { timeout: 60000 }, async (t) => {
   const base = mkdtempSync(join(tmpdir(), 'fact-os-e2e-'));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
   const repo = join(base, 'app');
+  t.after(() => { reap(repo); rmSync(base, { recursive: true, force: true }); });
   mkdirSync(repo);
   const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
@@ -27,7 +28,7 @@ test('end to end: parallel builds, eval retry, human wait/resume, onMock, dash',
   chmodSync(FAKE, 0o755);
   const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100',
     FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json') };
-  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8' });
+  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' });
 
   let r = cli('init', '--test', 'true');
   assert.equal(r.status, 0, r.stderr);
@@ -51,7 +52,7 @@ test('end to end: parallel builds, eval retry, human wait/resume, onMock, dash',
   const run = spawn(process.execPath, [BIN, 'run', '--watch'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; run.stdout.on('data', (d) => { out += d; }); run.stderr.on('data', (d) => { out += d; });
   const exit = new Promise((res) => run.on('exit', res));
-  t.after(() => run.exitCode === null && run.kill());
+  t.after(() => run.exitCode === null && run.kill('SIGKILL'));
   const features = () => (JSON.parse(readFileSync(join(repo, '.fact-os/features.json'), 'utf8')) as FeaturesFile).features;
   const status = () => Object.fromEntries(features().map((f) => [f.id, f.status]));
 
@@ -121,8 +122,8 @@ test('end to end: parallel builds, eval retry, human wait/resume, onMock, dash',
 
 test('run --watch waits while a feature is paused and builds it once resumed from the CLI', { timeout: 30000 }, async (t) => {
   const base = mkdtempSync(join(tmpdir(), 'fact-os-pause-'));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
   const repo = join(base, 'app');
+  t.after(() => { reap(repo); rmSync(base, { recursive: true, force: true }); });
   mkdirSync(repo);
   const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
@@ -131,7 +132,7 @@ test('run --watch waits while a feature is paused and builds it once resumed fro
   git('add', '.'); git('commit', '-qm', 'init');
   chmodSync(FAKE, 0o755);
   const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100', FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json') };
-  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8' });
+  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' });
   writeFileSync(env.FAKE_VERDICTS, '{}');
   assert.equal(cli('init', '--test', 'true').status, 0);
   writeFileSync(join(repo, '.fact-os/features.json'), JSON.stringify({ features: [F('a'), F('b', { status: 'paused' })] }));
@@ -141,7 +142,7 @@ test('run --watch waits while a feature is paused and builds it once resumed fro
   const run = spawn(process.execPath, [BIN, 'run', '--watch'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; run.stdout.on('data', (d) => { out += d; }); run.stderr.on('data', (d) => { out += d; });
   const exit = new Promise((res) => run.on('exit', res));
-  t.after(() => run.exitCode === null && run.kill());
+  t.after(() => run.exitCode === null && run.kill('SIGKILL'));
   const status = () => Object.fromEntries((JSON.parse(readFileSync(join(repo, '.fact-os/features.json'), 'utf8')) as FeaturesFile).features.map((f) => [f.id, f.status]));
   for (let i = 0; i < 200 && status().a !== 'merged'; i++) await sleep(100);
   await sleep(300);

@@ -8,6 +8,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { procStart } from '../lib/foreman.ts';
 import type { Config, Feature, FeaturesFile, Verdict } from '../lib/types.ts';
+import { reap } from './reap.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.ts', import.meta.url));
@@ -20,8 +21,8 @@ interface FakeCall { mode: string; id: string; t0: number; t1: number; prompt: s
 function setup(t: TestContext, { features, config = {}, scenario = {}, verdicts = {} }:
   { features: Feature[]; config?: Partial<Config>; scenario?: Record<string, string>; verdicts?: Record<string, Partial<Verdict>[]> }) {
   const base = mkdtempSync(join(tmpdir(), 'fact-os-guard-'));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
   const repo = join(base, 'app');
+  t.after(() => { reap(repo, join(base, 'pids')); rmSync(base, { recursive: true, force: true }); });
   mkdirSync(repo);
   const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
@@ -32,7 +33,8 @@ function setup(t: TestContext, { features, config = {}, scenario = {}, verdicts 
   const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100', FAKE_DELAY_MS: '50',
     FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json'), FAKE_PIDS: join(base, 'pids'),
     FAKE_SCENARIO: JSON.stringify(scenario) };
-  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000 });
+  // SIGKILL on timeout: a stuck run may ignore SIGTERM (spawnSync's default) and outlive the test.
+  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' });
   assert.equal(cli('init', '--test', 'true').status, 0);
   const sy = (f: string) => join(repo, '.fact-os', f);
   writeFileSync(sy('config.json'), JSON.stringify({ ...JSON.parse(readFileSync(sy('config.json'), 'utf8')), ...config }));
