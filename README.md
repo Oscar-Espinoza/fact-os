@@ -31,7 +31,7 @@ imports `lib/cli.ts`, since tsc skips extensionless files.
 | `fact-os status` | Feature table (status, attempts, cost, deps, next/onMock/waiting) and open human tasks. |
 | `fact-os done <task-id>` | Marks a human task done; a watching foreman picks it up. |
 | `fact-os pause\|resume\|retry <id>...` | Pause `todo`/`stuck` features (they and their dependents never launch; `run --watch` keeps waiting), resume paused ones (fresh attempts if they had run out), retry stuck ones (attempts reset, last feedback kept). |
-| `fact-os pause-all` / `resume-all` | Stop / restart launching new features for the whole project (`control.json`). Nothing running is interrupted; parked merges still merge; `run --watch` keeps waiting while paused. |
+| `fact-os pause-all` / `resume-all` | Stop / restart launching new features for the whole project (`control.json`). Nothing running is interrupted; parked merges still merge; `run --watch` keeps waiting while paused, while a foreman without `--watch` exits once its work in flight drains. Says when no foreman is running (it applies when one starts). |
 | `fact-os lanes <n\|default>` | How many features may be in flight (0–32; `default` = `config.maxParallel`), changed during a run without a restart: more lanes launch at once, fewer let the running ones finish. Prints the resulting state. The dashboard header has the same controls. |
 | `fact-os doctor` | Validates the files (schema, duplicate ids, unknown deps, cycles) and that `claude`, `git` and the test command resolve. Exit 1 on problems. |
 | `fact-os dash [--root DIR] [--port 7420]` | Dashboard on `127.0.0.1` for every `.fact-os/features.json` up to depth 3 under `--root` (worktrees skipped). Views: Factory (intake → build bays with pixel-art workers and estimated progress → test → inspection → dock, stuck list, live feed), Board (features by epic, filters, detail panel with pause/resume/retry), Project (your own `project-view.html`, sandboxed) and Only you. Refreshes every 2s. |
@@ -81,8 +81,10 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
   `runs/<feature>/<tag>-{build,eval,resolve}.json` (raw `claude -p` output), `.lock`, `.foreman` (foreman pid).
 - `control.json` — `{paused, maxParallel: 0–32|null, updatedAt, by}`, written by `pause-all`/`resume-all`/`lanes` and the
-  dashboard and re-read by the foreman every tick: the launch limit is 0 while paused, else `maxParallel`, else the config's.
-  Not `config.json`, so it never trips the tamper halt.
+  dashboard and re-read by the foreman every tick: the launch limit is 0 while paused, else `maxParallel`, else the config's,
+  counted against features in flight including a previous foreman's live children. Not `config.json`, so it never trips the
+  tamper halt. An invalid file never lifts a pause: the foreman keeps its last good control (paused if it started with it),
+  `doctor` and the dashboard flag it, and any control command rewrites it.
   `bun scripts/replay-conflicts.ts <repo>` replays a project's real merge conflicts against the merge process, read-only.
 
 **Readiness:** a `todo` feature is ready when every dep is `merged` (or `ready` under manual merge) and

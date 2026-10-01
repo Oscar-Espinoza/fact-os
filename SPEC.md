@@ -87,8 +87,10 @@ HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
 ```
 Control { paused: boolean, maxParallel: number|null /* integer 0–32; null = config.maxParallel */, updatedAt: ISO, by: "dashboard"|"cli" }
 ```
-Missing, unreadable or invalid (file or field) means not paused and the config's lanes. Written atomically under the lock.
-It is not `config.json`, so changing it during a run never trips the tamper halt.
+A missing file (or a missing field) means not paused and the config's lanes. A file that exists but is not JSON, not an
+object, or has a wrong `paused`/`maxParallel` is **invalid**, never read as the defaults (see Launch limit); `fact-os doctor`
+reports it and any control command rewrites it. Written atomically under the lock. It is not `config.json`, so changing it
+during a run never trips the tamper halt.
 
 ## Readiness rule (pure function, heavily tested)
 
@@ -111,11 +113,16 @@ Each tick:
 2. Under `merge: "auto"`, if any feature is `parked` and the main checkout is now clean and on `base`, merge
    each one's recorded `sha` if its branch still points to it (else back to `todo`), then reload.
    **Launch limit:** `control.json` is re-read every tick; the limit is 0 while `paused`, else `control.maxParallel`, else
-   `config.maxParallel` (at least 1). It only gates new launches: nothing in flight is interrupted (a lower limit waits for
-   the in-flight count to drop below it; a feature that falls back to `todo` mid-pipeline is a new launch, so it waits too),
-   parked merges above still merge while paused, and a `control.json` change wakes the loop even with every lane busy, so
-   more lanes or a resume launch at once. A change is logged `control` (old → new, with the launch limit); ready features
-   held by a person's limit are logged `paused-launch` once per limit and held set.
+   `config.maxParallel` (at least 1). The in-flight count it is checked against is this foreman's own launches plus live
+   children of a previous foreman (step 1's orphans), for either limit, so the count matches what the dashboard and CLI
+   show; while an orphan holds a lane the foreman polls for it to end. The limit only gates new launches: nothing in flight
+   is interrupted (a lower limit waits for the count to drop below it; a feature that falls back to `todo` mid-pipeline is a
+   new launch, so it waits too), parked merges above still merge while paused, and a `control.json` change wakes the loop
+   even with every lane busy, so more lanes or a resume launch at once. An invalid `control.json` keeps the last good
+   control read in this run, or, with none yet (invalid at startup), is treated as paused; it is logged `control-invalid`
+   once per bad content. The first read is logged `control` "at start: …" only when it is not the default; later changes
+   as `control` (old → new, with the launch limit); ready features held by a person's limit are logged `paused-launch`
+   once per limit and held set.
    Launch ready features, in readiness order, until the launch limit is in flight (a ceiling, not a target). A feature
    whose conflict group (`group`, else per `groupBy`; none when both are unset) already has a feature in flight
    (`building|testing|evaluating`, including a previous foreman's live orphan) is skipped for the next-best ready
@@ -254,9 +261,11 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   keeps waiting while any feature is paused. Exit 1 if any id was refused.
 - `fact-os pause-all|resume-all` and `fact-os lanes <n|default>` — write `control.json` (`by: "cli"`): stop or restart
   launching new features, or set how many may be in flight (0–32; `default` = `config.maxParallel`). Nothing running is
-  interrupted. Each prints the resulting state (paused or the launch limit, lanes and default, how many run); bad input
-  exits 1 with a message. Per-feature `pause`/`resume` are unchanged.
-- `fact-os doctor` — validates the files (schema, unknown deps, cycles, duplicate ids) and that
+  interrupted. Each prints the resulting state (paused or the launch limit, lanes and default, how many run, and "no foreman
+  running; applies when one starts" when no foreman runs); bad input exits 1 with a message; an invalid file is rewritten
+  with a note. Without `--watch`, a paused foreman exits (2) once its work in flight drains. Per-feature `pause`/`resume`
+  are unchanged.
+- `fact-os doctor` — validates the files (schema, unknown deps, cycles, duplicate ids, an invalid `control.json`) and that
   `claude`, `git` and the test command's first word resolve.
 - `fact-os hook` — reads a Claude Code hook JSON payload on stdin; finds the project via
   `git rev-parse --git-common-dir` (works from worktrees) and appends to `activity.jsonl`. The feature
@@ -318,7 +327,8 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   `{n, role: build|eval, at, ms, cost, turns, model, pass?, findings?, summary}` from `runs/<id>/`.
   `POST /api/human/wait {project, id, who}` (who: 1-200 chars, else 400; 409 if done) sets `waitingOn`/`waitingSince`;
   `/api/human/unwait` clears them; `reopen` and `done` clear them too.
-  `/api/state` projects carry `control {paused, maxParallel, effective /* the launch limit now */, configMax, updatedAt?, by?}`
+  `/api/state` projects carry `control {paused, maxParallel, effective /* the launch limit now; null when invalid */, configMax,
+  updatedAt?, by?, invalid? /* why control.json is invalid: the header and Factory view warn instead of showing defaults */}`
   and `inFlight` (features building, testing or evaluating). `POST /api/control/pause {project}`, `/api/control/resume
   {project}` and `/api/control/lanes {project, maxParallel: 0–32 | null}` write `control.json` (`by: "dashboard"`; 400 on an
   invalid `maxParallel`) and answer the new `control`.
