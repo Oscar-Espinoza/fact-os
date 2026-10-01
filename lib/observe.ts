@@ -274,7 +274,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   }
 
   for (const [file, n] of hotFiles(state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < DAY)))
-    if (n >= 5) alert(`merge conflicts in ${file} keep sending features that passed evaluation back to the builder (${n >= 10 ? '10+' : '5+'} in 24h); make it merge-friendly`, now(), DAY);
+    if (n >= 5) alert(`merge conflicts in ${file} keep sending features that passed evaluation back to the builder (5 or more in 24h); make it merge-friendly`, now(), DAY);
   if (cfg.agent) await curateLessons(root, config, cfg, state, out, opts.children ?? new Set());
   if (cfg.agent && cfg.improve) await improvePass(root, config, cfg, state, out, opts.children ?? new Set());
 
