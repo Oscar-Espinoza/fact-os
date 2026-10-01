@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, effectiveLimit, validLanes, MAX_LANES } from './state.ts';
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
-import { observerPaths, recurringTests, hotFiles, type ObserverState, type Era } from './observe.ts';
+import { observerPaths, observerConfig, recurringTests, hotFiles, type ObserverState, type Era } from './observe.ts';
+import { profileNames, profileLabel, roleTable, validProfile, type RoleRow } from './profiles.ts';
 import { IN_FLIGHT, type ActivityEvent, type Config, type Control, type Diagnosis, type Feature, type HumanTask, type LogEvent, type MergeMode, type RoleConfig } from './types.ts';
 
 // Median durations (ms) of each pipeline stage, for the dashboard's estimated progress; null = no history yet.
@@ -29,7 +30,11 @@ export interface ProjectState {
 // A person's pause / lanes (control.json): effective = how many may be in flight now (0 while paused); configMax = config.maxParallel.
 // An invalid file is reported as `invalid` (the reason) with effective null: the foreman then keeps its last good control, or
 // holds all new work if it started with this file, so the page must not show the defaults as if they applied.
-export type ControlState = Pick<Control, 'paused' | 'maxParallel' | 'updatedAt' | 'by'> & { effective: number | null; configMax: number; invalid?: string };
+// profile: the active model profile (null = opus; also null while the file is invalid); roles: what each role runs with under it;
+// profiles: every selectable profile, opus first, with its label ("Opus", "Fable + Sonnet", else the name) and role table.
+export type ControlState = Pick<Control, 'paused' | 'maxParallel' | 'updatedAt' | 'by'> & { effective: number | null; configMax: number; invalid?: string;
+  profile: string | null; roles: RoleRow[]; profiles: ProfileInfo[] };
+export interface ProfileInfo { name: string; label: string; roles: RoleRow[] }
 export interface ObserverSummary {
   updatedAt: string; running: boolean; alerts24h: { ts: string; text: string }[]; stuck: { id: string; cause: string; evidence: string }[];
   decisions: Diagnosis[]; causes24h: { cause: string; n: number }[]; recurring: { test: string; features: string[] }[];
@@ -52,12 +57,14 @@ const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { 
 const isWorktree = (dir: string) => { try { return statSync(join(dir, '.git')).isFile(); } catch { return false; } };
 
 const HUMAN = ['start', 'done', 'reopen', 'step', 'wait', 'unwait'] as const;
-const CONTROL = ['pause', 'resume', 'lanes'] as const;
+const CONTROL = ['pause', 'resume', 'lanes', 'profile'] as const;
 
-export function controlState(dir: string, config: Pick<Config, 'maxParallel'>): ControlState {
-  const r = readControlFile(dir), configMax = Math.max(1, config.maxParallel);
-  return r.ok ? { ...r.control, effective: effectiveLimit(r.control, config), configMax }
-    : { paused: false, maxParallel: null, effective: null, configMax, invalid: r.error };
+export function controlState(dir: string, config: Config): ControlState {
+  const r = readControlFile(dir, config), configMax = Math.max(1, config.maxParallel), agent = observerConfig(config, { agent: true }).agent;
+  const profiles = profileNames(config).map((name) => ({ name, label: profileLabel(name), roles: roleTable(config, name, agent) }));
+  const profile = r.ok ? r.control.profile ?? null : null, roles = profiles.find((p) => p.name === (profile ?? 'opus'))!.roles;
+  return r.ok ? { ...r.control, profile, effective: effectiveLimit(r.control, config), configMax, roles, profiles }
+    : { paused: false, maxParallel: null, effective: null, configMax, invalid: r.error, profile, roles, profiles };
 }
 // Page scripts, styles and pixel art under lib/dash/ and lib/assets/, served at /dash/* and /assets/*.
 const ASSET_TYPES: Record<string, string> = { js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png' };
@@ -341,14 +348,18 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
       if (req.method !== 'POST' || (!action && !ctl && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged'].includes(req.url!))) return send(404, { error: 'not found' });
       let body = '';
       for await (const c of req) { body += c; if (body.length > 10000) return send(413, { error: 'body too large' }); }
-      const parsed = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown; maxParallel?: unknown };
+      const parsed = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown; maxParallel?: unknown; profile?: unknown };
       const { project, id, step, on, who } = parsed;
       if (typeof project !== 'string' || !discover(root).includes(project)) return send(400, { error: 'unknown project' });
-      if (ctl) { // pause / resume new launches, or set the lanes (null = config default); the foreman re-reads control.json every tick
+      if (ctl) { // pause / resume new launches, set the lanes (null = config default) or the model profile (null = opus); the
+        // foreman re-reads control.json every tick and applies a profile to new launches only
         if (ctl === 'lanes' && !('maxParallel' in parsed && validLanes(parsed.maxParallel)))
           return send(400, { error: `maxParallel must be an integer from 0 to ${MAX_LANES}, or null for the config default` });
         const config = loadConfig(project); // before the write: an unreadable config fails the request without changing anything
-        await writeControl(project, ctl === 'lanes' ? { maxParallel: parsed.maxParallel as number | null } : { paused: ctl === 'pause' }, 'dashboard');
+        if (ctl === 'profile' && !('profile' in parsed && validProfile(config, parsed.profile)))
+          return send(400, { error: `profile must be one of ${profileNames(config).join(', ')}, or null for opus (is ${JSON.stringify(parsed.profile)})` });
+        await writeControl(project, ctl === 'lanes' ? { maxParallel: parsed.maxParallel as number | null } : ctl === 'profile' ? { profile: parsed.profile as string | null }
+          : { paused: ctl === 'pause' }, 'dashboard', config);
         return send(200, { ok: true, control: controlState(project, config) });
       }
       if (typeof id !== 'string') return send(400, { error: 'id must be a string' });

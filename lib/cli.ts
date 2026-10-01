@@ -182,7 +182,7 @@ async function showProfile(root: string, config: Config, foreman?: boolean): Pro
   const p = cr.ok ? cr.control.profile ?? null : null;
   console.log(`profile ${profileLine(p)}${foreman === undefined ? '' : `: applies to new launches${foreman ? '; running features keep theirs' : ''}`}`);
   for (const r of roleTable(config, p, observerConfig(config, { agent: true }).agent))
-    console.log(`  ${r.role.padEnd(10)}${(r.model ?? '-').padEnd(8)}${r.effort ?? '-'}${r.effortHigh ? ` (${r.effortHigh} when risky)` : ''}`);
+    console.log(`  ${r.role.padEnd(11)}${(r.model ?? '-').padEnd(8)}${r.effort ?? '-'}${r.effortHigh ? ` (${r.effortHigh} when risky)` : ''}`);
   console.log(`profiles: ${profileNames(config).join(', ')}`);
 }
 

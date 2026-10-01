@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
 import type { Server } from 'node:http';
-import { startDash, conflictTimeline, type ProjectState, type OpenTask, type Run } from '../lib/dash.ts';
+import { startDash, conflictTimeline, type ProjectState, type OpenTask, type Run, type ControlState } from '../lib/dash.ts';
 import type { Feature, HumanTask, MergeMode } from '../lib/types.ts';
 
 let root: string, dash: { server: Server; url: string };
@@ -20,6 +20,8 @@ function project(dir: string, { merge = 'auto', features = [], tasks = [], gitFi
   writeFileSync(join(dir, '.fact-os/features.json'), JSON.stringify({ features }));
   writeFileSync(join(dir, '.fact-os/human.json'), JSON.stringify({ tasks }));
 }
+// control without the profile tables (their own test checks them)
+const core = (c: ControlState | undefined) => { const { roles, profiles, ...rest } = c!; return rest; };
 const humanOf = (p: string): HumanTask[] => JSON.parse(readFileSync(join(root, p, '.fact-os/human.json'), 'utf8')).tasks;
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(dash.url + path, { method: 'POST',
   headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
@@ -286,11 +288,11 @@ test('control routes: pause, resume and lanes write control.json; state carries 
   writeFileSync(feats, JSON.stringify({ features: [F('pay', { status: 'building' }), F('cart', { status: 'evaluating' }), F('more')] }));
   try {
     let p = await get();
-    assert.deepEqual(p.control, { paused: false, maxParallel: null, effective: 3, configMax: 3 });
+    assert.deepEqual(core(p.control), { paused: false, maxParallel: null, effective: 3, configMax: 3, profile: null });
     assert.equal(p.inFlight, 2);
     let r = await ask('pause');
     assert.equal(r.status, 200);
-    assert.deepEqual(((await r.json()) as { control: unknown }).control, { ...JSON.parse(readFileSync(file, 'utf8')), effective: 0, configMax: 3 });
+    assert.deepEqual(core(((await r.json()) as { control: ControlState }).control), { ...JSON.parse(readFileSync(file, 'utf8')), effective: 0, configMax: 3 });
     assert.deepEqual([JSON.parse(readFileSync(file, 'utf8')).paused, JSON.parse(readFileSync(file, 'utf8')).by], [true, 'dashboard']);
     p = await get();
     assert.deepEqual([p.control!.paused, p.control!.effective, p.control!.maxParallel], [true, 0, null]);
@@ -312,7 +314,7 @@ test('control routes: pause, resume and lanes write control.json; state carries 
     assert.equal((await ask('resume')).status, 200);
     assert.equal((await get()).control!.effective, 0, 'lanes 0 launches nothing either');
     assert.equal((await ask('lanes', { maxParallel: 5 })).status, 200);
-    assert.deepEqual((await get()).control, { ...JSON.parse(readFileSync(file, 'utf8')), effective: 5, configMax: 3 });
+    assert.deepEqual(core((await get()).control), { ...JSON.parse(readFileSync(file, 'utf8')), effective: 5, configMax: 3 });
     assert.equal((await ask('lanes', { maxParallel: null })).status, 200);
     assert.deepEqual([(await get()).control!.maxParallel, (await get()).control!.effective], [null, 3]);
     // an invalid file is surfaced, never shown as the defaults; any control action rewrites it
@@ -327,4 +329,52 @@ test('control routes: pause, resume and lanes write control.json; state carries 
     writeFileSync(feats, saved);
     rmSync(file, { force: true });
   }
+});
+
+test('profile route: sets the model profile (known name, "opus" or null), refuses anything else; state carries the role tables', async () => {
+  const shop = join(root, 'shop'), file = join(shop, '.fact-os/control.json');
+  const get = async () => ((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!;
+  const ask = (body: object, headers: Record<string, string> = { origin: dash.url }) => post('/api/control/profile', { project: shop, ...body }, headers);
+  try {
+    let c = (await get()).control!;
+    assert.equal(c.profile, null);
+    assert.deepEqual(c.profiles.map((p) => [p.name, p.label]), [['opus', 'Opus'], ['fable-sonnet', 'Fable + Sonnet']]);
+    assert.deepEqual(c.roles.map((r) => [r.role, r.model, r.effort]), [['builder', 'opus', 'medium'], ['resolver', 'opus', 'medium'], ['evaluator', 'opus', 'high'],
+      ['observer', 'opus', 'high'], ['curator', 'opus', 'high']]);
+    assert.deepEqual(c.profiles[1]!.roles[0], { role: 'builder', model: 'sonnet', effort: 'medium', effortHigh: 'high', fromProfile: true });
+    let r = await ask({ profile: 'fable-sonnet' });
+    assert.equal(r.status, 200);
+    assert.equal(((await r.json()) as { control: ControlState }).control.profile, 'fable-sonnet');
+    assert.deepEqual([JSON.parse(readFileSync(file, 'utf8')).profile, JSON.parse(readFileSync(file, 'utf8')).by], ['fable-sonnet', 'dashboard']);
+    c = (await get()).control!;
+    assert.equal(c.profile, 'fable-sonnet');
+    assert.deepEqual(c.roles.map((x) => x.model), ['sonnet', 'sonnet', 'fable', 'fable', 'fable']);
+    const before = readFileSync(file, 'utf8');
+    for (const body of [{ profile: 'nope' }, { profile: 'default' }, { profile: 3 }, { profile: '' }, {}]) {
+      r = await ask(body);
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.match(((await r.json()) as { error: string }).error, /profile must be one of opus, fable-sonnet, or null for opus/);
+    }
+    assert.equal((await ask({ profile: 'opus' }, { origin: 'https://evil.example' })).status, 403);
+    assert.equal((await post('/api/control/profile', { project: '/etc', profile: 'opus' })).status, 400);
+    assert.equal((await post('/api/control/profile', { project: shop + '/', profile: 'opus' })).status, 400);
+    assert.equal((await fetch(dash.url + '/api/control/profile')).status, 404, 'GET is not a control action');
+    assert.equal(readFileSync(file, 'utf8'), before, 'refused requests change nothing');
+    assert.equal((await ask({ profile: 'opus' })).status, 200);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).profile, null, 'opus is stored as null');
+    assert.equal((await ask({ profile: 'fable-sonnet' })).status, 200);
+    assert.equal((await ask({ profile: null })).status, 200);
+    assert.equal((await get()).control!.profile, null);
+    // a config profile is selectable; an unknown one in the file is surfaced as invalid
+    const cfg = join(shop, '.fact-os/config.json'), saved = readFileSync(cfg, 'utf8');
+    try {
+      writeFileSync(cfg, JSON.stringify({ ...JSON.parse(saved), profiles: { cheap: { builder: { model: 'haiku' } } } }));
+      assert.equal((await ask({ profile: 'cheap' })).status, 200);
+      c = (await get()).control!;
+      assert.deepEqual([c.profile, c.profiles.at(-1)!.label, c.roles[0]!.model, c.roles[2]!.model], ['cheap', 'cheap', 'haiku', 'opus']);
+    } finally { writeFileSync(cfg, saved); }
+    c = (await get()).control!;
+    assert.match(c.invalid!, /unknown profile "cheap"/);
+    assert.equal(c.profile, null);
+  } finally { rmSync(file, { force: true }); }
 });
