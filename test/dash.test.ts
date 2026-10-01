@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
 import type { Server } from 'node:http';
-import { startDash, type ProjectState, type OpenTask, type Run } from '../lib/dash.ts';
+import { startDash, conflictTimeline, type ProjectState, type OpenTask, type Run } from '../lib/dash.ts';
 import type { Feature, HumanTask, MergeMode } from '../lib/types.ts';
 
 let root: string, dash: { server: Server; url: string };
@@ -221,4 +221,40 @@ test('state carries the observer summary from observer.json, and null without it
   assert.equal(await get(), null);
   rmSync(join(dir, 'observer.json'));
   writeFileSync(join(dir, 'human.json'), human);
+});
+
+test('state carries the merge conflict timeline from the log: who resolved each conflict and how it ended', async () => {
+  const dir = join(root, 'shop/.fact-os'), t0 = Date.now() - 20 * 3600e3, min = (m: number) => new Date(t0 + m * 60e3).toISOString();
+  const ev = (m: number, feature: string, event: string, detail = '') => JSON.stringify({ ts: min(m), feature, event, detail });
+  const hasLog = (() => { try { return readFileSync(join(dir, 'log.jsonl'), 'utf8'); } catch { return null; } })();
+  writeFileSync(join(dir, 'observer.json'), JSON.stringify({ offset: 0, retried: {}, diagnoses: [], alerts: [] }));
+  writeFileSync(join(dir, 'log.jsonl'), [
+    ev(-1900, 'old', 'refreshed', 'conflicts in: a.ts'), ev(-1800, 'old', 'merged'),
+    ev(0, 'pay', 'refreshed', 'conflicts in: src/a.ts, src/b.ts'), ev(1, 'pay', 'resolving', 'src/a.ts, src/b.ts'), ev(3, 'pay', 'resolved', 'abc; 2 lines changed'),
+    ev(4, 'pay', 'testing'), ev(9, 'pay', 'evaluating'), ev(42, 'pay', 'merged'),
+    ev(5, 'cart', 'refreshed', 'before test, conflict-free'), ev(6, 'cart', 'refreshed', 'conflicts in: src/c.ts'), ev(7, 'cart', 'launch'), ev(10, 'cart', 'keep-check', 'ok: src/c.ts'), ev(11, 'cart', 'testing'),
+    ev(12, 'post', 'refreshed', 'conflicts in: p.ts'), ev(13, 'post', 'resolving', 'p.ts'), ev(14, 'post', 'resolve-failed', 'keep-check: 20 lines lost'), ev(15, 'post', 'launch'),
+    ev(16, 'post', 'keep-check', 'lost 3 lines'), ev(20, 'post', 'refreshed', 'conflicts in: p.ts'), ev(21, 'post', 'stuck', 'too many base refreshes (5)'),
+    ev(30, 'draft', 'refreshed', 'conflicts in: d.ts'),
+  ].join('\n') + '\n');
+  try {
+    const o = ((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!.observer!;
+    const by = (f: string) => o.conflicts24h.filter((c) => c.feature === f);
+    assert.deepEqual(o.conflicts24h.map((c) => c.feature + '@' + c.files.length), ['draft@1', 'post@1', 'post@1', 'cart@1', 'pay@2']); // newest first; "old" is over 24 h
+    assert.deepEqual(by('pay')[0], { feature: 'pay', title: 'pay', ts: min(0), files: ['src/a.ts', 'src/b.ts'], resolvedBy: 'resolver', outcome: 'merged', outcomeTs: min(42), ms: 42 * 60e3 });
+    assert.deepEqual([by('cart')[0]!.resolvedBy, by('cart')[0]!.outcome], ['builder', 'back in test']);
+    assert.deepEqual(by('post').map((c) => [c.resolvedBy, c.outcome, c.note]), [[null, 'failed', undefined], ['builder', 'conflicted again', 'keep-check: 20 lines lost; lost 3 lines']]);
+    assert.deepEqual(by('draft')[0]!.outcome, 'still open');
+    assert.ok(Math.abs(by('draft')[0]!.ms - (Date.now() - t0 - 30 * 60e3)) < 5000); // runs to now
+  } finally {
+    if (hasLog == null) rmSync(join(dir, 'log.jsonl')); else writeFileSync(join(dir, 'log.jsonl'), hasLog);
+    rmSync(join(dir, 'observer.json'));
+  }
+});
+
+test('conflictTimeline: a resolver failure hands the conflict to the builder, and the note is kept', () => {
+  const now = Date.parse('2026-10-01T12:00:00Z'), ev = (m: number, event: string, detail = '') => ({ ts: new Date(now - 60 * 60e3 + m * 60e3).toISOString(), feature: 'x', event, detail });
+  const [c] = conflictTimeline([ev(0, 'refreshed', 'conflicts in: a.ts'), ev(1, 'resolving', 'a.ts'), ev(2, 'resolve-failed', 'keep-check: 3 lines lost'), ev(3, 'launch'), ev(5, 'keep-check', 'ok: a.ts'), ev(6, 'testing')], now, { x: 'The X' });
+  assert.deepEqual([c!.title, c!.resolvedBy, c!.note, c!.outcome, c!.ms], ['The X', 'builder', 'keep-check: 3 lines lost', 'back in test', 3600e3]);
+  assert.deepEqual(conflictTimeline([ev(0, 'refreshed', 'conflicts in: a.ts'), ev(1, 'resolving', 'a.ts')], now).map((r) => [r.resolvedBy, r.outcome]), [['resolver', 'still open']]);
 });
