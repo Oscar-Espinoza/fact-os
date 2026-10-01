@@ -4,9 +4,9 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, NAME } from './state.ts';
+import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, effectiveLimit, MAX_LANES, NAME } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
-import { STATUSES, type ActivityEvent, type Config, type Feature, type HumanTask } from './types.ts';
+import { STATUSES, IN_FLIGHT, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
@@ -16,6 +16,8 @@ const USAGE = `usage: ${NAME} <command>
   status                          features and open human tasks
   done <human-task-id>            mark a human task done
   pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
+  pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
+  lanes <n|default>               how many features may be in flight (0-${MAX_LANES}); default = config.maxParallel
   doctor                          validate state files and tools
   dash [--root DIR] [--port 7420] dashboard on 127.0.0.1
   observe [--watch] [--agent]
@@ -53,7 +55,7 @@ function init(test: string | undefined): void {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['runs/', '*.jsonl', '.lock', '.foreman', '.observer', 'observer.json', 'observer-report.md'].map((f) => `${paths(root).name}/${f}`)
+  const add = ['runs/', '*.jsonl', '.lock', '.foreman', '.observer', 'observer.json', 'observer-report.md', 'control.json'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');
@@ -129,6 +131,27 @@ function doctor(): number {
   return problems.length ? 1 : 0;
 }
 
+// pause-all / resume-all / lanes: write control.json (the foreman re-reads it every tick) and print the resulting state.
+async function control(cmd: string, args: string[]): Promise<void> {
+  const root = needRoot(), [arg] = args;
+  let patch: Partial<Pick<Control, 'paused' | 'maxParallel'>>;
+  if (cmd === 'lanes') {
+    if (args.length !== 1) throw new Error(`usage: ${NAME} lanes <n|default>  (n: 0-${MAX_LANES})`);
+    if (arg !== 'default' && !/^\d+$/.test(arg!)) throw new Error(`lanes: "${arg}" is not a number from 0 to ${MAX_LANES} or "default"`);
+    patch = { maxParallel: arg === 'default' ? null : Number(arg) };
+  } else {
+    if (args.length) throw new Error(`usage: ${NAME} ${cmd}`);
+    patch = { paused: cmd === 'pause-all' };
+  }
+  const c = await writeControl(root, patch, 'cli'), config = loadConfig(root), def = Math.max(1, config.maxParallel);
+  const running = load(root).features.filter((f) => IN_FLIGHT.includes(f.status)).length, limit = effectiveLimit(c, config);
+  const state = c.paused ? 'paused: no new features start' : limit === 0 ? 'lanes 0: no new features start' : `up to ${limit} in flight`;
+  const lanes = c.maxParallel == null ? `${def} (default)` : `${c.maxParallel} (default ${def})`;
+  const note = !running ? 'nothing running' : limit === 0 ? `${running} still running will finish`
+    : running > limit ? `${running} running will finish; no new ones start until fewer than ${limit} are running` : `${running} running`;
+  console.log(`${state}; lanes ${lanes}; ${note}`);
+}
+
 // Claude Code hook: never prints, never fails.
 interface HookPayload { cwd?: string; session_id?: string; tool_name?: string; hook_event_name?: string; tool_input?: Record<string, unknown> }
 
@@ -156,7 +179,7 @@ async function hook(): Promise<void> {
 const argv = process.argv.slice(2);
 const { values, positionals } = parseArgs({ args: argv.slice(1), allowPositionals: true, options: {
   test: { type: 'string' }, watch: { type: 'boolean' }, once: { type: 'boolean' }, 'max-features': { type: 'string' },
-  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' } }, strict: argv[0] !== 'hook' });
+  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' } }, strict: !['hook', 'lanes'].includes(argv[0]!) });
 // strict parsing (every command but hook, which ignores o) guarantees these types.
 const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean };
 try {
@@ -171,6 +194,7 @@ try {
       if (Object.values(r).some(Boolean)) process.exitCode = 1;
       break;
     }
+    case 'pause-all': case 'resume-all': case 'lanes': await control(argv[0], argv.slice(1)); break;
     case 'doctor': process.exitCode = doctor(); break;
     case 'hook': await hook(); process.exit(0); break;
     case 'run': {
