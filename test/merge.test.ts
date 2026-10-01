@@ -164,8 +164,22 @@ test('keepCheck: an entry the resolution moved into another file counts as kept 
   // The resolution keeps main's reg.ts and moves this branch's m2 entry into its own file.
   commit({ 'reg.ts': THEIRS, 'grants-m2.ts': 'export const m2 = (s) => [\n  `grant two ${s}`,\n],\n' }, 'merge main; m2 moves to its own file');
   const k = keepCheck(dir, ours, theirs, git('rev-parse', 'HEAD'), ['reg.ts']);
-  assert.deepEqual(k.missing.map((m) => m.line), ['m2: (s) => ['], 'only the line that really changed is missing');
+  // 2 of the 3 lines moved verbatim; below the 3-line threshold the rewritten key line still counts as missing.
+  assert.deepEqual(k.missing.map((m) => m.line), ['m2: (s) => ['], 'a small block: the rewritten line is still reported');
   assert.ok(k.changed.some((c) => c.line.includes('grant two') && c.now === '(moved to grants-m2.ts)'));
+});
+
+test('keepCheck: when most of a moved block arrived verbatim, its rewritten key line travels with it', (t) => {
+  const { dir, git, commit } = repo(t);
+  git('checkout', '-q', 'ship/a');
+  const big = BASE.replace('};', '  m2: (s) => [\n    `grant two a ${s}`,\n    `grant two b ${s}`,\n    `grant two c ${s}`,\n  ],\n};');
+  commit({ 'reg.ts': big }, 'a: a bigger m2');
+  const ours = git('rev-parse', 'HEAD'), theirs = git('rev-parse', 'main');
+  spawnSync('git', ['merge', '--no-edit', theirs], { cwd: dir });
+  commit({ 'reg.ts': THEIRS, 'grants-m2.ts': 'export const m2 = (s) => [\n  `grant two a ${s}`,\n  `grant two b ${s}`,\n  `grant two c ${s}`,\n],\n' }, 'merge main; m2 moves');
+  const k = keepCheck(dir, ours, theirs, git('rev-parse', 'HEAD'), ['reg.ts']);
+  assert.equal(k.ok, true, JSON.stringify(k.missing));
+  assert.ok(k.changed.some((c) => c.line === 'm2: (s) => [' && /moved with its block to grants-m2\.ts/.test(c.now)));
 });
 
 test('runTag counts resolver run files, so a resolution pass never overwrites an earlier pass', () => {

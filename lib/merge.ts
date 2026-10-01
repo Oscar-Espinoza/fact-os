@@ -230,11 +230,20 @@ export function keepCheck(cwd: string, ours: string, theirs: string, tip: string
   }
   for (const file of files) {
     const c = checkLines(mb ? show(cwd, mb, file) : '', show(cwd, ours, file), show(cwd, theirs, file), show(cwd, tip, file));
+    const left: typeof c.lost = [], movedTo = new Map<string, string>(); // side → where most of its block went
+    let movedN = 0;
     for (const m of c.lost) {
       if (declared.has(`${file}\n${m.line}`)) continue;
       const mv = moved.get(m.line.trim());
-      if (mv && mv.n >= m.missing) { mv.n -= m.missing; changed.push({ file, line: m.line, now: `(moved to ${mv.file})` } as Changed & { file: string }); continue; }
-      missing.push({ file, ...m });
+      if (mv && mv.n >= m.missing) { mv.n -= m.missing; movedN++; movedTo.set(m.side, mv.file); changed.push({ file, line: m.line, now: `(moved to ${mv.file})` } as Changed & { file: string }); continue; }
+      left.push(m);
+    }
+    // A block moved to a new layout often changes its first line (a registry key becoming a module): when most of one
+    // side's lost lines in this file were moved, its few remaining ones travelled with the block.
+    for (const m of left) {
+      const to = movedTo.get(m.side);
+      if (to && movedN >= 3 && left.length * 2 <= movedN) changed.push({ file, line: m.line, now: `(moved with its block to ${to}, rewritten)` } as Changed & { file: string });
+      else missing.push({ file, ...m });
     }
     for (const x of c.changed) changed.push({ file, ...x });
   }
