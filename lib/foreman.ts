@@ -138,6 +138,20 @@ export function promptFingerprint(role: Role, r: { model?: string; effort?: stri
   return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}`;
 }
 
+// The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
+// `testing <sha>` of the same pass), or null. The next pass can skip the builder if the branch is still exactly there.
+const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked'];
+export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'detail'>[], id: string): string | null {
+  let sha: string | null = null, last = '';
+  for (const e of events) {
+    if (e.feature !== id || e.event === 'prompt' || e.event === 'lesson') continue;
+    last = e.event;
+    if (e.event === 'launch' || ENDS_PASS.includes(e.event)) sha = null;
+    else if (e.event === 'testing') sha = e.detail || null;
+  }
+  return last === 'interrupted' ? sha : null;
+}
+
 // ---- prompts ----
 
 const readIf = (file: string): string | null => { try { return readFileSync(file, 'utf8'); } catch { return null; } };
@@ -280,6 +294,8 @@ export function exec(cmd: string, args: string[], { cwd, env, input = '', childr
     cp.stdin.end(input);
   });
 }
+
+const readLogEvents = (file: string): LogEvent[] => { try { return readFileSync(file, 'utf8').split('\n').flatMap((l) => { try { return l ? [JSON.parse(l) as LogEvent] : []; } catch { return []; } }); } catch { return []; } };
 
 // ---- the loop ----
 
@@ -464,11 +480,18 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       if (pr.code !== 0) return fail(`prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`);
     }
 
+    // Stopped after the build last time and the branch is exactly where it was: go straight to the test.
+    const built = builtWhenStopped(readLogEvents(P.log), id);
+    const skipBuild = !!built && git(['rev-parse', branch], wt).out === built && !git(['status', '--porcelain'], wt).out &&
+      git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code !== 0;
+    if (skipBuild) log(root, id, 'resumed', `skipping the build: the foreman stopped after it built ${built!.slice(0, 12)}`);
+    else {
     const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld);
     recordPrompt('builder', bp);
     const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
     if (!b.ok) return fail(`builder failed: ${b.error}`);
+    }
     // Any commit beyond base counts as the builder's, including the merge commit that completes a base refresh.
     const status = git(['status', '--porcelain'], wt).out.split('\n').filter(Boolean);
     const listed = status.slice(0, 40).join('\n') + (status.length > 40 ? `\n… ${status.length - 40} more` : '');
@@ -476,7 +499,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     if (merging || status.length || git(['rev-list', '--count', `${config.base}..${branch}`], wt).out === '0')
       return fail(`commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`);
     // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
-    const rc = await checkResolution(id, branch, wt);
+    const rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
     if (rc.lost) return fail(rc.lost);
     const inline = !!config.resolver;
     let resolved = rc.note; // after a resolution in this pass: what the evaluator must also check

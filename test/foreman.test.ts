@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTag, promptFingerprint, evaluatorDiff } from '../lib/foreman.ts';
+import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped } from '../lib/foreman.ts';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -162,4 +162,14 @@ test('evaluatorDiff keeps whole files in order while they fit and names what it 
   assert.match(out, /NOT SHOWN because the diff is too long[^\n]*\n- migrations\/0001\.sql/);
   assert.ok(out.includes('A'.repeat(60)) && out.includes('C'.repeat(30)) && !out.includes('B'.repeat(60)));
   assert.doesNotMatch(evaluatorDiff('s', [{ path: 'a', diff: 'x' }], []), /NOT SHOWN|excluded/);
+});
+
+test('builtWhenStopped: the sha a pass had built when the foreman stopped, only if nothing ended the pass since', () => {
+  const ev = (feature: string, event: string, detail = '') => ({ feature, event, detail });
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'prompt', 'builder'), ev('a', 'testing', 'abc'), ev('a', 'interrupted')], 'a'), 'abc');
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'evaluating'), ev('a', 'lesson', 'x'), ev('a', 'interrupted')], 'a'), 'abc');
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'interrupted')], 'a'), null, 'stopped while building');
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'failed', 'x'), ev('a', 'launch'), ev('a', 'interrupted')], 'a'), null);
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'interrupted'), ev('a', 'launch')], 'a'), null, 'already relaunched');
+  assert.equal(builtWhenStopped([ev('b', 'launch'), ev('b', 'testing', 'abc'), ev('b', 'interrupted')], 'a'), null);
 });
