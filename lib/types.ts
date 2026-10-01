@@ -3,6 +3,7 @@
 
 export type Status = 'todo' | 'building' | 'testing' | 'evaluating' | 'ready' | 'merged' | 'stuck' | 'paused';
 export const STATUSES: Status[] = ['todo', 'building', 'testing', 'evaluating', 'ready', 'merged', 'stuck', 'paused'];
+export const IN_FLIGHT: Status[] = ['building', 'testing', 'evaluating'];
 export type Surface = 'web' | 'api' | 'ios' | 'android' | 'desktop' | 'any';
 export type MergeMode = 'auto' | 'manual';
 export type Role = 'builder' | 'evaluator' | 'resolver';
@@ -102,6 +103,15 @@ export interface HumanTask {
   waitingSince?: string;              // ISO
 }
 
+// <state dir>/control.json: a person's runtime limits on new launches (CLI or dashboard). Not config.json, so changing it
+// never trips the foreman's tamper halt. Nothing in flight is ever interrupted by it.
+export interface Control {
+  paused: boolean;                    // true: launch nothing new
+  maxParallel: number | null;         // 0..32; null = config.maxParallel
+  updatedAt?: string;                 // ISO
+  by?: 'dashboard' | 'cli';
+}
+
 export interface FeaturesFile { features: Feature[] }
 export interface HumanFile { tasks: HumanTask[] }
 export interface StateFiles { features: FeaturesFile; human: HumanFile }
@@ -120,5 +130,5 @@ export interface ClaudeResult { ok: boolean; text: string; cost: number; error?:
 
 export interface Paths {
   name: string; dir: string; config: string; features: string; human: string;
-  log: string; activity: string; lock: string; foreman: string; runs: string;
+  log: string; activity: string; lock: string; foreman: string; runs: string; control: string;
 }

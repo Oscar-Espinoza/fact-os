@@ -1,7 +1,7 @@
 // State files: JSON, written atomically (temp + rename) under .fact-os/.lock (O_EXCL, stale when its PID is dead).
 import { existsSync, readFileSync, writeFileSync, renameSync, linkSync, openSync, closeSync, writeSync, unlinkSync, appendFileSync, statSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import type { Config, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
+import type { Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
 
 export const DEFAULT_CONFIG: Config = {
   base: 'main', worktreesDir: '../<repo>-worktrees', branchPrefix: 'ship/', maxParallel: 3, maxAttempts: 2,
@@ -32,7 +32,7 @@ export function paths(root: string): Paths {
   const name = stateDirName(root), dir = join(root, name);
   return { name, dir, config: join(dir, 'config.json'), features: join(dir, 'features.json'), human: join(dir, 'human.json'),
     log: join(dir, 'log.jsonl'), activity: join(dir, 'activity.jsonl'), lock: join(dir, '.lock'),
-    foreman: join(dir, '.foreman'), runs: join(dir, 'runs') };
+    foreman: join(dir, '.foreman'), runs: join(dir, 'runs'), control: join(dir, 'control.json') };
 }
 
 // Untyped on purpose: callers cast (readState, loadConfig) or validate (doctor) what comes back.
@@ -122,6 +122,35 @@ export function loadConfig(root: string): Config {
 export function load(root: string): { config: Config; features: Feature[]; tasks: HumanTask[] } {
   return { config: loadConfig(root), features: readState(root, 'features').features, tasks: readState(root, 'human').tasks };
 }
+
+// ---- control.json: pause new work / lanes ----
+
+export const MAX_LANES = 32;
+export const validLanes = (x: unknown): x is number | null => x === null || (Number.isInteger(x) && (x as number) >= 0 && (x as number) <= MAX_LANES);
+
+// The control file, normalized: a missing, unreadable or invalid file (or field) means "not paused, config's lanes".
+export function readControl(root: string): Control {
+  let raw: Record<string, unknown> = {};
+  try { const j = JSON.parse(readFileSync(paths(root).control, 'utf8')); if (j && typeof j === 'object') raw = j; } catch {}
+  return { paused: raw.paused === true, maxParallel: validLanes(raw.maxParallel) ? raw.maxParallel : null,
+    ...(typeof raw.updatedAt === 'string' ? { updatedAt: raw.updatedAt } : {}), ...(raw.by === 'dashboard' || raw.by === 'cli' ? { by: raw.by } : {}) };
+}
+
+// Changes control.json under the state lock (atomic write); throws on an invalid maxParallel. Returns what was written.
+export async function writeControl(root: string, patch: Partial<Pick<Control, 'paused' | 'maxParallel'>>, by: NonNullable<Control['by']>): Promise<Control> {
+  if ('maxParallel' in patch && !validLanes(patch.maxParallel)) throw new Error(`lanes must be an integer from 0 to ${MAX_LANES}, or null for the config default`);
+  if ('paused' in patch && typeof patch.paused !== 'boolean') throw new Error('paused must be a boolean');
+  return withLock(root, () => {
+    const cur = readControl(root);
+    const next: Control = { paused: patch.paused ?? cur.paused, maxParallel: 'maxParallel' in patch ? patch.maxParallel! : cur.maxParallel, updatedAt: new Date().toISOString(), by };
+    writeJsonAtomic(paths(root).control, next);
+    return next;
+  });
+}
+
+// How many features may be in flight: 0 while paused, else the control's lanes, else config.maxParallel (at least 1, as before).
+export const effectiveLimit = (c: Pick<Control, 'paused' | 'maxParallel'>, config: Pick<Config, 'maxParallel'>): number =>
+  c.paused ? 0 : c.maxParallel ?? Math.max(1, config.maxParallel);
 
 export function log(root: string, feature: string | null, event: string, detail = ''): void {
   const e: LogEvent = { ts: new Date().toISOString(), feature, event, detail };

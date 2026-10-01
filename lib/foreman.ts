@@ -4,13 +4,12 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
+import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureEnv, readControl, effectiveLimit, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
-import type { ClaudeResult, Config, Feature, Finding, HumanTask, LogEvent, Paths, Role, Status, Verdict } from './types.ts';
+import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
-const IN_FLIGHT: Status[] = ['building', 'testing', 'evaluating'];
 export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
 const now = (): string => new Date().toISOString();
 const tail = (s: string, n = 4000): string => (s.length > n ? '…' + s.slice(-n) : s);
@@ -153,6 +152,9 @@ export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'd
   const end = last === 'launch' && before ? before : { sha, last };
   return end.last === 'interrupted' ? end.sha : null;
 }
+
+// A control state in words, for the log: "paused, lanes default" / "running, lanes 2".
+export const describeControl = (c: Pick<Control, 'paused' | 'maxParallel'>): string => `${c.paused ? 'paused' : 'running'}, lanes ${c.maxParallel ?? 'default'}`;
 
 // ---- prompts ----
 
@@ -311,6 +313,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   writeFileSync(P.foreman, String(process.pid));
   const children = new Set<ChildProcess>(), inflight = new Map<string, Promise<unknown>>();
   let stopping = false, launched = 0, onceDone = false, chain: Promise<unknown> = Promise.resolve(), lastWaiting = '', lastOrphans = '', lastParked = '';
+  let lastControl: Control = { paused: false, maxParallel: null }, lastHeld = ''; // control.json as last seen; ready features last held by its limit
   const serial = <R>(fn: () => R | Promise<R>): Promise<R> => { const p = chain.then(fn); chain = p.catch(() => {}); return p; }; // main-checkout git ops
   const onSignal = () => {
     if (stopping) { out('forced exit'); for (const c of children) killGroup(c, 'SIGKILL'); process.exit(130); }
@@ -675,7 +678,17 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
 
   try {
     for (;;) {
-      const seen = stamp(P); // before load(), so a change made during this tick still wakes --watch
+      const seen = stamp(P); // before load() and readControl(), so a change made during this tick still wakes --watch
+      const ctlSeen = stamp({ control: P.control });
+      // control.json (a person's pause / lanes), re-read every tick. It only limits new launches: nothing in flight is
+      // interrupted, and parked merges below still merge while paused.
+      const control = readControl(root), limit = effectiveLimit(control, config);
+      if (control.paused !== lastControl.paused || control.maxParallel !== lastControl.maxParallel) {
+        const detail = `${describeControl(lastControl)} → ${describeControl(control)}; launch limit ${effectiveLimit(lastControl, config)} → ${limit}${control.by ? ` (by ${control.by})` : ''}`;
+        log(root, null, 'control', detail);
+        out(`control: ${detail}`);
+        lastControl = control;
+      }
       const orphans = await recover();
       const { features, tasks } = load(root);
       const parked = features.filter(isParked);
@@ -690,10 +703,14 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
         const running = features.filter((f) => IN_FLIGHT.includes(f.status) || inflight.has(f.id));
         const busy = new Set(running.map((f) => groupOf(f, config.groupBy)));
         let claims: { hot: (file: string) => boolean; held: [string, string[]][] } | null = null; // this tick's, computed on first use
+        const held: string[] = []; // ready, but the launch limit is reached
         for (const id of a.ready) {
-          if (inflight.size >= Math.max(1, config.maxParallel) || capped()) break;
           const g = groupOf(features.find((x) => x.id === id)!, config.groupBy);
           if (inflight.has(id) || (g != null && busy.has(g))) continue; // its group is in flight: try the next-best one
+          // The limit counts this foreman's own launches in flight; a feature that went back to todo mid-pipeline is a new
+          // launch, so it waits here too while the count is at or over a lowered limit.
+          if (inflight.size >= limit) { held.push(id); continue; }
+          if (capped()) break;
           // File claims: never run two features that change one hot file; only features in flight hold claims, so nothing
           // ever waits on a feature that is not running.
           let hotHeld: string[] = [];
@@ -721,14 +738,26 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
             .catch((e: unknown) => { log(root, id, 'error', (e as Error | undefined)?.stack || String(e)); return set(id, { status: 'todo' }); })
             .finally(() => inflight.delete(id)));
         }
+        // A person's pause or lanes (control.json) holding ready work: logged once per limit and held set, not every tick.
+        const heldKey = held.length && (control.paused || control.maxParallel != null) ? `${limit}|${held.join()}` : '';
+        if (heldKey && heldKey !== lastHeld) {
+          const why = control.paused ? 'paused' : `lanes ${limit}`;
+          log(root, null, 'paused-launch', `${why}; ${inflight.size} running; waiting: ${held.join(', ')}`);
+          out(`not launching (${why}, ${inflight.size} running): ${held.join(', ')}`);
+        }
+        lastHeld = heldKey;
         if (opts.once) onceDone = true;
       }
       if (inflight.size) {
         // With a free slot, also wake on a state change (a retry or resume) so it launches without waiting for a feature to finish.
-        // Stamp after this tick's own writes (recovery, launches), or they would wake it at once and spin.
+        // Stamp after this tick's own writes (recovery, launches), or they would wake it at once and spin. A control.json change
+        // (more lanes, resume) always wakes it, free slot or not; the foreman never writes that file, so the stamp taken before
+        // this tick's read cannot spin and a change made since is not missed.
         let woke = false;
-        const free = !stopping && !onceDone && !capped() && !overBudget && inflight.size < Math.max(1, config.maxParallel);
-        await Promise.race([...inflight.values(), ...(free ? [waitForChange(P, stamp(P), () => stopping || woke)] : [])]);
+        const free = !stopping && !onceDone && !capped() && !overBudget && inflight.size < limit;
+        const files = { features: P.features, human: P.human }, done = () => stopping || woke;
+        await Promise.race([...inflight.values(), ...(free ? [waitForChange(files, stamp(files), done)] : []),
+          ...(!stopping && !onceDone ? [waitForChange({ control: P.control }, ctlSeen, done)] : [])]);
         woke = true;
         continue;
       }
@@ -744,8 +773,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
         await sleep(Number(envVar('POLL_MS')) || 5000);
         continue;
       }
-      // --watch also waits while features are paused, so resuming one (CLI or dashboard) launches it.
-      if (!(opts.watch && (a.waiting.length || features.some((f) => f.status === 'paused')))) break;
+      // --watch also waits while features are paused, or ready ones are held by a pause / lanes 0 (control.json), so resuming
+      // (CLI or dashboard) launches them.
+      if (!(opts.watch && (a.waiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
       if (a.waiting.join() !== lastWaiting) {
         lastWaiting = a.waiting.join();
         log(root, null, 'waiting', a.waiting.join(', '));
@@ -765,10 +795,12 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   return !halted && features.every((f) => f.status === 'merged' || f.status === 'ready') ? 0 : 2;
 }
 
-export const stamp = (P: Pick<Paths, 'features' | 'human'>): string => [P.features, P.human].map((f) => { try { return statSync(f).mtimeMs; } catch { return 0; } }).join();
+type Watched = Partial<Pick<Paths, 'features' | 'human' | 'control'>>;
+export const stamp = (P: Watched): string => [P.features, P.human, P.control].map((f) => { if (!f) return '-'; try { return statSync(f).mtimeMs; } catch { return 0; } }).join();
 
-// Sleep until features.json/human.json differ from `since` (a stamp taken before the caller read them).
-export async function waitForChange(P: Pick<Paths, 'features' | 'human'>, since: string, isStopping: () => boolean): Promise<void> {
+// Sleep until the given state files (features.json, human.json, control.json) differ from `since` (a stamp taken before the
+// caller read them).
+export async function waitForChange(P: Watched, since: string, isStopping: () => boolean): Promise<void> {
   const ms = Number(envVar('POLL_MS')) || 5000;
   while (!isStopping() && stamp(P) === since) await sleep(ms);
 }
