@@ -63,14 +63,22 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `restored`), `mergeHook` (null;
   a shell command run in the main checkout on the staged `git merge --no-ff --no-commit`, with
   `FACTOS_FEATURE`/`FACTOS_BRANCH`, e.g. to renumber migrations: what it `git add`s joins the merge commit; a
-  non-zero exit aborts the merge and sends the feature back to `todo` with the hook's output as feedback, costing no attempt).
-- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?,
+  non-zero exit aborts the merge and sends the feature back to `todo` with the hook's output as feedback, costing no attempt),
+  and the merge process (all off by default; see [docs/merge-process.md](docs/merge-process.md)): `claims` (null; `{hot, minScore,
+  days}`: never run two features that change one hot file — listed, or scored from the log's merge conflicts — judged from
+  each feature's `touches`, branch diff and uncommitted edits), `conflictBrief` (false; a conflicting refresh's feedback
+  names both sides: this feature, the features merged into `base` that touched each conflicting file with their
+  acceptance checks, and the diff3 hunks; resolutions must keep every line either side added or declare it as
+  `dropped: <file>: <line>` in a commit message) and `resolver` (null; `{model, effort, permissionMode}`: a separate
+  resolver run resolves the conflict at once, in the same pass, then the test and a fresh evaluator run again).
+- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?, touches?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
   `todo|building|testing|evaluating|ready|merged|stuck|paused`.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
-  `runs/<feature>/<attempt>-{build,eval}.json` (raw `claude -p` output), `.lock`, `.foreman` (foreman pid).
+  `runs/<feature>/<tag>-{build,eval,resolve}.json` (raw `claude -p` output), `.lock`, `.foreman` (foreman pid).
+  `bun scripts/replay-conflicts.ts <repo>` replays a project's real merge conflicts against the merge process, read-only.
 
 **Readiness:** a `todo` feature is ready when every dep is `merged` (or `ready` under manual merge) and
 every open human task that unblocks it is `mockable` (it is then built `onMock`). An open non-mockable task
@@ -100,7 +108,8 @@ such an object, `pass: true` with a failed finding, non-empty `cheating`, or no 
 - Builders never merge, rebase, pull or switch branches. A conflicting merge is aborted (`git merge --abort`)
   and the foreman itself merges `base` into the feature's (clean) worktree: if that is clean the next build
   re-runs the tests on top; if it conflicts, the merge is left in progress and the next build resolves and
-  commits it (that merge commit counts as the builder's commit). Neither costs an attempt; they are counted
+  commits it (that merge commit counts as the builder's commit), or, with `resolver` set, a resolver run does it in the
+  same pass; either way the resolution is tested and evaluated before it can merge. Neither costs an attempt; they are counted
   in `refreshes`, and after `maxRefreshes` (5) the feature is `stuck` ("too many base refreshes"). With `refreshBeforeTest: true` the
   same refresh runs before the test whenever `base` has commits the branch lacks: a clean merge goes straight on to
   test, evaluate (diff still `base...sha`) and merge that merge commit, without counting as a refresh; a conflict

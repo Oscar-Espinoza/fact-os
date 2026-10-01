@@ -44,7 +44,11 @@ and one dashboard across projects.
   "refreshBeforeTest": false,   // true: merge the recorded base sha into the feature branch before its test (see Test)
   "maxRefreshes": 5,            // base refreshes after merge conflicts before a feature is stuck
   "mergeHook": null,            // optional shell command run in the main checkout on the staged merge, before its commit (see Pass)
-  "groupBy": null               // conflict groups: null = only explicit `group`s; "idPrefix:<n>" = a feature's group defaults to its id's first n chars
+  "groupBy": null,              // conflict groups: null = only explicit `group`s; "idPrefix:<n>" = a feature's group defaults to its id's first n chars
+  "restoreFrom": null,          // null or a ref with "{id}": earlier work for a branch with none (see Build)
+  "claims": null,               // file claims (see Launch): null = off; {hot: [paths or "dir/"], minScore: 3, days: 7}
+  "conflictBrief": false,       // true: a conflicting refresh's feedback carries both sides' context; resolutions are keep-checked
+  "resolver": null              // null = the builder resolves conflicts on its next build; {model, effort, permissionMode} = a resolver run, same pass
 }
 ```
 `.fact-os/features.json` — `{ "features": [Feature] }`
@@ -57,6 +61,8 @@ Feature {
   priority: number                // lower = sooner
   branch?: string                 // existing branch to continue/evaluate instead of starting fresh
   group?: string                  // conflict group: never in flight together with another feature of the same group
+  touches?: string[]              // files (or "dir/" prefixes) it is expected to change: claimed while it runs (see Launch)
+  conflict?: {ours, theirs, files} // a conflicted base refresh whose committed resolution is not keep-checked yet (foreman-owned)
   status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"|"paused"
   issue?: number                  // GitHub issue number (dashboard shows #n, linked when the origin remote is GitHub)
   pausedAt?: ISO string           // set while paused; only a person pauses (CLI or dashboard), never the foreman
@@ -75,7 +81,7 @@ HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
 ```
 `.fact-os/log.jsonl` — one JSON line per event (`{ts, feature, event, detail}`).
 `.fact-os/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
-`.fact-os/runs/<feature>/<attempt>-{build,eval}.json` — raw `claude -p --output-format json` results.
+`.fact-os/runs/<feature>/<tag>-{build,eval,resolve}.json` — raw `claude -p --output-format json` results (tag: see Observer 7).
 `.fact-os/.foreman` — pid of the running foreman (one per repo).
 
 ## Readiness rule (pure function, heavily tested)
@@ -102,6 +108,14 @@ Each tick:
    whose conflict group (`group`, else per `groupBy`; none when both are unset) already has a feature in flight
    (`building|testing|evaluating`, including a previous foreman's live orphan) is skipped for the next-best ready
    feature of another group, so features touching the same hot files never run at the same time.
+   **Claims** (`claims` set): a ready feature is also skipped while a feature in flight holds one of its hot files. A file
+   is hot when it matches `claims.hot` (a path, or a prefix ending in "/") or when its conflicting refreshes in `log.jsonl`
+   over the last `claims.days` score at least `claims.minScore` (1 per `refreshed` with "conflicts in:", 2 when it came right
+   after `evaluating`, a `lesson` in between allowed). A feature's files are its `touches`, the committed diff
+   `base...<branch>` when the branch exists, and its worktree's uncommitted edits (`git status`; while a base refresh is in
+   progress only unmerged files and unstaged edits, not base's staged changes). Only features in flight hold claims, so a
+   claim never waits on anything that is not running; a skip is logged once per reason as `claim-wait` ("<file> is claimed
+   by <id>"), and the builder of a launched feature is told which hot files others in flight hold.
 3. Per feature (concurrently):
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
@@ -137,7 +151,8 @@ Each tick:
      branch (conflict-free); re-run the tests and fix anything the new base broke". Conflicted → the merge is
      left in progress, `todo` with feedback "the foreman started merging <base> into your branch and it
      conflicts in: <files>. Resolve the conflicts preserving both sides' intent, run the tests, and commit the
-     merge (git add + git commit). Do not abort it and do not start another merge or rebase." Neither spends
+     merge (git add + git commit). Do not abort it and do not start another merge or rebase." (With `conflictBrief` or
+     `resolver`, see **Resolving a conflict**.) Neither spends
      an attempt; `refreshes++` instead, and a conflict with `refreshes` already at `maxRefreshes` makes the feature `stuck`
      ("too many base refreshes"). With `mergeHook` set, the merge is `git merge --no-ff --no-commit <sha>` (conflicts
      handled as above); then `mergeHook` runs in the main checkout with env `FACTOS_FEATURE` and `FACTOS_BRANCH`
@@ -145,6 +160,37 @@ Each tick:
      foreman commits with the usual message; that commit is its own (`base` sha re-recorded, no tamper alert). A hook
      exiting non-zero (or a failed commit) → `git merge --abort`, a `merge-hook-failed` event with the output tail, and
      `todo` with that output as feedback, spending no attempt. Otherwise run `postMerge`. Status `merged`. `merge: "manual"` → status `ready`.
+   - **Resolving a conflict** (`conflictBrief: true` or `resolver` set; both off = as above). The refresh merges with
+     `merge.conflictStyle=diff3`, records `conflict: {ours: <branch tip before the merge>, theirs: <base sha>, files}` on the
+     feature, and builds the **both-sides brief**: this feature (description, acceptance), every commit on base's first-parent
+     line since `git merge-base ours theirs` that touches a conflicting file (the foreman's `<NAME>: merge <id>: <title>` merges,
+     also the pre-rename `shipyard:` prefix, with that feature's description and acceptance from `features.json`; other commits
+     by subject), and each conflicting file's conflict blocks with 3 lines of context (4000 chars a file, 16000 in all). The
+     conflict feedback gains "keep every line either side added; list any line you must drop or change in a commit message as
+     `dropped: <file>: <line>`" plus the brief.
+     Without a resolver the feature goes back to `todo` as above and the builder resolves. With `resolver` set and a pipeline
+     waiting (a refresh before the test, or a merge bounce), the feature stays in flight (same slot, same claims; status
+     `building` while it resolves): a
+     **resolver** run (`claude -p` with the `resolver` role config, prompt "You are the merge resolver…": the brief, keep
+     both behaviours, keep every line or declare it, change nothing else, run quick checks, `git add` + `git commit`, never
+     abort or start another merge) finishes the merge in the worktree. It fails when the run fails, the merge is left
+     uncommitted, the worktree is dirty, or the tip does not contain both `ours` and `theirs`; then the feature goes back to
+     `todo` with the conflict feedback plus "A resolver run tried first: <why>" (`resolve-failed`), and the builder finishes.
+     The **keep-lines check** runs on every committed resolution (the resolver's at once, the builder's after its build, before
+     the refresh-before-test and the test). Per conflicting file, over trimmed non-blank non-comment lines (comments: `//`,
+     `/*`, `*`, `#`, `<!--`, `-- `): the tip must hold at least base + (ours − base) + (theirs − base) copies of each line
+     either side added (a line with a letter or digit added by both sides: base + max of the two); a short line is
+     *changed*, not lost, when the tip has a new line of the same shape (digits as #, no trailing `,`/`;`) or ≥ 85% alike
+     (character-bigram Dice), each new line excusing one; lines listed as `dropped: <file>: <line>` in a first-parent
+     commit message since `ours` are excused. Lost lines → the resolver's resolution: `todo` with the lost lines as feedback
+     (`resolve-failed`, no attempt spent, `conflict` kept so the builder's fix is checked); the builder's: a failed attempt
+     with that feedback (`keep-check` event). A tip that no longer contains the merge clears `conflict`; with both keys
+     off a pending `conflict` is ignored. A good resolution
+     clears `conflict` (`resolved` / `keep-check ok`), and the pass goes on: refresh-before-test check again, **test**, a
+     fresh **evaluator** told that this pass resolved a conflict and which features on base (with their acceptance checks)
+     and which changed lines to verify too, then the merge. A resolution therefore never reaches base without the test and
+     the evaluator; repeated bounces are bounded by `maxRefreshes`. Resolver run files are `<tag>-resolve.json` with a new
+     pass tag.
    - **Fail** → attempts++, `lastFeedback` = failed findings + cheating; back to `todo`; at
      `maxAttempts` → `stuck`.
    - **Compound.** A non-null `lesson` is appended to `lessonsFile` as one dated bullet under a
@@ -267,9 +313,11 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    builder's model, effort or briefs change, from `prompt` events): per `launch`, whether the build reached the test
    (setup failures from `prepare`/worktree are counted apart, not against the builder; a conflicting refresh before the
    test is a builder outcome), passed the gate, passed the evaluator, merged or bounced; median build, gate and
-   evaluation minutes; build and evaluation cost from the run files by completion time; the evaluator's top rejection
-   reasons. The foreman logs a `prompt` event per run (`<role> model= effort= lessons=<sha8> briefs=<sha8>`), saves the
-   prompt as `runs/<id>/<tag>-(build|eval).prompt.md`, and tags run files `<attempt>` or `<attempt>.<k>` so a later pass
+   evaluation minutes; build and evaluation cost from the run files by completion time (resolver runs count as build); the
+   evaluator's top rejection reasons. A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's
+   version (`resolves`; a merge after it counts in `merged` and `resolvedMerged`; its gate and evaluation are not counted
+   again). The foreman logs a `prompt` event per run (`<role> model= effort= lessons=<sha8> briefs=<sha8>`), saves the
+   prompt as `runs/<id>/<tag>-(build|eval|resolve).prompt.md`, and tags run files `<attempt>` or `<attempt>.<k>` so a later pass
    of the same attempt never overwrites them.
 8. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
    person (alerts, stuck features with their cause, open proposals), the last 24h (failures by cause, tests failing
@@ -314,3 +362,9 @@ command/file path.
 3. `fact-os dash` serves the page and `/api/state` against that temp repo (tested via fetch).
 4. README.md: install, commands, file formats, and the safety limits above. Under 150 lines.
 5. No runtime dependencies; total source (excluding tests) aims for under ~1200 lines.
+6. The merge process (`docs/merge-process.md`): unit tests for hot-file scoring, claims, the keep-lines check (both entries
+   kept, a union merge's shared closer caught, renumbered keys and moved `;` as changes, declared drops) and the brief on a
+   real git conflict; end-to-end with the fake (`resolve:<flag>` scripts the resolver): a bounce resolved in the same pass
+   with both sides' context then tested and evaluated again; a pre-test conflict resolved inline; a dropped line sent back
+   and never merged; a declared drop merged; a resolver failure handed to the builder; `conflictBrief` alone; claims keeping
+   two features on one hot file apart (declared and from history + branch diff). Everything is off by default.

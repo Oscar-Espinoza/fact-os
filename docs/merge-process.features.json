@@ -1,0 +1,108 @@
+{
+  "_note": "Ready-to-queue fact-os features for ecommerce-builder (piece 3 of docs/merge-process.md). Append the entries of `features` to .shipyard/features.json by hand. F99-16 is queued paused on purpose: resume it only if F99-12 leaves too many conflicts. Counts: conflicting refreshes in .shipyard/log.jsonl 2026-09-28..10-01 (in brackets: since 2026-09-30, after F99-10); 'replayed' = conflicts re-created from the 'merge main into task/...' commits with git merge-file.",
+  "features": [
+    {
+      "id": "F99-12-sorted-contract-registries",
+      "title": "Keep the contract registries in sorted order so parallel features add entries in different places",
+      "description": "Evidence: every feature that adds an API operation appends its entries at the end of the same lists, so any two such features in flight conflict. Conflicting refreshes in the factory log (2026-09-28..10-01, in brackets since 2026-09-30): packages/contracts/fixtures/manifest.json 130 (63), src/generated/fixture-types.ts 130 (63), src/generated/runtime-schemas.json 115 (58), openapi/merchant-api.v1.yaml 114 (55), src/generated/server-operations.json 97 (51), src/generated/merchant-api.v1.ts 35 (18). None of these lists is sorted today: the 237 paths and 425 components.schemas of merchant-api.v1.yaml, the 2564 entries of fixtures/manifest.json, the 714 entries of runtime-schemas.json and the 400 of server-operations.json are in insertion order. Replaying the real conflicts from git history: if the keys were sorted, the two sides' new keys would not be neighbours (so git would merge them cleanly) in 122 of 144 merchant-api.v1.yaml conflicts and 98 of 127 manifest.json conflicts. The generated files follow their sources' order, so they spread out too.\n\nWhat to change:\n(1) In every OpenAPI document under packages/contracts/openapi/ (JSON syntax), order `paths` by path and `components.schemas` by name (plain code-unit order, the same comparison everywhere). Within a path item keep the method keys as they are.\n(2) Order packages/contracts/fixtures/manifest.json by `path`.\n(3) Make scripts/generate.ts emit runtime-schemas.json ordered by `$id`, server-operations.json ordered by (document, path, method), and fixture-types.ts entries ordered by path, then regenerate. Keep every generated value identical apart from order.\n(4) Add a test (packages/contracts/src/contracts.test.ts or a new src/order.test.ts) that fails when any of these lists is out of order, naming the first misplaced key and the key it should follow.\n(5) Add to packages/contracts/AGENTS.md: \"Insert new paths, schemas and manifest entries in sorted position; never append. Run generate after.\"\n\nWhat must not change: the set of paths, operations, schemas and fixtures, and the content of each; the public exports of @ecommerce/contracts; any runtime behaviour. Do not weaken or delete tests. This is infrastructure only.",
+      "acceptance": [
+        "A script run by the evaluator compares the tree before and after (git show of the merge base vs the branch): for each OpenAPI document, the paths, each path item, and components.schemas are equal as JSON maps; manifest.json holds the same entries as a set; runtime-schemas.json holds the same schemas keyed by $id; server-operations.json holds the same operations keyed by (document, path, method). Only order differs.",
+        "In every packages/contracts/openapi/*.yaml, the keys of `paths` and of `components.schemas` are in sorted order; manifest.json is sorted by path; runtime-schemas.json by $id; server-operations.json by (document, path, method); fixture-types.ts entries by path.",
+        "A test fails with a message naming the misplaced key when an entry is moved out of order in any of those lists (the evaluator moves one manifest entry and one OpenAPI path in a scratch copy and sees the test fail, then pass after restoring).",
+        "`pnpm --filter @ecommerce/contracts generate --check` reports no difference on the branch.",
+        "A scripted check passes in a scratch clone (not the shared main checkout): two branches from the same commit each add one new operation in a different module (path, request/response schemas, fixtures and manifest entries in sorted position, then generate). Merging both into the base produces no conflicts in openapi/, fixtures/manifest.json or src/generated/, and generate --check is clean on the result.",
+        "packages/contracts/AGENTS.md states the sorted-insertion rule.",
+        "The contracts package check (biome, tsc, contracts tests run as individual files, not bare `pnpm test`) and the standard pre-merge gate on current main pass."
+      ],
+      "surface": "api",
+      "deps": [],
+      "priority": 0,
+      "group": "INFRA-contracts",
+      "status": "todo",
+      "attempts": 0,
+      "updatedAt": "2026-10-01T00:00:00.000Z"
+    },
+    {
+      "id": "F99-13-contract-changes-per-file",
+      "title": "Move the per-feature change notes out of CONTRACTS.md into one file per change",
+      "description": "Evidence: every feature that changes a contract appends a `## Additive v1 change: <title>` section at the end of packages/contracts/CONTRACTS.md, so any two such features in flight conflict on the same lines. Conflicting refreshes: 78 (17 since 2026-09-30); replayed from git history: 77. Sorting would not help (19 of 72 replayed conflicts would still touch neighbouring sections); one file per change removes the shared lines entirely.\n\nWhat to change:\n(1) Create packages/contracts/changes/. Move each `## Additive v1 change: …` section (heading and body, verbatim) from CONTRACTS.md into its own file packages/contracts/changes/<feature id or short slug>.md, one section per file. Name files so their sorted order is the order the sections had (e.g. a numeric prefix for existing ones is fine).\n(2) Keep in CONTRACTS.md only the stable content (everything that is not a per-change section), plus one short paragraph saying where change notes live and that each change adds its own file.\n(3) Update packages/contracts/AGENTS.md and the root AGENTS.md wherever they tell builders to append to CONTRACTS.md: \"add packages/contracts/changes/<feature-id>.md; never edit another change's file\".\n(4) If any test, script or doc tooling reads those sections from CONTRACTS.md, make it read packages/contracts/changes/*.md instead.\n\nWhat must not change: the text of any change note (moved, not rewritten), contracts, generated files or behaviour.",
+      "acceptance": [
+        "packages/contracts/CONTRACTS.md contains no heading that starts with `## Additive v1 change`.",
+        "A script run by the evaluator shows that every `## Additive v1 change` section of CONTRACTS.md at the merge base appears verbatim (heading and body, whitespace-trimmed) in exactly one file under packages/contracts/changes/, and that the rest of CONTRACTS.md is unchanged apart from the added pointer paragraph.",
+        "packages/contracts/AGENTS.md and root AGENTS.md tell builders to add their own file under packages/contracts/changes/ and not to append to CONTRACTS.md.",
+        "A scripted check in a scratch clone: two branches from the same commit each add a change note the documented way; merging both into the base produces no conflict.",
+        "The standard pre-merge gate on current main passes; no test or check is weakened or deleted."
+      ],
+      "surface": "api",
+      "deps": [],
+      "priority": 0,
+      "group": "INFRA-contracts",
+      "status": "todo",
+      "attempts": 0,
+      "updatedAt": "2026-10-01T00:00:00.000Z"
+    },
+    {
+      "id": "F99-14-regenerate-generated-files",
+      "title": "Regenerate generated files on a merge conflict instead of hand-merging them",
+      "description": "Evidence: generated files conflict whenever their sources change in parallel, even when the sources themselves merge cleanly, and builders hand-merge tens of thousands of generated lines. Conflicting refreshes on generated files: packages/contracts/src/generated/fixture-types.ts 130 (63 since 2026-09-30), runtime-schemas.json 115 (58), server-operations.json 97 (51), merchant-api.v1.ts 35 (18), packages/db/src/generated/db.d.ts 26 (9). Replaying the builders' committed resolutions found one that dropped ten of the feature's own manifest.json and fixture-types.ts entries (merge a2b72d482c5e, F15-07 allocateOrderSplit); a later pass needed a commit of its own to restore them (1a0e87266). Their content is fully determined by their sources (packages/contracts/scripts/generate.ts has a --check mode; packages/db/scripts/generate.ts runs kysely-codegen against the worktree's migrated test schema).\n\nWhat to change:\n(1) Add a root script `pnpm regen` that regenerates every committed generated file: the contracts generator, and the db types when this worktree has a migrated test schema (otherwise it says so and skips them without failing). `pnpm regen --check` reports stale files and exits non-zero.\n(2) Add a root .gitattributes entry `merge=binary` (git's built-in driver: no conflict markers, the file is kept as this branch's version and marked conflicted) for packages/contracts/src/generated/** and packages/db/src/generated/**, so a conflict there never produces a hand-mergeable file with markers.\n(3) Add to root AGENTS.md and packages/contracts/AGENTS.md: \"On a merge conflict in a generated file, resolve its sources first, then run `pnpm regen` and `git add` the generated files. Never hand-merge or hand-edit them.\"\n(4) Make the standard pre-merge gate run the contracts generate --check (if it does not already), so a stale generated file fails the gate.\n\nWhat must not change: generator output for the same sources (byte-identical), any runtime behaviour, any test.",
+      "acceptance": [
+        "`pnpm regen` on the branch leaves the worktree clean (git status shows no change), and `pnpm regen --check` exits 0; after the evaluator edits one OpenAPI source in a scratch copy, `pnpm regen --check` exits non-zero naming the stale file and `pnpm regen` updates it.",
+        "In a worktree without a migrated test schema, `pnpm regen` still regenerates the contracts outputs and prints that the db types were skipped, exiting 0.",
+        "`git check-attr merge -- packages/contracts/src/generated/runtime-schemas.json packages/db/src/generated/db.d.ts` prints `merge: binary` for both, and for no file outside those two generated directories.",
+        "A scripted check in a scratch clone: two branches from the same commit each add a different operation (sources plus regenerated output); merging the second into the base conflicts only in generated files (no conflict markers inside them), and after `pnpm regen` and `git add` the merge commits with generate --check clean.",
+        "The standard pre-merge gate runs the contracts generate --check and fails on a stale generated file.",
+        "Root AGENTS.md and packages/contracts/AGENTS.md describe the regenerate-on-conflict rule.",
+        "The standard pre-merge gate on current main passes; no test or check is weakened or deleted."
+      ],
+      "surface": "api",
+      "deps": [],
+      "priority": 0,
+      "group": "INFRA-contracts",
+      "status": "todo",
+      "attempts": 0,
+      "updatedAt": "2026-10-01T00:00:00.000Z"
+    },
+    {
+      "id": "F99-15-split-audit-route-inventory",
+      "title": "Split the audit route inventory and its reviewed pin per module so parallel features never edit the same lines",
+      "description": "Evidence: every feature that adds a mutating /api route appends its declaration to PRIVILEGED_ROUTES in apps/api/src/plugins/audit/inventory.ts and its expected operation to the reviewed pin in the test 'covers every privileged mutation of the real composition exactly' (apps/api/src/plugins/audit/plugin.db.test.ts, about 240 entries in one object literal). Conflicting refreshes: plugin.db.test.ts 80 (24 since 2026-09-30), inventory.ts 33 (11). Replayed: sorting the keys would only separate about half (45 of 66 and 18 of 37), because route keys share long prefixes; one file per module separates them fully. The pin is deliberate (a second, reviewed copy that catches a route silently changing its audit operation), so it must stay a pin, not be derived from the inventory.\n\nWhat to change (same pattern as F99-01's grants modules):\n(1) Move PRIVILEGED_ROUTES entries into modules under apps/api/src/plugins/audit/inventory/, one per route module or feature area (e.g. staff.ts, catalog.ts, orders-returns.ts), each default-exporting a frozen Record<string, Declaration>. Keep the explanatory comments next to their entries.\n(2) Add a barrel apps/api/src/plugins/audit/inventory/index.ts with exactly one complete statement per module and no multi-line constructs. inventory.ts builds the frozen PRIVILEGED_ROUTES from the barrel and throws at load time on a duplicate route key. EXCLUDED_ROUTES may follow the same pattern.\n(3) Split the pinned expectation the same way: one pinned map per inventory module (e.g. inventory/<module>.pin.ts, or one expectation per module inside the test), and keep the test asserting that the union of all pins equals the composed inventory exactly (no missing, no extra, no stale entry).\n(4) Add a test that every module file in the directory appears in the barrel exactly once and the barrel names no missing file.\n(5) Update root AGENTS.md and apps/api AGENTS.md (if present): \"a new privileged route adds its entry to its module's inventory file and pin; never edit another module's entries\".\n\nWhat must not change: the declaration of any route (kind, operation(s), hook, store, silentOutcome), the startup failure for undeclared, stale or invalid entries, the exclusions, and every existing assertion of plugin.db.test.ts.",
+      "acceptance": [
+        "A script run by the evaluator shows that PRIVILEGED_ROUTES and EXCLUDED_ROUTES built on the branch equal those at the merge base exactly (same keys, deeply equal declarations).",
+        "apps/api/src/plugins/audit/inventory.ts contains no per-route entry; each route's declaration lives in one module file under apps/api/src/plugins/audit/inventory/.",
+        "The reviewed pin still exists as hand-written expected values (not computed from PRIVILEGED_ROUTES), split per module, and the test fails when the evaluator changes one route's operation in an inventory module without changing its pin, and when a pin names a route that is not in the inventory.",
+        "A duplicate route key across two modules, and a module missing from the barrel, each fail a test with a clear message.",
+        "A scripted check in a scratch clone: two branches from the same commit each add a privileged route in a different module the documented way (inventory entry, pin, barrel line if a new module); merging both into the base produces no conflicts and the audit tests pass on the result.",
+        "Root AGENTS.md (and apps/api AGENTS.md if present) describe the per-module rule.",
+        "apps/api check and the audit db tests (run as individual files, not bare `pnpm test`) and the standard pre-merge gate on current main pass; no test is weakened or deleted."
+      ],
+      "surface": "api",
+      "deps": [],
+      "priority": 0,
+      "group": "INFRA-audit",
+      "status": "todo",
+      "attempts": 0,
+      "updatedAt": "2026-10-01T00:00:00.000Z"
+    },
+    {
+      "id": "F99-16-split-merchant-openapi-per-module",
+      "title": "Split the merchant OpenAPI document into per-module fragments (only if sorting leaves too many conflicts)",
+      "description": "Queued paused: resume it only if, two days after F99-12 merges, packages/contracts/openapi/merchant-api.v1.yaml still causes 5 or more conflicting refreshes a day (fact-os observe reports this). Evidence: merchant-api.v1.yaml is one 67,798-line document; 114 conflicting refreshes (55 since 2026-09-30); replay says sorting (F99-12) leaves about 15% of them (22 of 144), where two features add neighbouring paths or schemas.\n\nWhat to change: let packages/contracts/scripts/schema-sources.ts assemble merchant-api.v1 from a root document (openapi, info, security, shared components) plus fragment files packages/contracts/openapi/merchant-api.v1/<module>.json, each holding that module's `paths` and `components.schemas`, merged in sorted file order with a load-time error on any duplicate path or schema name. The generator, runtime extraction and every reader that parses the OpenAPI files directly (for example apps/api/test/abuse/validation.test.ts) use the assembled document. Move each existing path and schema into its module's fragment. Update packages/contracts/AGENTS.md: a feature adds or edits its module's fragment only.\n\nWhat must not change: the assembled document (equal as JSON to the current one), every generated file (byte-identical after generate), public exports, behaviour.",
+      "acceptance": [
+        "The assembled merchant-api.v1 document equals the merge base's merchant-api.v1.yaml as JSON (a script run by the evaluator compares them).",
+        "`pnpm --filter @ecommerce/contracts generate --check` reports no difference, and the generated files are byte-identical to the merge base's.",
+        "A duplicate path or schema name across two fragments fails generation and a test with a message naming both files.",
+        "No test or script outside schema-sources.ts parses packages/contracts/openapi/merchant-api.v1* directly; they use the assembled document.",
+        "A scripted check in a scratch clone: two branches from the same commit each add an operation in a different module's fragment; merging both produces no conflict in openapi/.",
+        "The standard pre-merge gate on current main passes; no test is weakened or deleted."
+      ],
+      "surface": "api",
+      "deps": ["F99-12-sorted-contract-registries"],
+      "priority": 0,
+      "group": "INFRA-contracts",
+      "status": "paused",
+      "pausedAt": "2026-10-01T00:00:00.000Z",
+      "attempts": 0,
+      "updatedAt": "2026-10-01T00:00:00.000Z"
+    }
+  ]
+}
