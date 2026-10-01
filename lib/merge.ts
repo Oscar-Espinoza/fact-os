@@ -216,9 +216,26 @@ export function keepCheck(cwd: string, ours: string, theirs: string, tip: string
   const mb = git(['merge-base', ours, theirs], cwd).out;
   const declared = declaredDrops(git(['log', '--first-parent', '--format=%B', tip, `^${ours}`], cwd).out);
   const missing: (Missing & { file: string })[] = [], changed: (Changed & { file: string })[] = [];
+  // Lines the resolution wrote into other files (neither side had them there): a lost line found among them was moved,
+  // e.g. when base split a shared registry into one file per entry and the resolution moved this branch's entry over.
+  const moved = new Map<string, { n: number; file: string }>();
+  const touched = new Set([ours, theirs].flatMap((r) => git(['diff', '--name-only', r, tip], cwd).out.split('\n').filter(Boolean)));
+  for (const f of touched) {
+    if (files.includes(f)) continue;
+    const before = new Set([show(cwd, ours, f), show(cwd, theirs, f)].flatMap((t) => t.split('\n')).map((l) => l.trim()));
+    for (const l of show(cwd, tip, f).split('\n')) {
+      const t = l.trim();
+      if (t && !before.has(t)) { const m = moved.get(t); if (m) m.n++; else moved.set(t, { n: 1, file: f }); }
+    }
+  }
   for (const file of files) {
     const c = checkLines(mb ? show(cwd, mb, file) : '', show(cwd, ours, file), show(cwd, theirs, file), show(cwd, tip, file));
-    for (const m of c.lost) if (!declared.has(`${file}\n${m.line}`)) missing.push({ file, ...m });
+    for (const m of c.lost) {
+      if (declared.has(`${file}\n${m.line}`)) continue;
+      const mv = moved.get(m.line.trim());
+      if (mv && mv.n >= m.missing) { mv.n -= m.missing; changed.push({ file, line: m.line, now: `(moved to ${mv.file})` } as Changed & { file: string }); continue; }
+      missing.push({ file, ...m });
+    }
     for (const x of c.changed) changed.push({ file, ...x });
   }
   return { ok: !missing.length, missing, changed };

@@ -156,6 +156,18 @@ test('keepCheck: a resolution that drops the other side fails until the drop is 
   assert.equal(keepCheck(dir, ours, tip(), tip(), ['reg.ts']).ok, true);
 });
 
+test('keepCheck: an entry the resolution moved into another file counts as kept (base split the registry), and is reported as moved', (t) => {
+  const { dir, git, commit } = repo(t);
+  git('checkout', '-q', 'ship/a');
+  const ours = git('rev-parse', 'HEAD'), theirs = git('rev-parse', 'main');
+  spawnSync('git', ['merge', '--no-edit', theirs], { cwd: dir });
+  // The resolution keeps main's reg.ts and moves this branch's m2 entry into its own file.
+  commit({ 'reg.ts': THEIRS, 'grants-m2.ts': 'export const m2 = (s) => [\n  `grant two ${s}`,\n],\n' }, 'merge main; m2 moves to its own file');
+  const k = keepCheck(dir, ours, theirs, git('rev-parse', 'HEAD'), ['reg.ts']);
+  assert.deepEqual(k.missing.map((m) => m.line), ['m2: (s) => ['], 'only the line that really changed is missing');
+  assert.ok(k.changed.some((c) => c.line.includes('grant two') && c.now === '(moved to grants-m2.ts)'));
+});
+
 test('runTag counts resolver run files, so a resolution pass never overwrites an earlier pass', () => {
   assert.equal(runTag(['1-build.json', '1-eval.json', '1.2-resolve.json'], 1), '1.3');
   assert.equal(runTag(['1-build.json', '1-eval.json'], 1), '1.2');
