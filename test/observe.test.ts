@@ -312,3 +312,18 @@ test('agentStats follows each pass through build, gate and evaluator, keeps setu
   assert.deepEqual(two!.rejections, [['check 1: missing route', 1]]);
   assert.equal(two!.costEval, 1);
 });
+
+test('agentStats: a resolver run continues the pass that hit the conflict; its merge counts once, its gate and evaluation are not counted again', () => {
+  const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
+  const e = (min: number, feature: string, event: string, detail = '') => ({ ts: at(min), feature, event, detail });
+  const events = [
+    e(0, 'f', 'launch'), e(5, 'f', 'testing', 'sha'), e(35, 'f', 'evaluating'), e(40, 'f', 'refreshed', 'conflicts in: reg.ts'),
+    e(41, 'f', 'resolving', 'reg.ts'), e(45, 'f', 'resolved', 'sha2'), e(46, 'f', 'testing', 'sha2'), e(76, 'f', 'evaluating'), e(80, 'f', 'merged', 'ship/f'),
+    e(0, 'g', 'launch'), e(6, 'g', 'refreshed', 'conflicts in: reg.ts'), e(7, 'g', 'resolving', 'reg.ts'), e(9, 'g', 'resolve-failed', 'keep-check: 1 lines lost'),
+    e(10, 'g', 'testing', 'stray event after the pass ended'),
+  ];
+  const [era] = agentStats(events, [], T0 - 60e3);
+  assert.deepEqual([era!.launches, era!.built, era!.gated, era!.evaluated, era!.passed, era!.bounced], [2, 1, 1, 1, 1, 1]);
+  assert.deepEqual([era!.resolves, era!.merged, era!.resolvedMerged], [2, 1, 1]);
+  assert.deepEqual(era!.builderFailures, [['merge conflict before the test', 1]]);
+});

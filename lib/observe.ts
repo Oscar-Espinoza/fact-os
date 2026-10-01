@@ -143,7 +143,7 @@ export function parseImprover(text: string): ImproverAnswer {
 
 export interface RunCost { ts: string; role: 'build' | 'eval'; cost: number; ms: number }
 export interface Era { since: string; change: string; launches: number; setup: number; built: number; gated: number; evaluated: number; passed: number;
-  bounced: number; merged: number; buildMin: number | null; gateMin: number | null; evalMin: number | null; costBuild: number; costEval: number;
+  bounced: number; merged: number; resolves: number; resolvedMerged: number; buildMin: number | null; gateMin: number | null; evalMin: number | null; costBuild: number; costEval: number;
   rejections: [string, number][]; builderFailures: [string, number][] }
 
 const median = (xs: number[]): number | null => { if (!xs.length) return null; const a = [...xs].sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m]! : (a[m - 1]! + a[m]!) / 2; };
@@ -152,6 +152,8 @@ const top = (xs: string[], n = 5): [string, number][] => [...xs.reduce((m, x) =>
 // How the agents did, per prompt version. A version starts at a lessons curation or when the builder's model, effort or
 // briefs change (from `prompt` events). Each `launch` is one pass: did the build reach the test, the test pass, the
 // evaluator pass, and did it merge or bounce on a merge conflict. Costs come from the run files, by completion time.
+// A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's version: counted in `resolves`,
+// and a merge after it in `merged` and `resolvedMerged`; its gate and evaluation are not counted again.
 export function agentStats(events: LogEvent[], runs: RunCost[], since: number): Era[] {
   const t = (e: { ts: string }) => Date.parse(e.ts);
   const changes: { ts: string; change: string }[] = [];
@@ -166,15 +168,21 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
   const starts = [{ ts: new Date(since).toISOString(), change: 'start of the window' }, ...changes.filter((c) => t(c) >= since)];
   const eraOf = (ms: number) => { let i = 0; while (i + 1 < starts.length && t(starts[i + 1]!) <= ms) i++; return i; };
   const eras: (Era & { b: number[]; g: number[]; v: number[]; rej: string[]; bf: string[] })[] = starts.map((s) => ({ since: s.ts, change: s.change, launches: 0, setup: 0, built: 0, gated: 0,
-    evaluated: 0, passed: 0, bounced: 0, merged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
-  const open = new Map<string, { era: number; stage: 'build' | 'test' | 'eval'; at: number }>();
+    evaluated: 0, passed: 0, bounced: 0, merged: 0, resolves: 0, resolvedMerged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
+  const open = new Map<string, { era: number; stage: 'build' | 'test' | 'eval' | 'resolve'; at: number }>(), lastEra = new Map<string, number>();
   const min = (a: number, b: number) => (b - a) / 60e3;
   for (const e of events) {
     if (!e.feature) continue;
     const ms = t(e), cur = open.get(e.feature);
-    if (e.event === 'launch') { if (ms >= since) { const era = eraOf(ms); eras[era]!.launches++; open.set(e.feature, { era, stage: 'build', at: ms }); } else open.delete(e.feature); continue; }
+    if (e.event === 'launch') { if (ms >= since) { const era = eraOf(ms); eras[era]!.launches++; open.set(e.feature, { era, stage: 'build', at: ms }); lastEra.set(e.feature, era); } else { open.delete(e.feature); lastEra.delete(e.feature); } continue; }
+    if (e.event === 'resolving' && lastEra.has(e.feature)) { const era = lastEra.get(e.feature)!; eras[era]!.resolves++; open.set(e.feature, { era, stage: 'resolve', at: ms }); continue; }
     if (!cur) continue;
     const E = eras[cur.era]!;
+    if (cur.stage === 'resolve') { // only how it ends counts
+      if (e.event === 'merged') { E.merged++; E.resolvedMerged++; }
+      if (['merged', 'ready', 'failed', 'stuck', 'interrupted', 'resolve-failed', 'refreshed', 'merge-skipped'].includes(e.event)) open.delete(e.feature);
+      continue;
+    }
     if (e.event === 'testing' && cur.stage === 'build') { E.built++; E.b.push(min(cur.at, ms)); Object.assign(cur, { stage: 'test', at: ms }); }
     else if (e.event === 'evaluating' && cur.stage === 'test') { E.gated++; E.g.push(min(cur.at, ms)); Object.assign(cur, { stage: 'eval', at: ms }); }
     else if ((e.event === 'failed' || e.event === 'stuck') && cur.stage === 'build') {
@@ -514,7 +522,7 @@ export function renderReport(root: string, state: ObserverState, features: Featu
       '| Since | Change | Builds (setup failed) | Reached test | Passed gate | Passed evaluator | Bounced | Merged | Build / gate / eval (median min) | Cost build + eval |',
       '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
       ...state.agents.map((e) => { const pc = (a: number, b: number) => (b ? `${Math.round((100 * a) / b)}%` : '–'), m = (x: number | null) => (x == null ? '–' : x.toFixed(0));
-        return `| ${at(e.since)} | ${e.change} | ${e.launches} (${e.setup}) | ${pc(e.built, e.launches - e.setup)} | ${pc(e.gated, e.built)} | ${pc(e.passed, e.evaluated)} | ${pc(e.bounced, e.passed)} | ${e.merged} | ${m(e.buildMin)} / ${m(e.gateMin)} / ${m(e.evalMin)} | $${e.costBuild.toFixed(0)} + $${e.costEval.toFixed(0)} |`; }), '',
+        return `| ${at(e.since)} | ${e.change} | ${e.launches} (${e.setup}) | ${pc(e.built, e.launches - e.setup)} | ${pc(e.gated, e.built)} | ${pc(e.passed, e.evaluated)} | ${pc(e.bounced, e.passed)} | ${e.merged}${e.resolvedMerged ? ` (${e.resolvedMerged} after a resolver)` : ''} | ${m(e.buildMin)} / ${m(e.gateMin)} / ${m(e.evalMin)} | $${e.costBuild.toFixed(0)} + $${e.costEval.toFixed(0)} |`; }), '',
       ...(state.agents.at(-1)!.rejections.length ? ['Why the evaluator rejected (latest version):', '', ...state.agents.at(-1)!.rejections.map(([r, n]) => `- ${n}× ${r}`), ''] : [])] : []),
     '## Recent decisions', '',
     ...state.diagnoses.filter((d) => d.action && d.action !== 'none: the foreman retries it').slice(-15).reverse()

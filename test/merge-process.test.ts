@@ -58,7 +58,7 @@ function registryBranches(s: Setup, ids: string[]) {
 }
 const both = (s: Setup) => readFileSync(join(s.repo, 'registry.txt'), 'utf8');
 
-test('resolver: a merge bounce is resolved in the same pass with both sides\' context, then tested, evaluated again and merged', (t) => {
+test('resolver: a merge bounce is resolved in the same pass with both sides\' context, then tested, evaluated again and merged', { timeout: 30000 }, (t) => {
   const s = setup(t, {
     features: [F('b', { branch: 'ship/b', priority: 0, description: 'Registers b in registry.txt', acceptance: ['registry.txt lists entry b'] }),
       F('a', { branch: 'ship/a', description: 'Registers a in registry.txt', acceptance: ['registry.txt lists entry a'] })],
@@ -91,7 +91,7 @@ test('resolver: a merge bounce is resolved in the same pass with both sides\' co
   assert.doesNotMatch(s.log(), /"alert"/);
 });
 
-test('resolver with refreshBeforeTest: a conflict before the test is resolved inline; the conflicted state is never tested or evaluated', (t) => {
+test('resolver with refreshBeforeTest: a conflict before the test is resolved inline; the conflicted state is never tested or evaluated', { timeout: 30000 }, (t) => {
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, refreshBeforeTest: true, resolver: {} }, scenario: { a: 'base-conflict' } });
   const r = s.cli('run');
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -103,7 +103,7 @@ test('resolver with refreshBeforeTest: a conflict before the test is resolved in
   assert.equal(readFileSync(join(s.repo, 'a.txt'), 'utf8').includes('base version'), true, 'main kept the user\'s line');
 });
 
-test('keep-lines check: a resolver that drops the other side\'s line is sent back, and the lost line never reaches main', (t) => {
+test('keep-lines check: a resolver that drops the other side\'s line is sent back, and the lost line never reaches main', { timeout: 30000 }, (t) => {
   const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
     config: { maxParallel: 1, maxAttempts: 1, resolver: {} }, scenario: { a: 'resolve:drop' } });
   registryBranches(s, ['b', 'a']);
@@ -120,7 +120,7 @@ test('keep-lines check: a resolver that drops the other side\'s line is sent bac
   assert.doesNotMatch(both(s), /entry a/);
 });
 
-test('keep-lines check: a drop declared in the merge commit (`dropped: <file>: <line>`) passes and merges', (t) => {
+test('keep-lines check: a drop declared in the merge commit (`dropped: <file>: <line>`) passes and merges', { timeout: 30000 }, (t) => {
   const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
     config: { maxParallel: 1, maxAttempts: 1, resolver: {} }, scenario: { a: 'resolve:declare' } });
   registryBranches(s, ['b', 'a']);
@@ -130,7 +130,7 @@ test('keep-lines check: a drop declared in the merge commit (`dropped: <file>: <
   assert.match(s.log(), /"feature":"a","event":"resolved"/);
 });
 
-test('a resolver that leaves the merge unfinished hands it to the builder with the same brief; the builder\'s resolution is checked', (t) => {
+test('a resolver that leaves the merge unfinished hands it to the builder with the same brief; the builder\'s resolution is checked', { timeout: 30000 }, (t) => {
   const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0, acceptance: ['registry.txt lists entry b'] }), F('a', { branch: 'ship/a' })],
     config: { maxParallel: 1, maxAttempts: 1, resolver: {} }, scenario: { a: 'resolve:leave,resolve' } });
   registryBranches(s, ['b', 'a']);
@@ -144,7 +144,7 @@ test('a resolver that leaves the merge unfinished hands it to the builder with t
   assert.match(s.calls('eval', 'a').at(-1)!.prompt, /resolved a merge conflict with main in this pass/);
 });
 
-test('conflictBrief without a resolver: the builder gets both sides\' context and its resolution is checked before the test', (t) => {
+test('conflictBrief without a resolver: the builder gets both sides\' context and its resolution is checked before the test', { timeout: 30000 }, (t) => {
   const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0, description: 'Registers b' }), F('a', { branch: 'ship/a' })],
     config: { maxParallel: 1, maxAttempts: 1, conflictBrief: true }, scenario: { a: 'resolve' } });
   registryBranches(s, ['b', 'a']);
@@ -158,8 +158,8 @@ test('conflictBrief without a resolver: the builder gets both sides\' context an
   assert.equal(s.feature('a').status, 'merged');
 });
 
-test('claims: two features that change a hot file never run together; a feature on other files still runs beside them', (t) => {
-  const s = setup(t, { delay: '700',
+test('claims: two features that change a hot file never run together; a feature on other files still runs beside them', { timeout: 30000 }, (t) => {
+  const s = setup(t, { delay: '1000', // long enough that c still overlaps a under load
     features: [F('a', { touches: ['registry.txt'] }), F('b', { touches: ['registry.txt'] }), F('c')],
     config: { maxParallel: 3, claims: { hot: ['registry.txt'] } } });
   const r = s.cli('run');
@@ -173,7 +173,7 @@ test('claims: two features that change a hot file never run together; a feature 
   assert.match(c.prompt, /Hot files: [^\n]*\n- registry\.txt \(a\)\nKeep your edits there small and additive/, 'c is told what a holds');
 });
 
-test('claims from history: a file whose conflicts scored minScore is hot, and a re-run\'s claim comes from its branch diff', (t) => {
+test('claims from history: a file whose conflicts scored minScore is hot, and a re-run\'s claim comes from its branch diff', { timeout: 30000 }, (t) => {
   const s = setup(t, { delay: '700', features: [F('a', { branch: 'ship/a', touches: ['registry.txt'] }), F('b', { branch: 'ship/b' })],
     config: { maxParallel: 2, claims: { minScore: 3 } } });
   registryBranches(s, ['b']); // b already changed registry.txt on an earlier pass

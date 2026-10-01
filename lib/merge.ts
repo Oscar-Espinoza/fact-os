@@ -56,21 +56,59 @@ export function lineCounts(text: string): Map<string, number> {
 }
 
 export interface Missing { line: string; missing: number; side: 'ours' | 'theirs' | 'both' }
-// Lines a resolution lost: for each trimmed non-blank line, the result must hold at least
+export interface Changed { line: string; now: string }
+// Comment-only lines carry no behaviour (rewrapping a doc comment is no loss): //, /*, *, #, <!--, "-- " (SQL).
+const comment = (l: string) => /^(\/\/|\/\*|\*|#|<!--|-- )/.test(l);
+// The shape of a line: numbers as #, no trailing , or ;, single spaces. A renumbered key or a list's moved `;` keeps it.
+const shape = (l: string) => l.replace(/\d+/g, '#').replace(/[,;]+$/, '').replace(/\s+/g, ' ');
+const bigrams = (l: string) => { const m = new Map<string, number>(); for (let i = 0; i < l.length - 1; i++) m.set(l.slice(i, i + 2), (m.get(l.slice(i, i + 2)) ?? 0) + 1); return m; };
+const words = (l: string) => new Set(l.match(/[\p{L}\p{N}_]+/gu) ?? []);
+// `now` keeps every word of `l` (at least 3): one side's edit of a line both sides edited, combined into `now`.
+const within = (l: string, now: string) => { const w = words(l), n = words(now); return w.size >= 3 && [...w].every((x) => n.has(x)); };
+const dice = (a: string, b: string) => { // 0..1 similarity of two lines (Sørensen–Dice over character bigrams)
+  const A = bigrams(a), B = bigrams(b); let n = 0;
+  for (const [k, v] of A) n += Math.min(v, B.get(k) ?? 0);
+  return a.length + b.length > 2 ? (2 * n) / (a.length + b.length - 2) : a === b ? 1 : 0;
+};
+
+// The keep-lines check on one file. For each trimmed, non-blank, non-comment line, the result must hold at least
 //   base + (ours - base) + (theirs - base)   copies (each side's additions and deletions kept), except that a meaningful line
 //   both sides added is expected max(ours, theirs) times (the same import or call added twice is one change).
-// Order and indentation are free; moved lines are fine. Only counts, so it is cheap and never fooled by formatting.
-export function missingLines(base: string, ours: string, theirs: string, result: string): Missing[] {
-  const B = lineCounts(base), O = lineCounts(ours), T = lineCounts(theirs), R = lineCounts(result), out: Missing[] = [];
+// A line short of that is `changed` when the result has a new line (one neither side had) of the same shape, at least 85%
+// alike, or keeping all its words (3+): a key renumbered because both sides took the number, a list's `;` that moved, two
+// edits of one line combined. Each new line excuses at most one line of each side. Otherwise the line is `lost`. Order and
+// indentation are free. Only counts and line pairs, so it is cheap and never fooled by formatting.
+export function checkLines(base: string, ours: string, theirs: string, result: string): { lost: Missing[]; changed: Changed[] } {
+  const B = lineCounts(base), O = lineCounts(ours), T = lineCounts(theirs), R = lineCounts(result), short: Missing[] = [];
+  const fresh: { line: string; ours: boolean; theirs: boolean }[] = []; // new lines, and which side's line each already excused
+  const want = (l: string) => { const b = B.get(l) ?? 0, dO = (O.get(l) ?? 0) - b, dT = (T.get(l) ?? 0) - b;
+    return { b, dO, dT, n: dO > 0 && dT > 0 && meaningful(l) ? b + Math.max(dO, dT) : b + dO + dT, most: b + Math.max(0, dO) + Math.max(0, dT) }; };
   for (const l of new Set([...O.keys(), ...T.keys()])) {
-    const b = B.get(l) ?? 0, dO = (O.get(l) ?? 0) - b, dT = (T.get(l) ?? 0) - b;
-    if (dO <= 0 && dT <= 0) continue; // neither side added it: deletions are the resolver's to keep or not (the gate sees them)
-    const want = dO > 0 && dT > 0 && meaningful(l) ? b + Math.max(dO, dT) : b + dO + dT;
-    const miss = want - (R.get(l) ?? 0);
-    if (miss > 0) out.push({ line: l, missing: miss, side: dO > 0 && dT > 0 ? 'both' : dO > 0 ? 'ours' : 'theirs' });
+    const w = want(l);
+    if ((w.dO <= 0 && w.dT <= 0) || comment(l)) continue; // neither side added it: deletions are the resolver's call (the gate sees them)
+    const miss = w.n - (R.get(l) ?? 0);
+    if (miss > 0) short.push({ line: l, missing: miss, side: w.dO > 0 && w.dT > 0 ? 'both' : w.dO > 0 ? 'ours' : 'theirs' });
   }
-  return out.sort((a, b) => a.line.localeCompare(b.line));
+  for (const [l, n] of R) if (!comment(l)) for (let k = n - want(l).most; k > 0; k--) fresh.push({ line: l, ours: false, theirs: false });
+  const lost: Missing[] = [], changed: Changed[] = [];
+  for (const m of short.sort((a, b) => a.line.localeCompare(b.line))) {
+    let left = m.missing;
+    const sides = (m.side === 'both' ? ['ours', 'theirs'] : [m.side]) as ('ours' | 'theirs')[];
+    while (left > 0) {
+      const free = fresh.map((f) => ({ f, s: sides.find((x) => !f[x]) })).filter((x) => x.s);
+      let pick = free.find((x) => shape(x.f.line) === shape(m.line));
+      if (!pick && meaningful(m.line)) { const best = free.map((x) => dice(x.f.line, m.line)), top = Math.max(-1, ...best); if (top >= 0.85) pick = free[best.indexOf(top)]; }
+      if (!pick) pick = free.find((x) => within(m.line, x.f.line));
+      if (!pick) break;
+      pick.f[pick.s!] = true;
+      changed.push({ line: m.line, now: pick.f.line });
+      left--;
+    }
+    if (left > 0) lost.push({ ...m, missing: left });
+  }
+  return { lost, changed };
 }
+export const missingLines = (base: string, ours: string, theirs: string, result: string): Missing[] => checkLines(base, ours, theirs, result).lost;
 
 // Lines a resolution drops on purpose, declared in a commit message as `dropped: <file>: <line>` (one per line).
 export function declaredDrops(messages: string): Set<string> {
@@ -174,15 +212,22 @@ export function conflictBrief(o: { wt: string; base: string; branch: string; our
 
 // The keep-lines check of a committed resolution: `tip` contains both `ours` and `theirs`; for each conflicted file,
 // lines either side added must still be in tip, unless a commit message on the branch since `ours` declares them dropped.
-export function keepCheck(cwd: string, ours: string, theirs: string, tip: string, files: string[]): { ok: boolean; missing: (Missing & { file: string })[] } {
+export function keepCheck(cwd: string, ours: string, theirs: string, tip: string, files: string[]): { ok: boolean; missing: (Missing & { file: string })[]; changed: (Changed & { file: string })[] } {
   const mb = git(['merge-base', ours, theirs], cwd).out;
   const declared = declaredDrops(git(['log', '--first-parent', '--format=%B', tip, `^${ours}`], cwd).out);
-  const missing: (Missing & { file: string })[] = [];
-  for (const file of files)
-    for (const m of missingLines(mb ? show(cwd, mb, file) : '', show(cwd, ours, file), show(cwd, theirs, file), show(cwd, tip, file)))
-      if (!declared.has(`${file}\n${m.line}`)) missing.push({ file, ...m });
-  return { ok: !missing.length, missing };
+  const missing: (Missing & { file: string })[] = [], changed: (Changed & { file: string })[] = [];
+  for (const file of files) {
+    const c = checkLines(mb ? show(cwd, mb, file) : '', show(cwd, ours, file), show(cwd, theirs, file), show(cwd, tip, file));
+    for (const m of c.lost) if (!declared.has(`${file}\n${m.line}`)) missing.push({ file, ...m });
+    for (const x of c.changed) changed.push({ file, ...x });
+  }
+  return { ok: !missing.length, missing, changed };
 }
+
+// For the evaluator: lines the resolution changed instead of keeping.
+export const changedNote = (changed: (Changed & { file: string })[], max = 15): string => !changed.length ? '' :
+  ['Lines the resolution changed rather than kept as either side wrote them (check each is intended):',
+    ...changed.slice(0, max).map((c) => `- ${c.file}: \`${cap(c.line, 160)}\` → \`${cap(c.now, 160)}\``), ...(changed.length > max ? [`… ${changed.length - max} more`] : [])].join('\n');
 
 export function keepFeedback(base: string, missing: (Missing & { file: string })[], max = 40): string {
   const who = { ours: 'this branch', theirs: base, both: 'both sides' };

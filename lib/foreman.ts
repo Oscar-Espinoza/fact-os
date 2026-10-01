@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
-import { DEFAULT_CLAIMS, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
+import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
 import type { ClaudeResult, Config, Feature, Finding, HumanTask, LogEvent, Paths, Role, Status, Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
@@ -380,6 +380,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     const resolveNow = async (): Promise<string | null> => {
       const cur = load(root).features.find((x) => x.id === id)!, rec = cur.conflict!, pending = pendingBrief.get(id);
       tag = runTag(readdirSync(runDir), attempt);
+      await set(id, { status: 'building' });
       log(root, id, 'resolving', rec.files.join(', '));
       out(`resolve ${id}: ${rec.files.join(', ')}`);
       const rp = resolverPrompt(root, config, f, branch, pending?.text || cur.lastFeedback || '');
@@ -399,9 +400,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
         await set(id, { status: 'todo', lastFeedback: `${cur.lastFeedback || ''}\n\nA resolver run tried first: ${fb}` });
         return null;
       }
-      log(root, id, 'resolved', tip);
+      log(root, id, 'resolved', `${tip}${k!.changed.length ? `; ${k!.changed.length} lines changed` : ''}`);
       await set(id, { conflict: undefined });
-      return pending?.others || rec.files.join(', ');
+      return [pending?.others || `(conflicts were in ${rec.files.join(', ')})`, changedNote(k!.changed)].filter(Boolean).join('\n');
     };
     const wtErr = await serial(() => {
       if (existsSync(wt)) return null;
@@ -484,14 +485,14 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   // feedback when lines one side added are gone; `note` tells the evaluator what else to check after a good resolution.
   async function checkResolution(id: string, branch: string, wt: string): Promise<{ lost?: string; note: string }> {
     const rec = load(root).features.find((x) => x.id === id)?.conflict;
-    if (!rec) return { note: '' };
+    if (!rec || !(config.conflictBrief || config.resolver)) return { note: '' }; // both turned off: a pending record is ignored
     const tip = git(['rev-parse', branch], wt).out, has = (c: string) => git(['merge-base', '--is-ancestor', c, tip], wt).code === 0;
     if (!has(rec.ours) || !has(rec.theirs)) { log(root, id, 'keep-check', `skipped: ${branch} does not contain the conflicted merge`); await set(id, { conflict: undefined }); return { note: '' }; }
     const k = keepCheck(wt, rec.ours, rec.theirs, tip, rec.files);
-    log(root, id, 'keep-check', k.ok ? `ok: ${rec.files.join(', ')}` : `${k.missing.length} lines lost`);
+    log(root, id, 'keep-check', k.ok ? `ok: ${rec.files.join(', ')}${k.changed.length ? `; ${k.changed.length} lines changed` : ''}` : `${k.missing.length} lines lost`);
     if (!k.ok) return { lost: keepFeedback(config.base, k.missing), note: '' };
     await set(id, { conflict: undefined });
-    return { note: pendingBrief.get(id)?.others || `(conflicts were in ${rec.files.join(', ')})` };
+    return { note: [pendingBrief.get(id)?.others || `(conflicts were in ${rec.files.join(', ')})`, changedNote(k.changed)].filter(Boolean).join('\n') };
   }
 
   function compound(id: string, lesson: string): void {

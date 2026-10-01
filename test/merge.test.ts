@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { claimBlock, conflictBrief, conflictFiles, conflictHunks, declaredDrops, featureFiles, hotScores, hotTest, keepCheck, keepFeedback, missingLines, DEFAULT_CLAIMS } from '../lib/merge.ts';
+import { checkLines, claimBlock, conflictBrief, conflictFiles, conflictHunks, declaredDrops, featureFiles, hotScores, hotTest, keepCheck, keepFeedback, missingLines, DEFAULT_CLAIMS } from '../lib/merge.ts';
 import { runTag } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
 import type { LogEvent } from '../lib/types.ts';
@@ -65,6 +65,22 @@ test('missingLines: taking one side loses the other side\'s lines; one side\'s d
   const base = 'a\nb\nc\n', ours = 'a\nc\nimport x\n', theirs = 'a\nb\nc\nimport x\nd\n';
   assert.deepEqual(missingLines(base, ours, theirs, 'a\nc\nimport x\nd\n'), [], 'b deleted by ours, same import added by both');
   assert.deepEqual(missingLines(base, ours, theirs, 'a\nc\nd\n'), [{ line: 'import x', missing: 1, side: 'both' }]);
+});
+
+test('checkLines: a key renumbered because both sides took the number, a moved `;` and a rewrapped comment are changes, not losses', () => {
+  const base = "const g = {\n  '0001_init': x,\n};\ntype E =\n  | 'A';\n";
+  const ours = base.replace('};', "  '0002_a': ya,\n};").replace("| 'A';", "| 'A'\n  | 'B';") + '// ours explains a\n';
+  const theirs = base.replace('};', "  '0002_b': yb,\n};").replace("| 'A';", "| 'A'\n  | 'C';") + '// theirs explains b\n';
+  const res = base.replace('};', "  '0002_b': yb,\n  '0003_a': ya,\n};").replace("| 'A';", "| 'A'\n  | 'C'\n  | 'B';") + '// both explained\n';
+  const c = checkLines(base, ours, theirs, res);
+  assert.deepEqual(c.lost, []);
+  assert.deepEqual(c.changed, [{ line: "'0002_a': ya,", now: "'0003_a': ya," }, { line: "| 'C';", now: "| 'C'" }]);
+  // one line both sides edited, combined into one: both versions are changes
+  const cmd = checkLines('"check": "a"\n', '"check": "a && b"\n', '"check": "a && c"\n', '"check": "a && b && c"\n');
+  assert.deepEqual([cmd.lost, cmd.changed.length], [[], 2]);
+  // renumbering one entry does not excuse dropping the other
+  const dropped = base.replace('};', "  '0003_a': ya,\n};").replace("| 'A';", "| 'A'\n  | 'B';");
+  assert.deepEqual(checkLines(base, ours, theirs, dropped).lost.map((m) => m.line), ["'0002_b': yb,", "| 'C';"]);
 });
 
 test('declaredDrops reads `dropped: <file>: <line>` lines from commit messages', () => {
@@ -132,6 +148,7 @@ test('keepCheck: a resolution that drops the other side fails until the drop is 
   let k = keepCheck(dir, ours, theirs, tip(), ['reg.ts']);
   assert.equal(k.ok, false);
   assert.deepEqual(k.missing.map((m) => [m.file, m.line, m.side]), [['reg.ts', '],', 'both'], ['reg.ts', '`grant three ${s}`,', 'theirs'], ['reg.ts', 'm3: (s) => [', 'theirs']]);
+  assert.deepEqual(k.changed, []);
   assert.match(keepFeedback('main', k.missing), /- reg\.ts: `m3: \(s\) => \[` \(added by main\)/);
   git('commit', '-q', '--allow-empty', '-m', 'm3 moved to another file\n\ndropped: reg.ts: m3: (s) => [\ndropped: reg.ts: `grant three ${s}`,\ndropped: reg.ts: ],');
   assert.equal(keepCheck(dir, ours, theirs, tip(), ['reg.ts']).ok, true, 'declared drops are accepted');
