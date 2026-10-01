@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFile
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, observeOnce, observerPaths, lessonSection, parseCurated, bulletsOf } from '../lib/observe.ts';
+import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observerPaths, lessonSection, parseCurated, bulletsOf } from '../lib/observe.ts';
 import type { Diagnosis, Feature } from '../lib/types.ts';
 
 const VITEST = `test command \`gate.sh\` exited 1:
@@ -288,4 +288,27 @@ test('the improver queues improvement features ahead of the rest and files outsi
     if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('agentStats follows each pass through build, gate and evaluator, keeps setup failures off the builder, and splits by prompt version', () => {
+  const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
+  const e = (min: number, feature: string | null, event: string, detail = '') => ({ ts: at(min), feature, event, detail });
+  const events = [
+    e(0, 'a', 'launch'), e(5, 'a', 'refreshed', 'before test, conflict-free'), e(6, 'a', 'testing', 'sha'), e(36, 'a', 'evaluating'), e(37, 'a', 'lesson', 'x'), e(37, 'a', 'merged', 'b'),
+    e(0, 'b', 'launch'), e(4, 'b', 'failed', 'prepare `p.sh` exited 1:\nno slot'),
+    e(0, 'c', 'launch'), e(8, 'c', 'refreshed', 'conflicts in: x.ts'),
+    e(0, 'd', 'launch'), e(3, 'd', 'testing', 'sha'), e(30, 'd', 'failed', 'test command `g` exited 1:'),
+    e(50, null, 'observer-lessons', 'curated 40 lessons into 6 (500 bytes); $0.70'),
+    e(60, 'a', 'launch'), e(62, 'a', 'testing', 'sha'), e(90, 'a', 'evaluating'), e(91, 'a', 'refreshed', 'conflicts in: reg.ts'),
+    e(60, 'e', 'launch'), e(62, 'e', 'testing', 'sha'), e(90, 'e', 'evaluating'), e(91, 'e', 'failed', 'FAILED check 1: missing route\nFAILED check 2: x'),
+  ];
+  const [one, two] = agentStats(events, [{ ts: at(40), role: 'build', cost: 2, ms: 1 }, { ts: at(95), role: 'eval', cost: 1, ms: 1 }], T0 - 60e3);
+  assert.equal(two!.change, 'lessons curated 40 lessons into 6 (500 bytes)');
+  assert.deepEqual([one!.launches, one!.setup, one!.built, one!.gated, one!.evaluated, one!.passed, one!.merged], [4, 1, 2, 1, 1, 1, 1]);
+  assert.deepEqual(one!.builderFailures, [['merge conflict before the test', 1]], 'the prepare failure is setup, not the builder');
+  assert.equal(one!.buildMin, 4.5);
+  assert.equal(one!.costBuild, 2);
+  assert.deepEqual([two!.launches, two!.passed, two!.bounced, two!.evaluated], [2, 1, 1, 2]);
+  assert.deepEqual(two!.rejections, [['check 1: missing route', 1]]);
+  assert.equal(two!.costEval, 1);
 });

@@ -1,6 +1,7 @@
 // Foreman: plan → build → test → evaluate → merge → compound, over ready features, in parallel worktrees.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
@@ -112,6 +113,23 @@ export function appendLesson(file: string, lesson: string, date = now().slice(0,
   lines.splice(at, 0, ...(at === h + 1 ? ['', bullet] : [bullet]));
   writeFileSync(file, lines.join('\n'));
   return true;
+}
+
+// Run files of one pipeline pass: "<attempt>" for the first pass of an attempt, "<attempt>.<k>" for later passes (a
+// base refresh starts a new pass without spending an attempt), so earlier runs are never overwritten.
+export function runTag(existing: string[], attempt: number): string {
+  const has = (t: string) => existing.includes(`${t}-build.json`);
+  if (!has(String(attempt))) return String(attempt);
+  let k = 2;
+  while (has(`${attempt}.${k}`)) k++;
+  return `${attempt}.${k}`;
+}
+
+// What a prompt was made of, to compare agents across prompt versions: role, model, effort and short hashes of the
+// lessons and briefs it included (the feature's own text is left out).
+export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string): string {
+  const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 8);
+  return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}`;
 }
 
 // ---- prompts ----
@@ -318,6 +336,11 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     };
 
     mkdirSync(runDir, { recursive: true });
+    const tag = runTag(readdirSync(runDir), attempt);
+    const recordPrompt = (role: Role, prompt: string) => {
+      writeFileSync(join(runDir, `${tag}-${role === 'builder' ? 'build' : 'eval'}.prompt.md`), prompt);
+      log(root, id, 'prompt', promptFingerprint(role, config[role] || {}, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config)));
+    };
     const wtErr = await serial(() => {
       if (existsSync(wt)) return null;
       const has = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).code === 0;
@@ -342,7 +365,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       if (pr.code !== 0) return fail(`prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`);
     }
 
-    const b = await claude('builder', builderPrompt(root, config, f, branch, mockTasks), `${attempt}-build.json`);
+    const bp = builderPrompt(root, config, f, branch, mockTasks);
+    recordPrompt('builder', bp);
+    const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
     if (!b.ok) return fail(`builder failed: ${b.error}`);
     // Any commit beyond base counts as the builder's, including the merge commit that completes a base refresh.
@@ -370,7 +395,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     await set(id, { status: 'evaluating' });
     log(root, id, 'evaluating', '');
     const diff = git(['diff', '--text', '--no-ext-diff', '--no-textconv', `${config.base}...${sha}`], wt).out;
-    const e = await claude('evaluator', evaluatorPrompt(root, config, f, branch, diff, test), `${attempt}-eval.json`);
+    const ep = evaluatorPrompt(root, config, f, branch, diff, test);
+    recordPrompt('evaluator', ep);
+    const e = await claude('evaluator', ep, `${tag}-eval.json`);
     if (await stopped()) return;
     const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], lesson: null, error: `evaluator failed: ${e.error}` };
     const lesson = v.lesson;

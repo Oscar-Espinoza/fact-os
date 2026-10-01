@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { paths, load, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson } from './state.ts';
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
-import { observerPaths, recurringTests, hotFiles, type ObserverState } from './observe.ts';
+import { observerPaths, recurringTests, hotFiles, type ObserverState, type Era } from './observe.ts';
 import type { ActivityEvent, Config, Diagnosis, Feature, HumanTask, LogEvent, MergeMode, RoleConfig } from './types.ts';
 
 // Median durations (ms) of each pipeline stage, for the dashboard's estimated progress; null = no history yet.
@@ -27,7 +27,7 @@ export interface ProjectState {
 export interface ObserverSummary {
   updatedAt: string; running: boolean; alerts24h: { ts: string; text: string }[]; stuck: { id: string; cause: string; evidence: string }[];
   decisions: Diagnosis[]; causes24h: { cause: string; n: number }[]; recurring: { test: string; features: string[] }[];
-  improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; proposals: { id: string; title: string }[];
+  improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; agents: Era[]; proposals: { id: string; title: string }[];
 }
 export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
 export interface Run {
@@ -175,7 +175,7 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[]): Observe
       recurring: recurringTests(diags, since, 2).map(([test, features]) => ({ test, features })),
       improvements: (Array.isArray(o.improvements) ? o.improvements : []).slice(-10).reverse().map((id) => { const f = features.find((x) => x.id === id); return { id, title: f?.title ?? '(removed)', status: f?.status ?? 'removed' }; }), sentBack24h: recent.filter((d) => d.action === 'sent back').length,
       ...(() => { const b = (Array.isArray(o.bounces) ? o.bounces : []).filter((x) => Date.parse(x.ts) >= since); return { bounces24h: b.length, hotFiles: hotFiles(b).slice(0, 5).map(([file, n]) => ({ file, n })) }; })(),
-      ...(o.improveAt ? { improveAt: o.improveAt } : {}), ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
+      ...(o.improveAt ? { improveAt: o.improveAt } : {}), agents: Array.isArray(o.agents) ? o.agents : [], ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
       proposals: tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-')).map((t) => ({ id: t.id, title: t.title })) };
   } catch { return null; }
 }
@@ -206,7 +206,7 @@ function featureRuns(dir: string, id: string): Run[] {
   let names: string[] = [];
   try { names = readdirSync(rd); } catch { return []; }
   for (const name of names) {
-    const m = /^(\d+)-(build|eval)\.json$/.exec(name);
+    const m = /^(\d+)(?:\.\d+)?-(build|eval)\.json$/.exec(name);
     if (!m) continue;
     try {
       const file = join(rd, name), j = readJson(file, {}) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; result?: unknown };

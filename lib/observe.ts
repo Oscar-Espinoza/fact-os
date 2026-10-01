@@ -5,7 +5,7 @@
 // features (built, gated, evaluated and merged by the foreman like any other) and human tasks for what lies outside
 // the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). The
 // observer itself never changes code: every code change goes through the factory's own checks.
-import { existsSync, readFileSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, sleep, envVar, featureEnv, NAME } from './state.ts';
@@ -139,6 +139,84 @@ export function parseImprover(text: string): ImproverAnswer {
   };
 }
 
+// ---- agent effectiveness ----
+
+export interface RunCost { ts: string; role: 'build' | 'eval'; cost: number; ms: number }
+export interface Era { since: string; change: string; launches: number; setup: number; built: number; gated: number; evaluated: number; passed: number;
+  bounced: number; merged: number; buildMin: number | null; gateMin: number | null; evalMin: number | null; costBuild: number; costEval: number;
+  rejections: [string, number][]; builderFailures: [string, number][] }
+
+const median = (xs: number[]): number | null => { if (!xs.length) return null; const a = [...xs].sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m]! : (a[m - 1]! + a[m]!) / 2; };
+const top = (xs: string[], n = 5): [string, number][] => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]).slice(0, n);
+
+// How the agents did, per prompt version. A version starts at a lessons curation or when the builder's model, effort or
+// briefs change (from `prompt` events). Each `launch` is one pass: did the build reach the test, the test pass, the
+// evaluator pass, and did it merge or bounce on a merge conflict. Costs come from the run files, by completion time.
+export function agentStats(events: LogEvent[], runs: RunCost[], since: number): Era[] {
+  const t = (e: { ts: string }) => Date.parse(e.ts);
+  const changes: { ts: string; change: string }[] = [];
+  let setup = '';
+  for (const e of events) {
+    if (e.event === 'observer-lessons' && /^curated /.test(e.detail)) changes.push({ ts: e.ts, change: `lessons ${e.detail.split(';')[0]}` });
+    if (e.event === 'prompt' && e.detail.startsWith('builder ')) {
+      const key = e.detail.replace(/ lessons=\S+/, '');
+      if (key !== setup) { if (setup) changes.push({ ts: e.ts, change: key }); setup = key; }
+    }
+  }
+  const starts = [{ ts: new Date(since).toISOString(), change: 'start of the window' }, ...changes.filter((c) => t(c) >= since)];
+  const eraOf = (ms: number) => { let i = 0; while (i + 1 < starts.length && t(starts[i + 1]!) <= ms) i++; return i; };
+  const eras: (Era & { b: number[]; g: number[]; v: number[]; rej: string[]; bf: string[] })[] = starts.map((s) => ({ since: s.ts, change: s.change, launches: 0, setup: 0, built: 0, gated: 0,
+    evaluated: 0, passed: 0, bounced: 0, merged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
+  const open = new Map<string, { era: number; stage: 'build' | 'test' | 'eval'; at: number }>();
+  const min = (a: number, b: number) => (b - a) / 60e3;
+  for (const e of events) {
+    if (!e.feature) continue;
+    const ms = t(e), cur = open.get(e.feature);
+    if (e.event === 'launch') { if (ms >= since) { const era = eraOf(ms); eras[era]!.launches++; open.set(e.feature, { era, stage: 'build', at: ms }); } else open.delete(e.feature); continue; }
+    if (!cur) continue;
+    const E = eras[cur.era]!;
+    if (e.event === 'testing' && cur.stage === 'build') { E.built++; E.b.push(min(cur.at, ms)); Object.assign(cur, { stage: 'test', at: ms }); }
+    else if (e.event === 'evaluating' && cur.stage === 'test') { E.gated++; E.g.push(min(cur.at, ms)); Object.assign(cur, { stage: 'eval', at: ms }); }
+    else if ((e.event === 'failed' || e.event === 'stuck') && cur.stage === 'build') {
+      if (/^(prepare `|worktree:)/.test(e.detail)) E.setup++; // the environment, not the agent
+      else if (/^test command `/.test(e.detail)) E.built++;    // an older log without the testing event: built, failed the gate
+      else E.bf.push(firstLine(e.detail).replace(/[:(].*$/, '').slice(0, 60));
+      open.delete(e.feature);
+    }
+    else if (e.event === 'refreshed' && cur.stage === 'build') { if (/conflicts in: /.test(e.detail)) { E.bf.push('merge conflict before the test'); open.delete(e.feature); } }
+    else if ((e.event === 'failed' || e.event === 'stuck') && cur.stage === 'test') open.delete(e.feature);
+    else if (cur.stage === 'eval' && ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'merge-skipped'].includes(e.event)) {
+      E.evaluated++; E.v.push(min(cur.at, ms));
+      if (e.event === 'failed' || e.event === 'stuck') { const f = e.detail.split('\n').find((l) => /^(FAILED |CHEATING|Evaluator:)/.test(l)); E.rej.push((f ?? firstLine(e.detail)).replace(/^FAILED /, '').slice(0, 80)); }
+      else { E.passed++; if (e.event === 'refreshed') E.bounced++; if (e.event === 'merged') E.merged++; }
+      open.delete(e.feature);
+    } else if (e.event === 'interrupted' || e.event === 'refreshed') open.delete(e.feature);
+  }
+  for (const r of runs) { const ms = t(r); if (ms < since) continue; const E = eras[eraOf(ms)]!; if (r.role === 'build') E.costBuild += r.cost; else E.costEval += r.cost; }
+  return eras.map(({ b, g, v, rej, bf, ...e }) => ({ ...e, buildMin: median(b), gateMin: median(g), evalMin: median(v), rejections: top(rej), builderFailures: top(bf),
+    costBuild: Math.round(e.costBuild * 100) / 100, costEval: Math.round(e.costEval * 100) / 100 }));
+}
+
+// Costs of every run file under runs/, by its completion time.
+export function runCosts(runsDir: string): RunCost[] {
+  const out: RunCost[] = [];
+  let feats: string[] = [];
+  try { feats = readdirSync(runsDir); } catch { return out; }
+  for (const f of feats) {
+    let names: string[] = [];
+    try { names = readdirSync(join(runsDir, f)); } catch { continue; }
+    for (const n of names) {
+      const m = /-(build|eval)\.json$/.exec(n);
+      if (!m) continue;
+      try {
+        const file = join(runsDir, f, n), j = JSON.parse(readFileSync(file, 'utf8')) as { total_cost_usd?: unknown; duration_ms?: unknown };
+        out.push({ ts: new Date(statSync(file).mtimeMs).toISOString(), role: m[1] as 'build' | 'eval', cost: Number(j.total_cost_usd) || 0, ms: Number(j.duration_ms) || 0 });
+      } catch {}
+    }
+  }
+  return out;
+}
+
 // ---- state ----
 
 export interface ObserverState {
@@ -152,6 +230,7 @@ export interface ObserverState {
   lessonsAt?: string;                           // last curation
   improveAt?: string;                           // last improver run
   improvements: string[];                       // feature ids the improver queued
+  agents?: Era[];                               // agent effectiveness per prompt version, last 7 days
 }
 const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], lastEvent: {}, bounces: [], improvements: [] });
 export const observerPaths = (root: string) => { const d = paths(root).dir; return { state: join(d, 'observer.json'), report: join(d, 'observer-report.md'), pid: join(d, '.observer') }; };
@@ -278,6 +357,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   if (cfg.agent) await curateLessons(root, config, cfg, state, out, opts.children ?? new Set());
   if (cfg.agent && cfg.improve) await improvePass(root, config, cfg, state, out, opts.children ?? new Set());
 
+  state.agents = agentStats(readNew(P.log, 0).events, runCosts(P.runs), Date.now() - 7 * DAY);
   state.diagnoses = state.diagnoses.slice(-500);
   state.bounces = state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < 7 * DAY);
   state.alerts = state.alerts.filter((a) => Date.now() - Date.parse(a.ts) < 7 * DAY);
@@ -430,6 +510,12 @@ export function renderReport(root: string, state: ObserverState, features: Featu
     ...(recurring.length ? ['Tests failing in several features:', '', ...recurring.map(([t, fs]) => `- ${t}: ${fs.join(', ')}`), ''] : []),
     ...(state.improvements.length ? ['## Improvements queued by the observer', '', ...state.improvements.slice(-10).reverse().map((id) => { const f = features.find((x) => x.id === id); return `- ${id}: ${f ? `${f.title} (${f.status})` : 'removed'}`; }), ''] : []),
     ...(state.agentNotes ? ['## Agent notes', '', state.agentNotes, ''] : []),
+    ...(state.agents?.length ? ['## Agents (last 7 days, by prompt version)', '',
+      '| Since | Change | Builds (setup failed) | Reached test | Passed gate | Passed evaluator | Bounced | Merged | Build / gate / eval (median min) | Cost build + eval |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+      ...state.agents.map((e) => { const pc = (a: number, b: number) => (b ? `${Math.round((100 * a) / b)}%` : '–'), m = (x: number | null) => (x == null ? '–' : x.toFixed(0));
+        return `| ${at(e.since)} | ${e.change} | ${e.launches} (${e.setup}) | ${pc(e.built, e.launches - e.setup)} | ${pc(e.gated, e.built)} | ${pc(e.passed, e.evaluated)} | ${pc(e.bounced, e.passed)} | ${e.merged} | ${m(e.buildMin)} / ${m(e.gateMin)} / ${m(e.evalMin)} | $${e.costBuild.toFixed(0)} + $${e.costEval.toFixed(0)} |`; }), '',
+      ...(state.agents.at(-1)!.rejections.length ? ['Why the evaluator rejected (latest version):', '', ...state.agents.at(-1)!.rejections.map(([r, n]) => `- ${n}× ${r}`), ''] : [])] : []),
     '## Recent decisions', '',
     ...state.diagnoses.filter((d) => d.action && d.action !== 'none: the foreman retries it').slice(-15).reverse()
       .map((d) => `- ${at(d.ts)} ${d.feature}: ${CAUSE[d.cause]} (${d.evidence}) → ${d.action}`), ''].join('\n');

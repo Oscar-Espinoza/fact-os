@@ -263,7 +263,15 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    `<lessonsFile>.archive.md`, the section is replaced (with a note pointing at the archive), lessons the foreman
    appended meanwhile are kept after it, and a tracked file is committed on base (`fact-os: curate lessons`; skipped
    when the checkout is not on base or the file has uncommitted changes).
-7. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
+7. **Measures the agents** over the last 7 days, per prompt version (a version starts at a lessons curation or when the
+   builder's model, effort or briefs change, from `prompt` events): per `launch`, whether the build reached the test
+   (setup failures from `prepare`/worktree are counted apart, not against the builder; a conflicting refresh before the
+   test is a builder outcome), passed the gate, passed the evaluator, merged or bounced; median build, gate and
+   evaluation minutes; build and evaluation cost from the run files by completion time; the evaluator's top rejection
+   reasons. The foreman logs a `prompt` event per run (`<role> model= effort= lessons=<sha8> briefs=<sha8>`), saves the
+   prompt as `runs/<id>/<tag>-(build|eval).prompt.md`, and tags run files `<attempt>` or `<attempt>.<k>` so a later pass
+   of the same attempt never overwrites them.
+8. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
    person (alerts, stuck features with their cause, open proposals), the last 24h (failures by cause, tests failing
    in several features, retries, fixes) and the last 15 decisions. Times are local.
 

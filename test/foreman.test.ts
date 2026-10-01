@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runTag, promptFingerprint } from '../lib/foreman.ts';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -126,4 +127,18 @@ test('groupOf: explicit group wins; idPrefix:<n> defaults to the first n chars o
   assert.equal(groupOf({ id: 'F05-02-x', group: 'db' }, null), 'db');
   assert.equal(groupOf({ id: 'F05-02-x' }, null), null);
   assert.equal(groupOf({ id: 'F05-02-x' }, 'bogus'), null);
+});
+
+test('runTag never reuses an earlier pass\'s run files', () => {
+  assert.equal(runTag([], 1), '1');
+  assert.equal(runTag(['1-build.json', '1-eval.json'], 1), '1.2');
+  assert.equal(runTag(['1-build.json', '1.2-build.json'], 1), '1.3');
+  assert.equal(runTag(['1-build.json'], 2), '2');
+});
+
+test('promptFingerprint names the role, model and effort, and hashes lessons and briefs', () => {
+  const a = promptFingerprint('builder', { model: 'opus', effort: 'medium' }, 'lessons v1', 'brief');
+  assert.match(a, /^builder model=opus effort=medium lessons=[0-9a-f]{8} briefs=[0-9a-f]{8}$/);
+  assert.notEqual(a, promptFingerprint('builder', { model: 'opus', effort: 'medium' }, 'lessons v2', 'brief'));
+  assert.equal(promptFingerprint('evaluator', {}, null, ''), 'evaluator model=- effort=- lessons=- briefs=-');
 });
