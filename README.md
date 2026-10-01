@@ -33,6 +33,7 @@ imports `lib/cli.ts`, since tsc skips extensionless files.
 | `fact-os pause\|resume\|retry <id>...` | Pause `todo`/`stuck` features (they and their dependents never launch; `run --watch` keeps waiting), resume paused ones (fresh attempts if they had run out), retry stuck ones (attempts reset, last feedback kept). |
 | `fact-os pause-all` / `resume-all` | Stop / restart launching new features for the whole project (`control.json`). Nothing running is interrupted; parked merges still merge; `run --watch` keeps waiting while paused, while a foreman without `--watch` exits once its work in flight drains. Says when no foreman is running (it applies when one starts). |
 | `fact-os lanes <n\|default>` | How many features may be in flight (0–32; `default` = `config.maxParallel`), changed during a run without a restart: more lanes launch at once, fewer let the running ones finish. Prints the resulting state. The dashboard header has the same controls. |
+| `fact-os profile [<name\|default>]` | Model profile for new launches: `opus` (default: each role's own config) or `fable-sonnet` (Sonnet builds and resolves, Fable evaluates and runs the observer's improver and curation; the builder goes from medium to high effort on risky features), plus any in `config.profiles`. A running feature keeps the profile it started with. Without a name, prints the active profile and its role → model/effort table. The dashboard header has a "Mode" switch for it. |
 | `fact-os doctor` | Validates the files (schema, duplicate ids, unknown deps, cycles) and that `claude`, `git` and the test command resolve. Exit 1 on problems. |
 | `fact-os dash [--root DIR] [--port 7420]` | Dashboard on `127.0.0.1` for every `.fact-os/features.json` up to depth 3 under `--root` (worktrees skipped). Views: Factory (intake → build bays with pixel-art workers and estimated progress → test → inspection → dock, stuck list, live feed), Board (features by epic, filters, detail panel with pause/resume/retry), Project (your own `project-view.html`, sandboxed) and Only you. Refreshes every 2s. |
 | `fact-os observe [--watch] [--agent]` | Watches the factory beside the foreman: sorts every stuck feature by cause (a test it does not change, infrastructure, its own code, setup, conflicts), sends back the ones stuck for a reason outside them with a note for the next build, re-parks merges that never started, tracks finished features sent back by merge conflicts, raises alerts, and writes `observer-report.md` (also the dashboard's Observer view). `--agent` also acts on it: a read-only improver turns recurring causes of lost work into improvement features the factory builds and checks like any other, plus human tasks for what lies outside the repo, and the lessons builders read are curated under 12 KB (full history archived). See SPEC.md. |
@@ -62,7 +63,8 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target), `restoreFrom` (null;
   a ref with `{id}`, e.g. `"archive/task/{id}"`: a feature branch with no commits of its own, new or recreated from
   `base`, is moved to that ref when it holds work `base` lacks, so work saved by a cleanup is not lost; logged as
-  `restored`), `mergeHook` (null;
+  `restored`), `profiles` (extra model profiles, `{name: {builder|resolver|evaluator|observer|curator: {model?, effort?,
+  effortHigh?}}}`; see SPEC.md "Model profiles"), `mergeHook` (null;
   a shell command run in the main checkout on the staged `git merge --no-ff --no-commit`, with
   `FACTOS_FEATURE`/`FACTOS_BRANCH`, e.g. to renumber migrations: what it `git add`s joins the merge commit; a
   non-zero exit aborts the merge and sends the feature back to `todo` with the hook's output as feedback, costing no attempt),
@@ -73,18 +75,20 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   acceptance checks, and the diff3 hunks; resolutions must keep every line either side added or declare it as
   `dropped: <file>: <line>` in a commit message) and `resolver` (null; `{model, effort, permissionMode}`: a separate
   resolver run resolves the conflict at once, in the same pass, then the test and a fresh evaluator run again).
-- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?, touches?,
+- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?, touches?, risk?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
-  `todo|building|testing|evaluating|ready|merged|stuck|paused`.
+  `todo|building|testing|evaluating|ready|merged|stuck|paused`. `risk: "high"` gives the builder its profile's
+  `effortHigh`; `"normal"` never; without it, words like payment, refund, auth, tenant, migration or lock in the title or
+  description decide.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
   `runs/<feature>/<tag>-{build,eval,resolve}.json` (raw `claude -p` output), `.lock`, `.foreman` (foreman pid).
-- `control.json` — `{paused, maxParallel: 0–32|null, updatedAt, by}`, written by `pause-all`/`resume-all`/`lanes` and the
+- `control.json` — `{paused, maxParallel: 0–32|null, profile: name|null, updatedAt, by}`, written by `pause-all`/`resume-all`/`lanes`/`profile` and the
   dashboard and re-read by the foreman every tick: the launch limit is 0 while paused, else `maxParallel`, else the config's,
   counted against features in flight including a previous foreman's live children. Not `config.json`, so it never trips the
   tamper halt. An invalid file never lifts a pause: the foreman keeps its last good control (paused if it started with it),
-  `doctor` and the dashboard flag it, and any control command rewrites it.
+  `doctor` and the dashboard flag it, and any control command rewrites it. An unknown `profile` makes the file invalid too.
   `bun scripts/replay-conflicts.ts <repo>` replays a project's real merge conflicts against the merge process, read-only.
 
 **Readiness:** a `todo` feature is ready when every dep is `merged` (or `ready` under manual merge) and
