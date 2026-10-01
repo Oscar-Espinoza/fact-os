@@ -7,6 +7,14 @@
 .fx .mono{font-family:'Geist Mono',monospace;font-size:inherit}
 .fx .panel{background:#111925;border:1px solid #1f2b3b;border-radius:6px}
 
+/* paused banner (control.json) */
+.fx-paused{display:none}
+.fx-paused.on{display:flex;align-items:center;gap:12px;margin:0 0 12px;padding:10px 14px;background:rgba(245,183,59,.1);border:1px solid rgba(245,183,59,.55);border-radius:6px;color:#f7d58f;font-size:14px}
+.fx-paused .ic{width:12px;height:12px;flex-shrink:0;background:linear-gradient(90deg,#f5b73b 0 35%,transparent 35% 65%,#f5b73b 65%)}
+.fx-paused .tx{flex:1;min-width:0}
+.fx-paused b{color:#f5b73b}
+@media (max-width:700px){.fx-paused.on{flex-wrap:wrap}}
+
 /* KPIs */
 .fx-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px;padding:0 0 12px}
 .fx-kpi{display:flex;gap:14px;padding:14px 16px;min-height:104px}

@@ -51,14 +51,38 @@ b{font-weight:600}
 .status small:empty{display:none}
 .status.on .dot{background:var(--green);box-shadow:0 0 8px var(--green)}
 .status.on b{color:var(--green)}
-/* 900–1180px (a 1024 screen): tighten the header so brand, five tabs, picker and status fit on one line. */
-@media (max-width:1180px) and (min-width:901px){.top{gap:16px;padding:0 14px}.tabs a{padding:0 12px}.brand small{display:none}.status{padding-left:12px}}
+/* factory controls (control.json): lanes stepper and pause, next to the foreman status */
+.ctl{grid-area:ctl;display:flex;align-items:center;gap:10px;white-space:nowrap}
+.ctl[hidden]{display:none}
+.lanes{display:flex;align-items:center;gap:6px}
+.ib{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0;background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);font-size:16px;line-height:1;cursor:pointer}
+.ib:hover:not(:disabled){border-color:#34455c;background:#1a2638}
+.ib:disabled{opacity:.4;cursor:default}
+.lanes-t{font-size:13px;color:var(--muted)}
+.lanes-t b{color:var(--fg);font-family:var(--mono);font-weight:500}
+.lanes-t small{font-size:12px;color:var(--dim)}
+.pz{padding:0 12px}
+.pz .ic{display:inline-flex}
+.ctl.paused .pz{background:var(--amber);border-color:var(--amber);color:#1d1400}
+.ctl.paused .pz:hover{background:#ffc75a;border-color:#ffc75a}
+.status.on.paused .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+.status.on.paused b{color:var(--amber)}
+/* Up to 1600px the header tightens in steps so brand, five tabs, picker, status and the controls stay on one line:
+   from 1600 the tagline goes and the picker narrows; from 1400 the wordmark (the logo stays) and "(default n)" (the lanes
+   tooltip has it); at 900–1180 (a 1024 screen) the pause button shows only its icon (aria-label and tooltip carry the words). */
+@media (max-width:1600px) and (min-width:901px){.top{gap:16px;padding:0 14px}.tabs a{padding:0 12px}.brand small{display:none}.status{padding-left:12px}#pick{width:200px}.ctl{gap:8px}}
+@media (max-width:1400px) and (min-width:901px){.brand span{display:none}#pick{width:180px}.lanes-t small{display:none}}
+@media (max-width:1180px) and (min-width:901px){.top{gap:12px}.pz .lbl{display:none}.pz{width:32px;padding:0}}
+@media (max-width:1023px) and (min-width:901px){.status>span:last-child{display:none}} /* just the dot; its tooltip has the text */
 
-@media (max-width:700px){
-  .top{height:auto;display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:"brand status picker" "nav nav nav";gap:6px 12px;padding:8px 12px 0}
+/* Up to 900px the header takes two rows (brand, status, picker; the controls) with the tabs scrolling below. */
+@media (max-width:900px){
+  .top{height:auto;display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:"brand status picker" "ctl ctl ctl" "nav nav nav";gap:6px 12px;padding:8px 12px 0}
   .spacer{display:none}
   .status{padding-left:0;border-left:0;height:auto}
   .status > span:last-child{display:none} /* just the dot on phones; its tooltip has the text */
+  .ctl{justify-content:space-between;padding:4px 0 2px}
+  .ib{width:32px;height:32px}
   .tabs{height:44px;overflow-x:auto;min-width:0;scrollbar-width:none;margin:0 -12px;padding:0 4px}
   .tabs::-webkit-scrollbar{display:none}
   .tabs a{padding:0 14px;flex-shrink:0}
@@ -85,5 +109,6 @@ b{font-weight:600}
 .pv{display:block;width:100%;height:calc(100vh - 60px);min-height:420px;border:0;background:var(--bg)}
 .toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);opacity:0;visibility:hidden;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:8px;font-size:13px;transition:opacity .2s,transform .2s,visibility .2s;z-index:90;max-width:min(560px,calc(100vw - 32px));pointer-events:none}
 .toast.show{opacity:1;visibility:visible;transform:translate(-50%,0)}
-@media (max-width:700px){.pv{height:calc(100vh - 100px)}.blank{margin:12px;padding:32px 16px}}
+@media (max-width:900px){.pv{height:calc(100vh - 144px)}}
+@media (max-width:700px){.blank{margin:12px;padding:32px 16px}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

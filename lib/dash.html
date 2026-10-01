@@ -29,6 +29,14 @@
     <div class="menu" id="menu" role="listbox"></div>
   </div>
   <div class="status" id="foreman"><span class="dot"></span><span><b id="foreman-t">Foreman stopped</b><small id="foreman-s"></small></span></div>
+  <div class="ctl" id="ctl" hidden>
+    <div class="lanes" role="group" aria-label="Lanes: how many features may be in flight">
+      <button class="ib" id="lanes-dn" type="button" aria-label="Fewer lanes" title="Fewer lanes"><span aria-hidden="true">−</span></button>
+      <span class="lanes-t" id="lanes-t"></span>
+      <button class="ib" id="lanes-up" type="button" aria-label="More lanes" title="More lanes"><span aria-hidden="true">+</span></button>
+    </div>
+    <button class="btn pz" id="pz" type="button"><span class="ic" id="pz-ic" aria-hidden="true"></span><span class="lbl" id="pz-t">Pause new work</span></button>
+  </div>
 </header>
 
 <main>
