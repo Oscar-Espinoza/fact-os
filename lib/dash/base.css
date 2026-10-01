@@ -61,6 +61,7 @@ b{font-weight:600}
 .lanes-t{font-size:13px;color:var(--muted)}
 .lanes-t b{color:var(--fg);font-family:var(--mono);font-weight:500}
 .lanes-t small{font-size:12px;color:var(--dim)}
+.lanes-t .warn{color:var(--amber);font-weight:600}
 .pz{padding:0 12px}
 .pz .ic{display:inline-flex}
 .ctl.paused .pz{background:var(--amber);border-color:var(--amber);color:#1d1400}
@@ -68,10 +69,11 @@ b{font-weight:600}
 .status.on.paused .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
 .status.on.paused b{color:var(--amber)}
 /* Up to 1600px the header tightens in steps so brand, five tabs, picker, status and the controls stay on one line:
-   from 1600 the tagline goes and the picker narrows; from 1400 the wordmark (the logo stays) and "(default n)" (the lanes
-   tooltip has it); at 900–1180 (a 1024 screen) the pause button shows only its icon (aria-label and tooltip carry the words). */
+   from 1600 the tagline goes and the picker narrows; from 1400 the wordmark goes (the logo stays) and "(default n)" is
+   hidden from view only (screen readers still read it; the tooltip and the group's aria-label carry it too); at 900–1180
+   (a 1024 screen) the pause button shows only its icon (aria-label and tooltip carry the words). */
 @media (max-width:1600px) and (min-width:901px){.top{gap:16px;padding:0 14px}.tabs a{padding:0 12px}.brand small{display:none}.status{padding-left:12px}#pick{width:200px}.ctl{gap:8px}}
-@media (max-width:1400px) and (min-width:901px){.brand span{display:none}#pick{width:180px}.lanes-t small{display:none}}
+@media (max-width:1400px) and (min-width:901px){.brand span{display:none}#pick{width:180px}.lanes-t small{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
 @media (max-width:1180px) and (min-width:901px){.top{gap:12px}.pz .lbl{display:none}.pz{width:32px;padding:0}}
 @media (max-width:1023px) and (min-width:901px){.status>span:last-child{display:none}} /* just the dot; its tooltip has the text */
 

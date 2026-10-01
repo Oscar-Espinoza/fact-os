@@ -13,6 +13,7 @@
 .fx-paused .ic{width:12px;height:12px;flex-shrink:0;background:linear-gradient(90deg,#f5b73b 0 35%,transparent 35% 65%,#f5b73b 65%)}
 .fx-paused .tx{flex:1;min-width:0}
 .fx-paused b{color:#f5b73b}
+.fx-paused .ic.warn{width:auto;height:auto;background:none;color:#f5b73b;font-weight:700}
 @media (max-width:700px){.fx-paused.on{flex-wrap:wrap}}
 
 /* KPIs */
