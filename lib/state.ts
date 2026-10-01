@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, linkSync, openSync, closeSync, writeSync, unlinkSync, appendFileSync, statSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
+import { OPUS, normalizeProfile, profileNames, validProfile } from './profiles.ts';
 
 export const DEFAULT_CONFIG: Config = {
   base: 'main', worktreesDir: '../<repo>-worktrees', branchPrefix: 'ship/', maxParallel: 3, maxAttempts: 2,
@@ -130,11 +131,13 @@ export const validLanes = (x: unknown): x is number | null => x === null || (Num
 
 export const DEFAULT_CONTROL: Control = { paused: false, maxParallel: null };
 
-// The control file as found: a missing file means the defaults ("not paused, config's lanes"); a file that exists but is not
-// JSON, not an object, or has a wrong `paused`/`maxParallel` is invalid, and callers must not read it as the defaults (the
-// foreman keeps its last good control, or holds all new work when it has none). `text` is the raw content, to report it once.
+// The control file as found: a missing file means the defaults ("not paused, config's lanes, opus"); a file that exists but is
+// not JSON, not an object, or has a wrong `paused`/`maxParallel`/`profile` is invalid, and callers must not read it as the
+// defaults (the foreman keeps its last good control, or holds all new work when it has none). With `config`, a profile name it
+// does not know is invalid too. `profile` is in `control` only when the file has one ("opus" read as null). `text` is the raw
+// content, to report it once.
 export type ControlRead = { ok: true; control: Control; missing: boolean } | { ok: false; error: string; text: string };
-export function readControlFile(root: string): ControlRead {
+export function readControlFile(root: string, config?: Pick<Config, 'profiles'>): ControlRead {
   const P = paths(root), name = `${P.name}/control.json`; // short name in messages: they are shown in the dashboard
   let text: string;
   try { text = readFileSync(P.control, 'utf8'); } catch (e) {
@@ -147,17 +150,27 @@ export function readControlFile(root: string): ControlRead {
   const r = raw as Record<string, unknown>;
   if (r.paused !== undefined && typeof r.paused !== 'boolean') return bad(`"paused" must be true or false (is ${JSON.stringify(r.paused)})`);
   if (r.maxParallel !== undefined && !validLanes(r.maxParallel)) return bad(`"maxParallel" must be an integer from 0 to ${MAX_LANES} or null (is ${JSON.stringify(r.maxParallel)})`);
+  if (r.profile !== undefined && r.profile !== null && typeof r.profile !== 'string') return bad(`"profile" must be a profile name or null (is ${JSON.stringify(r.profile)})`);
+  if (typeof r.profile === 'string' && config && !validProfile(config, r.profile)) return bad(`unknown profile "${r.profile}" (known: ${profileNames(config).join(', ')})`);
   return { ok: true, missing: false, control: { paused: r.paused === true, maxParallel: (r.maxParallel ?? null) as number | null,
+    ...(r.profile !== undefined ? { profile: r.profile === OPUS ? null : r.profile as string | null } : {}),
     ...(typeof r.updatedAt === 'string' ? { updatedAt: r.updatedAt } : {}), ...(r.by === 'dashboard' || r.by === 'cli' ? { by: r.by } : {}) } };
 }
 
-// Changes control.json under the state lock (atomic write); throws on an invalid maxParallel. Returns what was written.
-export async function writeControl(root: string, patch: Partial<Pick<Control, 'paused' | 'maxParallel'>>, by: NonNullable<Control['by']>): Promise<Control> {
+// Changes control.json under the state lock (atomic write); throws on an invalid maxParallel or an unknown profile ("opus" and
+// "default" are written as null). Profiles are checked against `config`, else the project's config.json. Returns what was written.
+export async function writeControl(root: string, patch: Partial<Pick<Control, 'paused' | 'maxParallel' | 'profile'>>, by: NonNullable<Control['by']>, config?: Pick<Config, 'profiles'>): Promise<Control> {
   if ('maxParallel' in patch && !validLanes(patch.maxParallel)) throw new Error(`lanes must be an integer from 0 to ${MAX_LANES}, or null for the config default`);
   if ('paused' in patch && typeof patch.paused !== 'boolean') throw new Error('paused must be a boolean');
+  // The config is read only when needed: a lanes or pause write still works with an unreadable config.json.
+  let cfg = config;
+  if (!cfg) try { cfg = loadConfig(root); } catch (e) { if ('profile' in patch) throw e; }
+  const profile = 'profile' in patch ? (typeof patch.profile === 'string' ? normalizeProfile(patch.profile) : patch.profile) : undefined;
+  if ('profile' in patch && !validProfile(cfg!, profile)) throw new Error(`unknown profile ${JSON.stringify(patch.profile)} (known: ${profileNames(cfg!).join(', ')}, or default)`);
   return withLock(root, () => {
-    const r = readControlFile(root), cur = r.ok ? r.control : DEFAULT_CONTROL; // writing repairs an invalid file
-    const next: Control = { paused: patch.paused ?? cur.paused, maxParallel: 'maxParallel' in patch ? patch.maxParallel! : cur.maxParallel, updatedAt: new Date().toISOString(), by };
+    const r = readControlFile(root, cfg), cur = r.ok ? r.control : DEFAULT_CONTROL; // writing repairs an invalid file
+    const next: Control = { paused: patch.paused ?? cur.paused, maxParallel: 'maxParallel' in patch ? patch.maxParallel! : cur.maxParallel,
+      profile: 'profile' in patch ? profile! : cur.profile ?? null, updatedAt: new Date().toISOString(), by };
     writeJsonAtomic(paths(root).control, next);
     return next;
   });

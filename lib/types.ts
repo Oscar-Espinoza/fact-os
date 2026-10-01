@@ -10,6 +10,13 @@ export type Role = 'builder' | 'evaluator' | 'resolver';
 
 export interface RoleConfig { model?: string; effort?: string; permissionMode?: string }
 
+// Model profiles (profiles.ts): a named set of model/effort per role, chosen at runtime in control.json. "opus" is the
+// reserved name of the main mode, each role's own config. permissionMode never comes from a profile: always the role's.
+export type ProfileRole = 'builder' | 'resolver' | 'evaluator' | 'observer' | 'curator';
+export const PROFILE_ROLES: ProfileRole[] = ['builder', 'resolver', 'evaluator', 'observer', 'curator'];
+export interface ProfileEntry { model?: string; effort?: string; effortHigh?: string } // effortHigh: the builder's effort on a risky feature
+export type Profile = Partial<Record<ProfileRole, ProfileEntry>>;
+
 export interface Config {
   base: string;
   worktreesDir: string;               // '<repo>' is replaced by the repo's dir name on load
@@ -37,6 +44,7 @@ export interface Config {
   conflictBrief: boolean;             // a conflicting refresh's feedback carries both sides' context; resolutions get the keep-lines check
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
   observer?: Partial<ObserverConfig>; // read only by `fact-os observe`
+  profiles?: Record<string, Profile>; // added to (or replacing, by name) the built-in profiles; "opus" is reserved
 }
 
 // File claims (docs/merge-process.md): a file is hot when listed in `hot` (a path, or a dir prefix ending in "/") or
@@ -83,6 +91,7 @@ export interface Feature {
   pausedAt?: string;                  // ISO, while paused
   issue?: number;                     // GitHub issue number
   touches?: string[];                 // files (or dir prefixes ending in "/") it is expected to change: claimed while it runs
+  risk?: 'high' | 'normal';           // "high": the builder gets its profile's effortHigh; "normal": never; absent: keyword heuristic
   conflict?: { ours: string; theirs: string; files: string[] }; // a conflicted base refresh whose committed resolution is not checked yet
   pid?: number;                       // current child
   pidStart?: string;                  // /proc/<pid>/stat field 22
@@ -108,6 +117,7 @@ export interface HumanTask {
 export interface Control {
   paused: boolean;                    // true: launch nothing new
   maxParallel: number | null;         // 0..32; null = config.maxParallel
+  profile?: string | null;            // model profile for new launches; absent or null = "opus" (each role's own config)
   updatedAt?: string;                 // ISO
   by?: 'dashboard' | 'cli';
 }
