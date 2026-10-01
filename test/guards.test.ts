@@ -121,6 +121,24 @@ function conflict(s: Setup, id: string, { branch, main, extra = {} }: { branch: 
 }
 const wtOf = (s: Setup, id: string) => join(s.repo, '..', 'app-worktrees', id);
 
+test('restoreFrom: a branch with no work of its own starts from its archive tag, whether its worktree is new or was recreated from main', (t) => {
+  const s = setup(t, { features: [F('a'), F('b'), F('c')], config: { maxAttempts: 1, restoreFrom: 'archive/task/{id}' } });
+  for (const id of ['a', 'b']) { // earlier work, saved only as a tag
+    s.git('checkout', '-qb', `old-${id}`);
+    writeFileSync(join(s.repo, `${id}-old.txt`), 'old\n');
+    s.git('add', `${id}-old.txt`); s.git('commit', '-qm', `old ${id}`); s.git('tag', `archive/task/${id}`);
+    s.git('checkout', '-q', 'main'); s.git('branch', '-qD', `old-${id}`);
+  }
+  s.git('worktree', 'add', '-q', '-b', 'ship/b', wtOf(s, 'b'), 'main'); // b's branch was recreated from main
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const id of ['a', 'b']) assert.equal(s.git('show', `main:${id}-old.txt`), 'old', `${id}'s archived work reached main`);
+  assert.match(s.log(), /"feature":"a","event":"restored","detail":"archive\/task\/a/);
+  assert.match(s.log(), /"feature":"b","event":"restored"/);
+  assert.doesNotMatch(s.log(), /"feature":"c","event":"restored"/, 'no tag, nothing to restore');
+  assert.equal(s.feature('c').status, 'merged');
+});
+
 test('a conflicting merge is aborted; the foreman merges main into the worktree conflict-free, and the next attempt merges (attempts unchanged)', (t) => {
   const s = setup(t, { features: [F('a', { branch: 'ship/a' })], config: { maxAttempts: 1 } });
   // union merge driver on the branch only: merging main into the branch is clean, merging the branch into main is not
@@ -183,6 +201,16 @@ test('conflict groups (groupBy idPrefix): two ready features of one group never 
   assert.ok(x2b.t0 > x1e.t1, 'x-2 started only after x-1 finished');
   assert.match(s.log(), /"feature":"x-1","event":"merged"[\s\S]*"feature":"x-2","event":"launch"/);
   for (const id of ['x-1', 'x-2', 'y-1']) assert.equal(s.feature(id).status, 'merged');
+});
+
+test('run --watch fills a free slot as soon as a feature is resumed, without waiting for an in-flight feature to finish', async (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { status: 'paused' })], config: { maxParallel: 2 } });
+  s.env.FAKE_DELAY_MS = '1500';
+  const run = s.start('--watch');
+  assert.ok(await until(() => s.feature('a').status === 'building'), run.out());
+  assert.equal(s.cli('resume', 'b').status, 0);
+  assert.equal(await run.exit, 0, run.out());
+  assert.ok(s.calls('build', 'b')[0].t0 < s.calls('build', 'a')[0].t1, 'b launched while a was still building');
 });
 
 test('merge "auto": a feature parked as ready by a dirty checkout is merged once the checkout is clean, then its dependents launch', async (t) => {
@@ -473,6 +501,16 @@ test('refreshBeforeTest: a conflicting base move sends the feature back to todo 
   assert.match(builds[1].prompt, /the foreman started merging main into your branch and it conflicts in: a\.txt\. Resolve/);
   assert.equal(s.calls('eval', 'a').length, 1, 'the conflicted state was never evaluated');
   assert.doesNotMatch(s.log(), /"alert"|commit your work/);
+});
+
+test('refreshBeforeTest: a conflicting refresh keeps the earlier failure the builder still has to fix, without stacking notes', (t) => {
+  const s = setup(t, { features: [F('a', { lastFeedback: 'test command exited 1: loyalty.db.test.ts' })],
+    config: { maxAttempts: 1, refreshBeforeTest: true }, scenario: { a: 'base-conflict,resolve' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const p = s.calls('build', 'a')[1].prompt;
+  assert.match(p, /loyalty\.db\.test\.ts[\s\S]*not fixed yet\. Also: the foreman started merging main/);
+  assert.equal(p.split('Also:').length, 2, 'one refresh note, not a stack');
 });
 
 test('refreshBeforeTest defaults to false: the test runs on the branch as built, without the moved base', (t) => {

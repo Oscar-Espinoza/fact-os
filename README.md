@@ -56,7 +56,10 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   that pass alone can't break `base` together — see below), `maxRefreshes` (5), `groupBy` (null; `"idPrefix:<n>"` puts
   each feature in the conflict group named by its id's first n chars, e.g. `"idPrefix:3"`: `F05-02-x` → `F05`; a
   feature's own `group` wins; two features of one group are never in flight together: the foreman launches the
-  next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target), `mergeHook` (null;
+  next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target), `restoreFrom` (null;
+  a ref with `{id}`, e.g. `"archive/task/{id}"`: a feature branch with no commits of its own, new or recreated from
+  `base`, is moved to that ref when it holds work `base` lacks, so work saved by a cleanup is not lost; logged as
+  `restored`), `mergeHook` (null;
   a shell command run in the main checkout on the staged `git merge --no-ff --no-commit`, with
   `FACTOS_FEATURE`/`FACTOS_BRANCH`, e.g. to renumber migrations: what it `git add`s joins the merge commit; a
   non-zero exit aborts the merge and sends the feature back to `todo` with the hook's output as feedback, costing no attempt).

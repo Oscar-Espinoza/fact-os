@@ -30,6 +30,7 @@ export interface Config {
   maxRefreshes: number;
   mergeHook: string | null;
   groupBy: string | null;             // null or "idPrefix:<n>"
+  restoreFrom: string | null;         // null or a ref with "{id}", e.g. "archive/task/{id}": earlier work for a branch with none
 }
 
 export interface Feature {

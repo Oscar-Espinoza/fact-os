@@ -122,6 +122,8 @@ const briefs = (root: string, config: Config) => (config.briefFiles || []).map((
   return c == null ? '' : `\n## Brief: ${f}\n\n${c}`;
 }).join('\n');
 
+const REFRESH_SEP = '\n\nThis failure is not fixed yet. Also: ';
+
 function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[]): string {
   const lessons = readIf(resolve(root, config.lessonsFile));
   return [`You are the builder for feature "${f.id}": ${f.title}`,
@@ -323,10 +325,16 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       return r.code ? r.err : null;
     });
     if (wtErr) return fail(`worktree: ${wtErr}`);
-    // A branch with no commits of its own (e.g. prepared before its deps merged) starts from the current base.
-    // Fast-forward only, so it can never conflict; a clean worktree is required.
-    if (git(['rev-list', '--count', `${config.base}..${branch}`], root).out === '0' && !git(['status', '--porcelain'], wt).out)
-      git(['merge', '--ff-only', '--quiet', config.base], wt);
+    // A branch with no commits of its own either picks up earlier work saved under restoreFrom (e.g. an archive tag left
+    // by a cleanup), or (e.g. prepared before its deps merged) starts from the current base. Both need a clean worktree;
+    // restoring moves only a branch with nothing of its own, and only to work base does not already have.
+    if (git(['rev-list', '--count', `${config.base}..${branch}`], root).out === '0' && !git(['status', '--porcelain'], wt).out) {
+      const saved = config.restoreFrom && git(['rev-parse', '--verify', '--quiet', `${config.restoreFrom.replaceAll('{id}', id)}^{commit}`], root).out;
+      if (saved && git(['merge-base', '--is-ancestor', saved, config.base], root).code !== 0) {
+        git(['reset', '--keep', '--quiet', saved], wt);
+        log(root, id, 'restored', `${config.restoreFrom!.replaceAll('{id}', id)} (${saved.slice(0, 8)})`);
+      } else git(['merge', '--ff-only', '--quiet', config.base], wt);
+    }
     // Optional per-worktree setup (dependencies, task databases), run before every build; must be idempotent.
     if (config.prepare) {
       const pr = await exec('sh', ['-c', `exec 2>&1\n${config.prepare}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
@@ -389,7 +397,11 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   // resolve and commit. No attempt is spent. beforeTest: a clean merge returns 'clean' and the pipeline goes on.
   function refresh(id: string, branch: string, fail: Fail, beforeTest = false): Promise<void> | 'clean' {
     const wt = resolve(root, config.worktreesDir, id), base = config.base;
-    const n = load(root).features.find((x) => x.id === id)?.refreshes || 0;
+    const cur = load(root).features.find((x) => x.id === id), n = cur?.refreshes || 0;
+    // A refresh must not drop the failure the builder still has to fix (e.g. a gate failure): keep it, minus any older
+    // refresh note, and append this refresh's note after it.
+    const prior = (cur?.lastFeedback || '').split(REFRESH_SEP)[0];
+    const keepPrior = prior && !prior.startsWith('the foreman') ? `${prior}${REFRESH_SEP}` : '';
     const tooMany = () => {
       const fb = `merge conflict with ${base}: too many base refreshes (${n})`;
       log(root, id, 'stuck', fb); out(`stuck ${id}: ${fb}`);
@@ -409,7 +421,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       : `the foreman merged ${base} into your branch (conflict-free); re-run the tests and fix anything the new base broke`;
     log(root, id, 'refreshed', conflicted ? `conflicts in: ${files}` : 'conflict-free');
     out(`refresh ${id}: merged ${base} into ${branch}${conflicted ? `, conflicts in: ${files}` : ''}`);
-    return set(id, { status: 'todo', refreshes: n + 1, lastFeedback: fb, parked: undefined });
+    return set(id, { status: 'todo', refreshes: n + 1, lastFeedback: keepPrior + fb, parked: undefined });
   }
 
   const checkoutProblem = (): string | null => { // why the main checkout can't take a merge now, or null
@@ -503,7 +515,15 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
         }
         if (opts.once) onceDone = true;
       }
-      if (inflight.size) { await Promise.race(inflight.values()); continue; }
+      if (inflight.size) {
+        // With a free slot, also wake on a state change (a retry or resume) so it launches without waiting for a feature to finish.
+        // Stamp after this tick's own writes (recovery, launches), or they would wake it at once and spin.
+        let woke = false;
+        const free = !stopping && !onceDone && !capped() && !overBudget && inflight.size < Math.max(1, config.maxParallel);
+        await Promise.race([...inflight.values(), ...(free ? [waitForChange(P, stamp(P), () => stopping || woke)] : [])]);
+        woke = true;
+        continue;
+      }
       if (orphans.length && !stopping && !halted) {
         if (orphans.join() !== lastOrphans) out(`waiting for children of a previous foreman: ${(lastOrphans = orphans.join())}`);
         await sleep(Number(envVar('POLL_MS')) || 5000);
