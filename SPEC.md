@@ -101,7 +101,8 @@ during a run never trips the tamper halt.
 A profile names the model and effort per role: `builder`, `resolver`, `evaluator`, `observer` (the observer's improver) and
 `curator` (its lessons curation). Two ways to run the factory are built in:
 - **`opus`** (the main mode, reserved): each role's own config (`builder`, `evaluator`, `resolver ?? builder`, the observer's
-  `agent`). `null` in `control.json` means opus; `opus` or `default` from the CLI or API is stored as `null`.
+  `agent`). `null` in `control.json` means opus; `"opus"` (file, CLI, API) is read and stored as `null`. `default` is only a
+  CLI alias (`fact-os profile default`): the API answers 400 to it, and in the file it is an unknown name (invalid).
 - **`fable-sonnet`**: Fable thinks, Sonnet writes the code.
   ```json
   "fable-sonnet": {
@@ -116,10 +117,15 @@ A profile names the model and effort per role: `builder`, `resolver`, `evaluator
 whole. `opus`/`default` can't be redefined. A role a profile doesn't name falls back to its config; an entry overrides only
 the fields it has; `permissionMode` always comes from the role config. Model names pass through to `claude --model`.
 **Risk:** the builder's effort is the entry's `effortHigh` (when it has one) for a risky feature: `risk: "high"`; any other
-`risk` value is not risky; untagged, a case-insensitive whole-word match in title or description of money, payment, refund,
-price/pricing, invoice, tax, permission, auth/authn/authz/authentication/authorization (not "author"), token, tenant/tenancy,
-RLS, migration/migrate, concurrency/concurrent, lock/locking/deadlock (not "block", "clock"), race (not "trace", "brace"),
-state machine (`RISK_KEYWORDS`). Opus never escalates. The active profile applies to new launches only (see Launch limit).
+`risk` value is not risky; untagged, a keyword in the **title**, or keywords of **at least two distinct families** in the
+description (long descriptions mention a migration or a payment in passing; one family there is not enough). Families
+(`RISK_KEYWORDS`, case-insensitive whole words with their inflections): money; payment; refund (refundable); price/pricing;
+invoice; tax; permission; auth (auth/authn/authz, oauth, (un/re)authenticate(d), (un)authorize(d)/authorization(s); never
+"author"); token, only in its auth senses (JWT, API key, access/refresh/auth/bearer/API/session/CSRF/ID token; never
+"design tokens"); tenant/tenancy; RLS; migration/migrate; concurrency/concurrent; lock/locking/deadlock (never "block",
+"clock", a lock file: "bun.lock", "pnpm-lock.yaml", "lockfile", "lock file", nor a hyphen-preceded "-lock"); race/race
+condition (never "trace", "brace"); state machine. Login, checkout and pay are deliberately not keywords. `fact-os profile`
+and `doctor` print how many not-merged features would escalate. Opus never escalates. The active profile applies to new launches only (see Launch limit).
 
 ## Readiness rule (pure function, heavily tested)
 
@@ -156,7 +162,8 @@ Each tick:
    and the last good control, profile included, is kept) is snapshotted when a feature launches; every `claude -p` of that
    pass (builder, resolver, evaluator) uses it, so a pass started under one profile finishes under it and a switch only
    reaches new launches. A change (and a non-opus profile at start) is logged as `control`, e.g. "running, lanes default,
-   profile opus → running, lanes default, profile fable-sonnet".
+   profile opus → running, lanes default, profile fable-sonnet". A foreman restarted after a switch may evaluate (or resume
+   after the build) a branch that was built under the old profile: the profile is per pass, not recorded per branch.
    Launch ready features, in readiness order, until the launch limit is in flight (a ceiling, not a target). A feature
    whose conflict group (`group`, else per `groupBy`; none when both are unset) already has a feature in flight
    (`building|testing|evaluating`, including a previous foreman's live orphan) is skipped for the next-best ready
@@ -301,8 +308,12 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   are unchanged.
 - `fact-os profile [<name|default>]` — writes `profile` to `control.json` (`by: "cli"`; `default`/`opus` = null) and prints
   the lanes line plus the profile's role → model/effort table ("builder sonnet medium (high when risky)"); an unknown name
-  exits 1 listing the valid ones. Without a name it prints the active profile and its table. New launches only.
-- `fact-os status` ends with the model profile; `fact-os doctor` prints it when the control file is valid.
+  exits 1 listing the valid ones. Without a name it prints the active profile and its table, or "profile unknown: <why>"
+  when `control.json` is invalid. The observer and curator rows say "(observe --agent)" when `observer.agent` is not set
+  (they show what `--agent` would use). Both forms end with "risky: N of M open features would get the builder's
+  effortHigh". New launches only. Any control command that rewrites an invalid file (an unknown profile included) says so.
+- `fact-os status` ends with the model profile ("unknown" while the file is invalid); `fact-os doctor` prints it when the
+  control file is valid, and the risky count when there are no problems.
 - `fact-os doctor` — validates the files (schema, unknown deps, cycles, duplicate ids, a feature `risk` other than
   high/normal, `config.profiles`: an object of objects with known roles, non-empty string `model`/`effort`/`effortHigh`
   (`effortHigh` on the builder only), no `opus`/`default`; an invalid `control.json`, including an unknown profile) and that
@@ -316,7 +327,9 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   (inline CSS/JS, no dependencies, light and dark, phone width), polling `GET /api/state` every 2s,
   one project at a time (picker in the header; next to the foreman status, the **controls**: the mode switch "Mode: Opus" /
   "Mode: Fable + Sonnet" (other config profiles by name; highlighted when not opus; a click switches to the next profile;
-  its tooltip lists role → model, effort, the builder's "high when risky", and says it applies to new launches), "− 6 of 8 lanes +" (running of
+  its tooltip lists role → model, effort, the builder's "high when risky", the observer rows' "(observe --agent)" when no
+  observer agent is configured, and says it applies to new launches; while `control.json` is invalid it reads "Mode: ?", is
+  disabled, and its tooltip says why and to fix the file or rewrite it with pause, the lanes or the CLI), "− 6 of 8 lanes +" (running of
   allowed, "(default n)" when the lanes differ from config; − disabled at 0, + at 32) and "Pause new work" / "Resume", real
   buttons with labels and visible focus, each confirmed by a toast; lowering below the number running says "N running will
   finish; no new ones start until fewer than M are running"; the header stays on one line from 901px, two rows below) with
@@ -374,7 +387,8 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   and `inFlight` (features building, testing or evaluating). `control` also carries `profile` (the active profile; null =
   opus, and null while the file is invalid), `roles` (its table: `[{role, model, effort, effortHigh?, fromProfile}]` for
   builder, resolver, evaluator, observer, curator; the observer rows use `observer.agent`, else what `--agent` would use) and
-  `profiles` (`[{name, label, roles}]`, opus first; labels "Opus", "Fable + Sonnet", else the name).
+  `profiles` (`[{name, label, roles}]`, opus first; labels "Opus", "Fable + Sonnet", else the name) and `observerAgent`
+  (whether `observer.agent` is set).
   `POST /api/control/pause {project}`, `/api/control/resume {project}`, `/api/control/lanes {project, maxParallel: 0–32 | null}`
   and `/api/control/profile {project, profile: <known name> | "opus" | null}` write `control.json` (`by: "dashboard"`; 400 on an
   invalid `maxParallel` or an unknown profile) and answer the new `control`.
@@ -429,14 +443,17 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    appended meanwhile are kept after it, and a tracked file is committed on base (`fact-os: curate lessons`; skipped
    when the checkout is not on base or the file has uncommitted changes).
 7. **Measures the agents** over the last 7 days, per prompt version (a version starts at a lessons curation or when the
-   builder's model, effort, briefs or profile change, from `prompt` events; a risky feature's `risk=high` prompt does not start one): per `launch`, whether the build reached the test
+   builder's model, effort, briefs or profile change: each `launch` is keyed by its own pass's builder `prompt`, the first one
+   of that feature after the launch, so a pass still in prepare at a switch stays in its own version; versions change in
+   launch order; a risky prompt is keyed with its `effortBase`, so it neither splits nor skips a version; a launch with no
+   builder prompt stays in the version in force): per `launch`, whether the build reached the test
    (setup failures from `prepare`/worktree are counted apart, not against the builder; a conflicting refresh before the
    test is a builder outcome), passed the gate, passed the evaluator, merged or bounced; median build, gate and
    evaluation minutes; build and evaluation cost from the run files by completion time (resolver runs count as build); the
    evaluator's top rejection reasons. A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's
    version (`resolves`; a merge after it counts in `merged` and `resolvedMerged`; its gate and evaluation are not counted
    again). The foreman logs a `prompt` event per run (`<role> model= effort= lessons=<sha8> briefs=<sha8>`, with the model and
-   effort actually passed, then ` profile=<name>` under a non-opus profile and ` risk=high` when the builder got effortHigh), saves the
+   effort actually passed, then ` profile=<name>` under a non-opus profile and ` risk=high effortBase=<effort>` when the builder got effortHigh), saves the
    prompt as `runs/<id>/<tag>-(build|eval|resolve).prompt.md`, and tags run files `<attempt>` or `<attempt>.<k>` so a later pass
    of the same attempt never overwrites them.
 8. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
