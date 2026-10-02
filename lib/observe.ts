@@ -3,8 +3,9 @@
 // error) with a note for the next build, re-parks features whose merge never started, and writes a report.
 // With an agent it also acts on what it saw: the improver turns recurring causes of lost work into improvement
 // features (built, gated, evaluated and merged by the foreman like any other) and human tasks for what lies outside
-// the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). The
-// observer itself never changes code: every code change goes through the factory's own checks.
+// the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). It also reviews
+// each failed pass (promptreview.ts) to learn whether the prompt or the model was at fault, and keeps per-model prompt notes
+// from that. The observer itself never changes code: every code change goes through the factory's own checks.
 import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
@@ -12,11 +13,13 @@ import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAli
 import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import { SLUG } from './ready.ts';
+import { passesOf, promptRates, reviewFailures, updateNotes, fileTemplateTasks, promptSummary, renderPromptSection, type PromptRate, type PromptReview } from './promptreview.ts';
+import { readNotes } from './notes.ts';
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
 
 export const DEFAULT_OBSERVER: ObserverConfig = { pollSec: 60, retry: true, maxRetries: 1, infraPatterns: [], recurring: 2,
   agent: null, lessonsMaxBytes: 12000, curateEveryHours: 4,
-  improve: true, improveEveryHours: 6, maxOpenImprovements: 2 };
+  improve: true, improveEveryHours: 6, maxOpenImprovements: 2, promptReview: { enabled: true, maxPerPass: 6, notesMaxBytes: 3000 } };
 export const DEFAULT_AGENT: RoleConfig = { model: 'opus', effort: 'high' };
 const INFRA = ['out of shared memory', 'no space left on device', 'enospc', 'too many clients', 'econnrefused',
   'connection terminated unexpectedly', 'terminating connection due to administrator command',
@@ -260,12 +263,14 @@ export interface ObserverState {
   improveAt?: string;                           // last improver run
   improvements: string[];                       // feature ids the improver queued
   agents?: Era[];                               // agent effectiveness per prompt version, last 7 days
+  promptReviews?: Record<string, PromptReview>; // why failed passes failed, by run (`<feature>/<tag>`), last 14 days
+  promptRates?: PromptRate[];                   // passes that ended well and badly per model, role and notes version, last 7 days
 }
 const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], lastEvent: {}, bounces: [], improvements: [] });
 export const observerPaths = (root: string) => { const d = paths(root).dir; return { state: join(d, 'observer.json'), report: join(d, 'observer-report.md'), pid: join(d, '.observer') }; };
 
 export function observerConfig(config: Config, opts: { agent?: boolean } = {}): ObserverConfig {
-  const c = { ...DEFAULT_OBSERVER, ...(config.observer || {}) };
+  const c: ObserverConfig = { ...DEFAULT_OBSERVER, ...(config.observer || {}), promptReview: { ...DEFAULT_OBSERVER.promptReview, ...(config.observer?.promptReview || {}) } };
   if (opts.agent && !c.agent) c.agent = { ...DEFAULT_AGENT, permissionMode: config.builder?.permissionMode };
   return c;
 }
@@ -388,6 +393,19 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
 
   for (const [file, n] of hotFiles(state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < DAY)))
     if (n >= 5) alert(`merge conflicts in ${file} keep sending features that passed evaluation back to the builder (5 or more in 24h); make it merge-friendly`, now(), DAY);
+  // Failed passes: review each once (the observer's role model, read-only), then fold the answers into per-model notes and human
+  // tasks (the curator's role model tidies a notes file that outgrew its cap).
+  const all = readNew(P.log, 0).events, feat = (id: string) => ({ title: byId.get(id)?.title ?? id, branch: byId.get(id)?.branch || config.branchPrefix + id });
+  const passes = passesOf(all, (id, detail) => {
+    const { files, changed } = /^test command `/.test(detail) ? filesOf(byId.get(id)) : { files: [], changed: [] };
+    return classify(detail, resolveTests(failingTests(detail), files), changed, cfg.infraPatterns).cause;
+  }, Date.now() - 7 * DAY);
+  if (cfg.agent && cfg.promptReview.enabled) {
+    await reviewFailures(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg.promptReview, state, passes, feat, out, opts.children ?? new Set());
+    await updateNotes(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg.promptReview, state, out, opts.children ?? new Set());
+    await fileTemplateTasks(root, state, out);
+  }
+  state.promptRates = promptRates(passes);
   if (cfg.agent) await curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, opts.children ?? new Set());
   if (cfg.agent && cfg.improve) await improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, opts.children ?? new Set());
 
@@ -545,6 +563,7 @@ export function renderReport(root: string, state: ObserverState, features: Featu
     ...(recurring.length ? ['Tests failing in several features:', '', ...recurring.map(([t, fs]) => `- ${t}: ${fs.join(', ')}`), ''] : []),
     ...(state.improvements.length ? ['## Improvements queued by the observer', '', ...state.improvements.slice(-10).reverse().map((id) => { const f = features.find((x) => x.id === id); return `- ${id}: ${f ? `${f.title} (${f.status})` : 'removed'}`; }), ''] : []),
     ...(state.agentNotes ? ['## Agent notes', '', state.agentNotes, ''] : []),
+    ...renderPromptSection(promptSummary(state, (model, role) => readNotes(root, model, role) ?? ''), at),
     ...(state.agents?.length ? ['## Agents (last 7 days, by prompt version)', '',
       '| Since | Change | Builds (setup failed) | Reached test | Passed gate | Passed evaluator | Bounced | Merged | Build / gate / eval (median min) | Cost build + eval |',
       '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',

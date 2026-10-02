@@ -8,6 +8,7 @@ import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureE
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole } from './profiles.ts';
+import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
@@ -134,11 +135,12 @@ export function runTag(existing: string[], attempt: number): string {
 // What a prompt was made of, to compare agents across prompt versions: role, the model and effort actually passed, and short
 // hashes of the lessons and briefs it included (the feature's own text is left out). Under a model profile it ends with
 // ` profile=<name>`, plus ` risk=high effortBase=<effort>` when the builder got the profile's effortHigh for a risky feature
-// (effortBase: what it would have had otherwise, so the observer can key prompt versions without it). Opus adds nothing, so
+// (effortBase: what it would have had otherwise, so the observer can key prompt versions without it). A prompt that carries
+// per-model notes (notes.ts) has ` notes=<sha8>` after the briefs, so agent stats split by notes version. Opus adds nothing, so
 // its fingerprints are unchanged.
-export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string, profile: string | null = null, effortBase: string | null = null): string {
+export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string, profile: string | null = null, effortBase: string | null = null, notes: string | null = null): string {
   const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 8);
-  return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}` +
+  return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}` + (notes ? ` notes=${notesHash(notes)}` : '') +
     (profile ? ` profile=${profile}` : '') + (effortBase != null ? ` risk=high effortBase=${effortBase || '-'}` : '');
 }
 
@@ -174,7 +176,8 @@ const briefs = (root: string, config: Config) => (config.briefFiles || []).map((
 const RUN_FILE: Record<Role, string> = { builder: 'build', evaluator: 'eval', resolver: 'resolve' };
 const REFRESH_SEP = '\n\nThis failure is not fixed yet. Also: ';
 
-function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = []): string {
+// `notes`: the notes block for this model and role (notesBlock), appended last.
+export function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = [], notes = ''): string {
   const lessons = readIf(resolve(root, config.lessonsFile));
   return [`You are the builder for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}, created from ${config.base}.`, '', f.description || '', '',
@@ -191,7 +194,7 @@ function builderPrompt(root: string, config: Config, f: Feature, branch: string,
     '  pulls, resets or switches branches, except to complete a merge the foreman started in this worktree (resolve,',
     '  git add, git commit); the foreman alone merges into ' + config.base + '.',
     `- The test command \`${config.test}\` must pass.`,
-    lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config)].join('\n');
+    lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config), notes].join('\n');
 }
 
 // The evaluator's view of the diff: a file list first, then whole files' diffs while they fit in `budget` characters
@@ -213,7 +216,7 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
 
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 
-function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = ''): string {
+export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = ''): string {
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
     'You did not write this code. Judge it skeptically. You may read files and run commands; do not modify or commit anything in this',
     'worktree (for a mutation check, use a scratch copy: git worktree add /tmp/<name> HEAD, and remove it afterwards).',
@@ -239,10 +242,10 @@ function evaluatorPrompt(root: string, config: Config, f: Feature, branch: strin
     '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null}. One finding per acceptance check, plus one ' +
     '"production wiring" finding; "pass" only if every finding is ok and cheating and blocking are empty. Evidence names files, ' +
     'lines, the tests you ran and what the mutation check showed.',
-    briefs(root, config)].join('\n');
+    briefs(root, config), notes].join('\n');
 }
 
-function resolverPrompt(root: string, config: Config, f: Feature, branch: string, brief: string): string {
+function resolverPrompt(root: string, config: Config, f: Feature, branch: string, brief: string, notes = ''): string {
   return [`You are the merge resolver for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}. The foreman started merging ${config.base} into it and the merge conflicts; ` +
     'the merge is in progress. Your only job is to finish it so that both sides keep working.', '', brief, '',
@@ -255,7 +258,7 @@ function resolverPrompt(root: string, config: Config, f: Feature, branch: string
     '- Run the quickest checks that cover the files you touched (type-check, the tests next to them) and fix what the merge broke.',
     `- Finish with git add and git commit (the merge commit). Do not abort the merge, and do not start another merge, rebase, reset or ` +
     `switch branches. The full test command \`${config.test}\` and an independent evaluator run after you.`,
-    briefs(root, config)].join('\n');
+    briefs(root, config), notes].join('\n');
 }
 
 // `role` is the resolved RoleConfig the launch uses (resolveRole), or a role name for its plain config (as in opus mode).
@@ -440,10 +443,13 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
 
     mkdirSync(runDir, { recursive: true });
     let tag = runTag(readdirSync(runDir), attempt);
-    const recordPrompt = (role: Role, prompt: string) => {
+    // The per-model notes (notes.ts) for the model this role launches with; read once per prompt, so the text in the prompt
+    // and the `notes=` in its fingerprint are the same version.
+    const notesFor = (role: Role) => readNotes(root, roleCfg(role).model, role);
+    const recordPrompt = (role: Role, prompt: string, notes: string | null) => {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
       log(root, id, 'prompt', promptFingerprint(role, roleCfg(role), role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
-        profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null));
+        profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes));
     };
     // A conflicted refresh resolved at once by a resolver run (config.resolver), in this same pass: the feature keeps its slot
     // and its claims, and goes on to test and evaluation. Returns the note for the evaluator, or null when the feature went
@@ -454,8 +460,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       await set(id, { status: 'building' });
       log(root, id, 'resolving', rec.files.join(', '));
       out(`resolve ${id}: ${rec.files.join(', ')}`);
-      const rp = resolverPrompt(root, config, f, branch, pending?.text || cur.lastFeedback || '');
-      recordPrompt('resolver', rp);
+      const rn = notesFor('resolver');
+      const rp = resolverPrompt(root, config, f, branch, pending?.text || cur.lastFeedback || '', notesBlock(roleCfg('resolver').model, 'resolver', rn));
+      recordPrompt('resolver', rp, rn);
       const r = await claude('resolver', rp, `${tag}-resolve.json`);
       if (await stopped()) return null;
       const tip = git(['rev-parse', branch], wt).out, has = (c: string) => git(['merge-base', '--is-ancestor', c, tip], wt).code === 0;
@@ -505,8 +512,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code !== 0;
     if (skipBuild) log(root, id, 'build-skipped', `the foreman stopped after it built ${built!.slice(0, 12)}`);
     else {
-    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld);
-    recordPrompt('builder', bp);
+    const bn = notesFor('builder');
+    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn));
+    recordPrompt('builder', bp, bn);
     const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
     if (!b.ok) return fail(`builder failed: ${b.error}`);
@@ -547,8 +555,9 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       const excluded = (config.evaluatorDiffExclude || []).length
         ? d('--name-only', range, '--', ...config.evaluatorDiffExclude.map((p) => `:(glob)${p}`)).split('\n').filter(Boolean) : [];
       const diff = evaluatorDiff(d('--stat=160', range), names.map((p) => ({ path: p, diff: excluded.includes(p) ? '' : d(range, '--', p) })), excluded);
-      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved);
-      recordPrompt('evaluator', ep);
+      const en = notesFor('evaluator');
+      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en));
+      recordPrompt('evaluator', ep, en);
       const e = await claude('evaluator', ep, `${tag}-eval.json`);
       if (await stopped()) return;
       const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };

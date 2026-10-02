@@ -43,7 +43,7 @@ export interface Config {
   claims: Partial<ClaimsConfig> | null; // null = schedule by group only; set = also never run two features that share a hot file
   conflictBrief: boolean;             // a conflicting refresh's feedback carries both sides' context; resolutions get the keep-lines check
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
-  observer?: Partial<ObserverConfig>; // read only by `fact-os observe`
+  observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`
   profiles?: Record<string, Profile>; // added to (or replacing, by name) the built-in profiles; "opus" is reserved
 }
 
@@ -63,7 +63,17 @@ export interface ObserverConfig {
   maxOpenImprovements: number;        // improvement features not merged yet
   lessonsMaxBytes: number;            // the agent curates the lessons section once it grows past this
   curateEveryHours: number;           // at most this often
+  promptReview: PromptReviewConfig;   // with an agent: review failed passes and keep per-model prompt notes
 }
+
+// Reviews of failed passes (promptreview.ts) and the per-model notes the foreman appends to prompts (notes.ts).
+export interface PromptReviewConfig {
+  enabled: boolean;                   // default true; only runs when an observer agent is configured
+  maxPerPass: number;                 // reviews started in one observer pass
+  notesMaxBytes: number;              // size cap of one <model>-<role> notes file
+}
+export const PROMPT_CAUSES = ['prompt-missing-info', 'prompt-ambiguous', 'prompt-conflict', 'model-limitation', 'environment', 'spec-error'] as const;
+export type PromptCause = typeof PROMPT_CAUSES[number];
 
 // What the observer decided about one stuck feature.
 export type Cause = 'untouched' | 'infra' | 'own' | 'conflict-loop' | 'setup' | 'builder' | 'unknown';

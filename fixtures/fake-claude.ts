@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Fake `claude -p --output-format json` for the end-to-end tests. Builder mode commits a file;
 // evaluator mode answers with the next scripted verdict from $FAKE_VERDICTS (default: pass); resolver mode finishes the
-// merge the foreman started, keeping both sides.
+// merge the foreman started, keeping both sides; review mode (the observer's failure review, `You review one failed pass`)
+// answers with the next scripted review of the feature named in the prompt from $FAKE_REVIEWS (default: model-limitation).
 // $FAKE_SCENARIO = {"<feature id>": "flag,flag"} makes it misbehave (see the flags below;
 // plain flags apply to the builder, "eval:<flag>" to the evaluator, "resolve:<flag>" to the resolver).
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
@@ -10,9 +11,9 @@ import { dirname, join } from 'node:path';
 import type { FeaturesFile, Verdict } from '../lib/types.ts';
 
 const prompt = readFileSync(0, 'utf8');
-const id = process.env.FACTOS_FEATURE as string;
+const id = (process.env.FACTOS_FEATURE ?? /^Feature: (\S+?):/m.exec(prompt)?.[1]) as string;
 const log = process.env.FAKE_LOG as string;
-const mode = prompt.startsWith('You are the builder') ? 'build' : prompt.startsWith('You are the merge resolver') ? 'resolve' : 'eval';
+const mode = prompt.startsWith('You are the builder') ? 'build' : prompt.startsWith('You are the merge resolver') ? 'resolve' : prompt.startsWith('You review one failed pass') ? 'review' : 'eval';
 const flags = ((JSON.parse(process.env.FAKE_SCENARIO || '{}') as Record<string, string>)[id] || '').split(',');
 const has = (f: string) => flags.includes(mode === 'build' ? f : `${mode}:${f}`);
 const git = (...a: string[]) => execFileSync('git', a, { encoding: 'utf8' }).trim();
@@ -89,6 +90,10 @@ if (mode === 'resolve') {
         git('-C', root(), 'add', f); git('-C', root(), 'commit', '-qm', `the user's ${f} on main`);
       }
   }
+} else if (mode === 'review') {
+  const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'review' && e.id === id; }).length : 0;
+  const scripted = process.env.FAKE_REVIEWS ? (JSON.parse(readFileSync(process.env.FAKE_REVIEWS, 'utf8')) as Record<string, unknown[]>)[id]?.[past] : undefined;
+  result = JSON.stringify(scripted ?? { cause: 'model-limitation', evidence: ['fake'], confidence: 'low', suggestion: '', target: 'lessons' });
 } else {
   if (has('move-branch')) commit('evil.txt', 'committed during evaluation\n');
   const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { mode: string; id: string }) : [];
