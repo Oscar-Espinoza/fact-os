@@ -85,7 +85,7 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
   `runs/<feature>/<tag>-{build,eval,resolve}.json` (raw `claude -p` output), `.lock`, `.foreman` (foreman pid).
 - `prompt-notes/<model>-<role>.md` — short per-model advice the observer learns from reviewed failures (config `observer.promptReview`:
-  `enabled`, `maxPerPass` (6), `notesMaxBytes` (3000)); the foreman appends it under `## Notes for <model> as <role>`. Delete a file to drop its notes.
+  `enabled`, `maxPerPass` (6), `notesMaxBytes` (3000)); the foreman appends it under `## Notes for <model> as <role>`. Deleting a file drops its notes for good: the reviews behind it are marked as used and are not applied again. Reviews are throttled (`everyMinutes` 30, `maxPerDay` 24) and run on each profile's `curator` role; the report shows what they cost.
 - `control.json` — `{paused, maxParallel: 0–32|null, profile: name|null, updatedAt, by}`, written by `pause-all`/`resume-all`/`lanes`/`profile` and the
   dashboard and re-read by the foreman every tick: the launch limit is 0 while paused, else `maxParallel`, else the config's,
   counted against features in flight including a previous foreman's live children. Not `config.json`, so it never trips the
