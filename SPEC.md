@@ -555,3 +555,8 @@ command/file path.
    with both sides' context then tested and evaluated again; a pre-test conflict resolved inline; a dropped line sent back
    and never merged; a declared drop merged; a resolver failure handed to the builder; `conflictBrief` alone; claims keeping
    two features on one hot file apart (declared and from history + branch diff). Everything is off by default.
+7. Prompt review (Observer 8): unit tests for which passes are reviewed (kinds, own tests only, newest first, the cap, once per
+   pass), the answer parser (each cause, an invalid answer), eligibility, note merging and the cap, notes in the prompt and the
+   fingerprint (and agent stats splitting by notes); observer tests with a scripted agent (read-only reviews, once per pass, notes,
+   one template task, the profile's observer role, tidying or archiving oversized notes); and end to end with the fake claude: a
+   failed pass is reviewed once, the notes file appears, the next build prompt of that model carries it and another model's does not.

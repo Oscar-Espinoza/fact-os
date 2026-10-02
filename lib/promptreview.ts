@@ -218,6 +218,9 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
   out(`observer: reviewing ${todo.length} failed passes (${todo.map((p) => p.feature).join(', ')})`);
   let done = 0;
   const one = async (p: Pass): Promise<void> => {
+    try { await review(p); } catch (e) { out(`observer: review of ${p.feature} failed: ${firstLine(String((e as Error).message ?? e))}`); } // e.g. the prompt file vanished: asked again next pass
+  };
+  const review = async (p: Pass): Promise<void> => {
     const k = keyOf(p)!, used = p.prompts.filter((x) => x.role === p.role).at(-1)!, branch = feature(p.feature).branch;
     const has = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).code === 0;
     const input: ReviewInput = { feature: p.feature, title: feature(p.feature).title, role: p.role!, model: used.model, effort: used.effort, kind: p.kind!, outcome: p.detail || '(no detail logged)',
