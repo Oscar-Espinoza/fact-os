@@ -308,7 +308,13 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   // Files per branch tip, for resolving test names and the feature's own changes.
   const cache = new Map<string, { files: string[]; changed: string[] }>();
   // A merged feature's branch may be gone: then its merge commit on base tells what it changed.
+  const perFeature = new Map<string, { files: string[]; changed: string[] }>(); // one rev-parse / log per feature per pass
   const filesOf = (f: Feature | undefined) => {
+    const id = f?.id ?? '';
+    if (!perFeature.has(id)) perFeature.set(id, filesAt(f));
+    return perFeature.get(id)!;
+  };
+  const filesAt = (f: Feature | undefined) => {
     const branch = f ? f.branch || config.branchPrefix + f.id : '';
     const tip = branch && git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).out;
     const merge = !tip && f ? git(['log', '-1', '--format=%H', '--fixed-strings', `--grep=merge ${f.id}:`, config.base], root).out : '';
@@ -395,19 +401,14 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   // Failed passes: review each once (the curator's role model, read-only), then fold the answers into per-model notes and human
   // tasks. The reviews are saved before anything else can fail: they cost money. A failing step is reported, not fatal.
   const all = readNew(P.log, 0), feat = (id: string) => ({ title: byId.get(id)?.title ?? id, branch: byId.get(id)?.branch || config.branchPrefix + id });
-  const causes = new Map<string, Cause>();
-  const passes = passesOf(all.events, (id, detail) => { // memoized: a gate failure costs git calls
-    const key = `${id}\n${detail}`;
-    if (!causes.has(key)) {
-      // An evaluator's feedback or a keep-check report may quote anything (ECONNREFUSED): only a gate failure and the foreman's own
-      // failures are read for infrastructure patterns.
-      const gate = /^test command `/.test(detail);
-      const { files, changed } = gate ? filesOf(byId.get(id)) : { files: [], changed: [] };
-      causes.set(key, !gate && /^(Evaluator:|FAILED |CHEATING:|BLOCKING:)/m.test(detail) ? 'own' : /^The merge resolution lost lines/.test(detail) ? 'unknown'
-        : classify(detail, resolveTests(failingTests(detail), files), changed, cfg.infraPatterns).cause);
-    }
-    return causes.get(key)!;
-  }, Date.now() - 7 * DAY);
+  const passes = passesOf(all.events, (id, detail) => { // only gate failures need the repo's files (filesOf: once per feature)
+    // An evaluator's feedback or a keep-check report may quote anything (ECONNREFUSED): only a gate failure and the foreman's own
+    // failures are read for infrastructure patterns.
+    const gate = /^test command `/.test(detail);
+    const { files, changed } = gate ? filesOf(byId.get(id)) : { files: [], changed: [] };
+    return !gate && /^(Evaluator:|FAILED |CHEATING:|BLOCKING:)/m.test(detail) ? 'own' : /^The merge resolution lost lines/.test(detail) ? 'unknown'
+      : classify(detail, resolveTests(failingTests(detail), files), changed, cfg.infraPatterns).cause;
+  }, Date.now() - 7 * DAY); // the rates need a week; classification stops at the window
   const children = opts.children ?? new Set<ChildProcess>(), stopping = opts.stopping ?? (() => false), step = async (what: string, fn: () => Promise<unknown>) => {
     try { await fn(); } catch (e) { out(`observer: ${what} failed: ${firstLine(String((e as Error).message ?? e))}`); log(root, null, 'observer-error', `${what}: ${firstLine(String((e as Error).message ?? e))}`); }
   };
@@ -601,6 +602,7 @@ export async function observe(root: string, opts: ObserveOptions & { watch?: boo
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   const profile = { last: null as string | null };
+  let pollSec = DEFAULT_OBSERVER.pollSec;
   try {
     for (;;) {
       try { await observeOnce(root, { ...opts, out, children, profile, stopping: () => stopping }); } catch (e) {
@@ -610,8 +612,8 @@ export async function observe(root: string, opts: ObserveOptions & { watch?: boo
         try { log(root, null, 'observer-error', `pass: ${why}`); } catch {}
       }
       if (!opts.watch || stopping) break;
-      const cfg = observerConfig(loadConfig(root), opts);
-      for (let t = 0; t < cfg.pollSec * 1000 && !stopping; t += 1000) await sleep(1000);
+      try { pollSec = observerConfig(loadConfig(root), opts).pollSec; } catch {} // a broken config.json keeps the last poll interval
+      for (let t = 0; t < pollSec * 1000 && !stopping; t += 1000) await sleep(1000);
       if (stopping) break;
     }
   } finally {

@@ -41,10 +41,10 @@ export function passKind(detail: string, endEvent: string, cause: Cause): PassKi
   if (endEvent === 'resolve-failed') return /^keep-check:/.test(detail) ? 'keep-check' : 'resolver-failed'; // a resolver run's own keep-lines check
   if (cause === 'infra' || cause === 'setup' || cause === 'conflict-loop' || cause === 'untouched') return null;
   if (/^The merge resolution lost lines/.test(detail)) return 'keep-check';
+  if (/^(builder failed|commit your work)/.test(detail)) return 'builder-failed'; // before the evaluator patterns: its stderr may have a line starting "FAILED "
   if (/^Evaluator: (evaluator failed|evaluator output is not|verdict needs)/.test(detail)) return 'evaluator-run-failed';
   if (/^(Evaluator:|FAILED |CHEATING:|BLOCKING:)/m.test(detail)) return 'evaluator-rejected';
   if (cause === 'own' && /^test command `/.test(detail)) return 'gate-failed';
-  if (/^(builder failed|commit your work)/.test(detail)) return 'builder-failed';
   return null;
 }
 const roleOfKind = (k: PassKind, endEvent: string): Role => (endEvent === 'resolve-failed' ? 'resolver' : k === 'evaluator-run-failed' ? 'evaluator' : 'builder');

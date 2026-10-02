@@ -179,6 +179,8 @@ test('prompt review end to end: a failed pass is reviewed once, and only that mo
   const events = () => readFileSync(state('log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { feature: string | null; event: string; detail: string });
   const NOTE = 'Create a.txt at the repository root, then run git add and git commit.';
   assert.equal(cli('init', '--test', 'true').status, 0);
+  const cfgFile = join(repo, '.fact-os/config.json');
+  writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), observer: { promptReview: { everyMinutes: 0 } } })); // no throttle: "once" below is once per pass
   assert.match(readFileSync(join(repo, '.git/info/exclude'), 'utf8'), /\.fact-os\/prompt-notes\//);
   writeFileSync(state('features.json'), JSON.stringify({ features: [F('a')] }));
   writeFileSync(env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'nothing was committed at the root' }], cheating: [] }] }));

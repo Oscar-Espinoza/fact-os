@@ -30,6 +30,7 @@ test('passKind: what a prompt review is for, and what it is not', () => {
   assert.equal(passKind('keep-check: 3 lines lost', 'resolve-failed', 'unknown'), 'keep-check', 'the resolver run\'s own keep-lines check');
   assert.equal(passKind('commit your work: no commits', 'failed', 'builder'), 'builder-failed');
   assert.equal(passKind('builder failed: timed out', 'failed', 'builder'), 'builder-failed');
+  assert.equal(passKind('builder failed: exit 1: npm ERR!\nFAILED to install x', 'failed', 'builder'), 'builder-failed', 'stderr with a line starting FAILED is not an evaluator rejection');
   assert.equal(passKind('prepare `p` exited 1', 'failed', 'setup'), null);
   assert.equal(passKind('merge conflict with main: too many base refreshes (5)', 'stuck', 'conflict-loop'), null);
 });

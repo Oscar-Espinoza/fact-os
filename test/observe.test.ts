@@ -649,6 +649,13 @@ test('observe --watch reports a failing pass and goes on with the next one', asy
     const done = observe(root, { watch: true, out: (l) => out.push(l) });
     for (let i = 0; i < 50 && !out.some((l) => /pass failed/.test(l)); i++) await new Promise((r) => setTimeout(r, 100));
     assert.ok(out.some((l) => /pass failed/.test(l)), out.join('\n'));
+    // a broken config.json is reported at every poll too, and the loop keeps its poll interval
+    const cfgFile = join(root, '.fact-os/config.json'), cfgText = readFileSync(cfgFile, 'utf8');
+    writeFileSync(cfgFile, '{not json');
+    const failures = () => out.filter((l) => /pass failed/.test(l)).length, n0 = failures();
+    for (let i = 0; i < 60 && failures() < n0 + 2; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(failures() >= n0 + 2, out.join('\n'));
+    writeFileSync(cfgFile, cfgText);
     writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [] }));
     for (let i = 0; i < 60 && !existsSync(observerPaths(root).state); i++) await new Promise((r) => setTimeout(r, 100));
     assert.ok(existsSync(observerPaths(root).state), 'the next pass ran');
