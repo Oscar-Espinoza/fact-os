@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { DEFAULT_PROFILES, profiles, profileNames, validProfile, normalizeProfile, resolveRole, isRisky, escalates, roleTable, profileProblems, profileLabel } from '../lib/profiles.ts';
+import { DEFAULT_PROFILES, profiles, profileNames, validProfile, normalizeProfile, resolveRole, isRisky, escalates, roleTable, profileProblems, profileLabel, riskFamilies } from '../lib/profiles.ts';
 import type { Config } from '../lib/types.ts';
 
 const C = (o: Partial<Config> = {}): Config => ({ ...DEFAULT_CONFIG, ...o });
@@ -55,19 +55,27 @@ test('validProfile / normalizeProfile: null and known names; "opus" and "default
   assert.deepEqual([null, 'opus', 'fable-sonnet', 'mine'].map(profileLabel), ['Opus', 'Opus', 'Fable + Sonnet', 'mine']);
 });
 
-test('isRisky: an explicit risk tag wins; untagged features go by keywords', () => {
+test('isRisky: an explicit risk tag wins; untagged, a title keyword or two keyword families in the description', () => {
   assert.equal(isRisky({ ...plain, risk: 'high' }), true);
   assert.equal(isRisky({ ...risky, risk: 'normal' }), false, 'explicit non-high tag wins over keywords');
   assert.equal(isRisky({ ...risky, risk: 'low' }), false);
-  for (const t of ['Money transfer', 'Payment page', 'Payments', 'Refunds', 'refunded orders', 'Price rules', 'Pricing tiers', 'Invoice PDF', 'invoicing', 'Tax rates',
-    'taxes', 'Permission matrix', 'permissions', 'Auth', 'authn flow', 'authz checks', 'Authentication', 'authorization', 'authorisation', 'API tokens', 'token refresh',
-    'Tenant scoping', 'multi-tenant', 'tenants', 'RLS policies', 'rls', 'DB migration', 'migrations', 'migrate users', 'concurrency limits', 'concurrent edits',
-    'Row lock', 'locking', 'locks', 'deadlock', 'race condition', 'races', 'order state machine', 'State-machine'])
+  for (const t of ['Money transfer', 'Payment page', 'Payments', 'Refunds', 'refunded orders', 'refundable items', 'Price rules', 'Pricing tiers', 'Invoice PDF',
+    'invoicing', 'Tax rates', 'taxes', 'Permission matrix', 'permissions', 'Auth', 'authn flow', 'authz checks', 'OAuth login', 'oauth2 callback', 'Authentication',
+    'authenticate users', 'unauthenticated requests', 'authorization', 'authorizations', 'authorized users', 'unauthorized access', 'unauthorization page',
+    'authorisation', 'JWT signing', 'API keys', 'api key rotation', 'access token', 'refresh tokens', 'Tenant scoping', 'multi-tenant', 'tenants', 'RLS policies',
+    'rls', 'DB migration', 'migrations', 'migrate users', 'concurrency limits', 'concurrent edits', 'Row lock', 'locking', 'locks', 'deadlock', 'race condition',
+    'races', 'order state machine', 'State-machine'])
     assert.equal(isRisky({ title: t, description: '' }), true, t);
   for (const t of ['Author page', 'authored posts', 'Block editor', 'clock widget', 'blocks', 'Trace viewer', 'braces', 'pricey', 'syntax', 'taxonomy', 'stateful machine',
-    'tokenizer', 'permissive', 'migratory birds', 'unlocked']) assert.equal(isRisky({ title: t, description: '' }), false, t);
-  assert.equal(isRisky({ title: 'Checkout', description: 'Charges the PAYMENT method' }), true, 'description, case-insensitive');
+    'tokenizer', 'permissive', 'migratory birds', 'unlocked', 'design tokens', 'Theme tokens', 'token list', 'update pnpm-lock.yaml', 'regenerate bun.lock',
+    'commit the lock file', 'lockfile check', 'optimistic-lock helper', 'Checkout copy', 'Login page'])
+    assert.equal(isRisky({ title: t, description: '' }), false, t);
+  assert.equal(isRisky({ title: 'Settings page', description: 'A long text that mentions the payment settings once.' }), false, 'one family in the description is not enough');
+  assert.equal(isRisky({ title: 'Settings page', description: 'Payment, payments and refunds.\nMore payment text.' }), true, 'two families: payment and refund');
+  assert.equal(isRisky({ title: 'Settings page', description: 'PAYMENT methods and the payments table, payment again.' }), false, 'repeating one family is still one');
+  assert.equal(isRisky({ title: 'Checkout', description: 'Charges the PAYMENT method; needs a DB MIGRATION' }), true, 'description, case-insensitive');
   assert.equal(isRisky({ title: '', description: '' }), false);
+  assert.deepEqual(riskFamilies('A refund needs a migration and an auth check; design tokens stay'), ['refund', 'auth', 'migration']);
 });
 
 test('escalates: only a profile whose builder has effortHigh, only for risky features', () => {

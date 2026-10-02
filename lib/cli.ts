@@ -8,7 +8,7 @@ import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLoc
 import { analyze, validate, SLUG } from './ready.ts';
 import { STATUSES, IN_FLIGHT, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
-import { profileNames, profileLabel, profileProblems, roleTable } from './profiles.ts';
+import { profileNames, profileLabel, profileProblems, roleTable, riskyOpen } from './profiles.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const USAGE = `usage: ${NAME} <command>
@@ -80,6 +80,8 @@ function status(): void {
 }
 
 const profileLine = (p: string | null) => `${p ?? 'opus'} (${profileLabel(p)})`;
+const riskyLine = (features: Feature[]) => { const r = riskyOpen(features);
+  return `risky: ${r.risky} of ${r.open} open features would get the builder's effortHigh (a risk tag, a keyword in the title, or 2+ keyword families in the description)`; };
 
 async function done(id: string | undefined): Promise<void> {
   const root = needRoot();
@@ -140,6 +142,7 @@ function doctor(): number {
   for (const p of problems) console.log(`✗ ${p}`);
   console.log(problems.length ? `${problems.length} problem(s)` : `ok: ${features.length} features, ${tasks.length} human tasks`);
   if (cr.ok) console.log(`model profile: ${profileLine(cr.control.profile ?? null)}`);
+  if (!problems.length) console.log(riskyLine(features as unknown as Feature[]));
   return problems.length ? 1 : 0;
 }
 
@@ -161,9 +164,9 @@ async function control(cmd: string, args: string[]): Promise<void> {
     if (args.length) throw new Error(`usage: ${NAME} ${cmd}`);
     patch = { paused: cmd === 'pause-all' };
   }
-  const config = loadConfig(root), def = Math.max(1, config.maxParallel), before = readControlFile(root);
+  const config = loadConfig(root), def = Math.max(1, config.maxParallel), before = readControlFile(root, config);
   const c = await writeControl(root, patch, 'cli', config);
-  if (!before.ok) console.log(`note: ${before.error}; rewritten (the other setting is back to its default)`);
+  if (!before.ok) console.log(`note: ${before.error}; rewritten (the other settings are back to their defaults)`);
   const running = load(root).features.filter((f) => IN_FLIGHT.includes(f.status)).length, limit = effectiveLimit(c, config);
   const state = c.paused ? 'paused: no new features start' : limit === 0 ? 'lanes 0: no new features start' : `up to ${limit} in flight`;
   const lanes = c.maxParallel == null ? `${def} (default)` : `${c.maxParallel} (default ${def})`;
@@ -178,12 +181,16 @@ async function control(cmd: string, args: string[]): Promise<void> {
 // The active profile and what each role runs with under it (new launches only: running features keep the one they started with).
 async function showProfile(root: string, config: Config, foreman?: boolean): Promise<void> {
   const cr = readControlFile(root, config), { observerConfig } = await import('./observe.ts');
-  if (!cr.ok) console.log(`note: ${cr.error}; the foreman keeps its last good profile`);
-  const p = cr.ok ? cr.control.profile ?? null : null;
-  console.log(`profile ${profileLine(p)}${foreman === undefined ? '' : `: applies to new launches${foreman ? '; running features keep theirs' : ''}`}`);
-  for (const r of roleTable(config, p, observerConfig(config, { agent: true }).agent))
-    console.log(`  ${r.role.padEnd(11)}${(r.model ?? '-').padEnd(8)}${r.effort ?? '-'}${r.effortHigh ? ` (${r.effortHigh} when risky)` : ''}`);
+  if (!cr.ok) console.log(`profile unknown: ${cr.error}; the foreman keeps its last good profile (rewrite it with ${NAME} profile <name|default>)`);
+  else {
+    const p = cr.control.profile ?? null, agentOn = !!config.observer?.agent; // observer rows: only with an agent, else what --agent would use
+    console.log(`profile ${profileLine(p)}${foreman === undefined ? '' : `: applies to new launches${foreman ? '; running features keep theirs' : ''}`}`);
+    for (const r of roleTable(config, p, observerConfig(config, { agent: true }).agent))
+      console.log(`  ${r.role.padEnd(11)}${(r.model ?? '-').padEnd(8)}${r.effort ?? '-'}${r.effortHigh ? ` (${r.effortHigh} when risky)` : ''}${
+        !agentOn && (r.role === 'observer' || r.role === 'curator') ? ' (observe --agent)' : ''}`);
+  }
   console.log(`profiles: ${profileNames(config).join(', ')}`);
+  console.log(riskyLine(load(root).features));
 }
 
 // Claude Code hook: never prints, never fails.

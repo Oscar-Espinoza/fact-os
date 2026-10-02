@@ -35,19 +35,44 @@ export const normalizeProfile = (x: string | null): string | null => (x === null
 
 // ---- risk: the builder's effortHigh ----
 
-// Word-boundary patterns (case-insensitive) over a feature's title and description. "auth" never matches "author", "lock"
-// never "block"/"clock", "race" never "trace"/"brace".
-export const RISK_KEYWORDS: string[] = ['money', 'payments?', 'refund(s|ed|ing)?', 'prices?', 'priced', 'pricing', 'invoic(e|es|ed|ing)',
-  'tax(es|ed|ing)?', 'permissions?', 'auth[nz]?', 'authenticat(e|es|ed|ing|ion)', 'authori[sz](e|es|ed|ing|ation)', 'tokens?', 'tenants?',
-  'tenancy', 'rls', 'migrations?', 'migrat(e|es|ed|ing)', 'concurren(cy|t|tly)', '(dead)?locks?', 'locked', 'locking', 'races?',
-  'state[ -]machines?'];
-const RISK = new RegExp(`\\b(${RISK_KEYWORDS.join('|')})\\b`, 'i');
+// Keyword families, each a case-insensitive whole-word pattern over a feature's title or description. "auth" never matches
+// "author"; "token" only in its auth senses (an access/refresh/API/session token, a JWT, an API key), never "design tokens";
+// "lock" never "block"/"clock", a lock file ("bun.lock", "pnpm-lock.yaml", "lockfile", "lock file") or "-lock"; "race"
+// never "trace"/"brace".
+export const RISK_KEYWORDS: Record<string, string> = {
+  money: 'money',
+  payment: 'payments?',
+  refund: 'refund(s|ed|ing|able)?',
+  price: 'prices?|priced|pricing',
+  invoice: 'invoic(e|es|ed|ing)',
+  tax: 'tax(es|ed|ing)?',
+  permission: 'permissions?',
+  auth: 'o?auth[nz]?\\d*|(un|re)?authenticat(e|es|ed|ing|ion|ions)|(un)?authori[sz](e|es|ed|ing|ation|ations)',
+  token: 'jwts?|api[ -]keys?|(access|refresh|auth|bearer|api|session|csrf|id)[ -]tokens?',
+  tenant: 'tenants?|tenancy|multi-tenant',
+  rls: 'rls',
+  migration: 'migrations?|migrat(e|es|ed|ing)',
+  concurrency: 'concurren(cy|t|tly)',
+  lock: '(?<![-.])(dead)?lock(s|ed|ing)?(?![ -]?files?\\b)',
+  race: 'races?|race[ -]conditions?',
+  'state machine': 'state[ -]machines?',
+};
+const FAMILIES = Object.entries(RISK_KEYWORDS).map(([name, re]) => [name, new RegExp(`\\b(${re})\\b`, 'i')] as const);
+// The keyword families a text mentions.
+export const riskFamilies = (text: string): string[] => FAMILIES.filter(([, re]) => re.test(text)).map(([name]) => name);
 
-// An explicit tag wins ("high" = risky, any other value = not); without one, the keyword heuristic decides.
+// An explicit tag wins ("high" = risky, any other value = not). Untagged: a keyword in the title, or at least two distinct
+// keyword families in the description (long descriptions mention a migration or a payment in passing; one is not enough).
 export function isRisky(f: Pick<Feature, 'title' | 'description'> & { risk?: unknown }): boolean {
   if (f.risk !== undefined) return f.risk === 'high';
-  return RISK.test(`${f.title || ''}\n${f.description || ''}`);
+  return riskFamilies(f.title || '').length > 0 || riskFamilies(f.description || '').length >= 2;
 }
+
+// Not-merged features the builder would escalate for (under a profile with effortHigh), for `fact-os profile` and doctor.
+export const riskyOpen = (features: (Parameters<typeof isRisky>[0] & Pick<Feature, 'status'>)[]): { risky: number; open: number } => {
+  const open = features.filter((f) => f.status !== 'merged');
+  return { risky: open.filter(isRisky).length, open: open.length };
+};
 
 // ---- resolution ----
 

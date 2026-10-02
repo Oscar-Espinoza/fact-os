@@ -382,7 +382,8 @@ test('CLI: profile <name|default> writes control.json and prints the role table;
   assert.match(r.stdout, /^profile fable-sonnet \(Fable \+ Sonnet\): applies to new launches$/m);
   assert.match(r.stdout, /^ {2}builder +sonnet +medium \(high when risky\)$/m);
   assert.match(r.stdout, /^ {2}evaluator +fable +high$/m);
-  assert.match(r.stdout, /^ {2}curator +fable +medium$/m);
+  assert.match(r.stdout, /^ {2}curator +fable +medium \(observe --agent\)$/m, 'no observer agent configured: labelled');
+  assert.match(r.stdout, /^risky: 0 of 2 open features would get the builder's effortHigh/m);
   assert.match(r.stdout, /^profiles: opus, fable-sonnet$/m);
   r = s.cli('profile');
   assert.equal(r.status, 0, r.stderr);
@@ -404,10 +405,17 @@ test('CLI: profile <name|default> writes control.json and prints the role table;
   assert.equal(s.cli('profile', 'opus').status, 0);
   assert.match(s.cli('help').stdout, /profile \[<name\|default>\]/);
   // doctor: an unknown profile in the file, and a bad config.profiles
-  writeFileSync(s.control, '{"profile":"nope"}');
+  writeFileSync(s.control, '{"profile":"nope","paused":true}');
   r = s.cli('doctor');
   assert.equal(r.status, 1);
   assert.match(r.stdout, /unknown profile "nope"/);
+  r = s.cli('profile');
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /^profile unknown: .*unknown profile "nope".*keeps its last good profile/m, 'not shown as opus');
+  assert.doesNotMatch(r.stdout, /^profile opus/m);
+  r = s.cli('lanes', '2');
+  assert.match(r.stdout, /^note: .*unknown profile "nope".*; rewritten/m, 'a control command says it rewrote the file');
+  assert.deepEqual([ctl().paused, ctl().maxParallel, ctl().profile], [false, 2, null]);
   const cfgFile = join(s.repo, '.fact-os/config.json');
   writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), profiles: { opus: {}, x: { builder: { model: 1 } } } }));
   r = s.cli('doctor');
@@ -448,7 +456,10 @@ test('fable-sonnet: a risky feature\'s builder gets effortHigh (tag or keywords)
   const s = setup(t, [F('pay', { title: 'Refund flow', description: 'Refund an order' }), F('tag', { risk: 'high' }),
     F('calm', { title: 'Payment page copy', risk: 'normal' }), F('list')]);
   assert.equal(s.cli('profile', 'fable-sonnet').status, 0);
-  assert.equal(s.cli('doctor').status, 0, 'doctor accepts risk');
+  const doc = s.cli('doctor');
+  assert.equal(doc.status, 0, 'doctor accepts risk');
+  assert.match(doc.stdout, /^risky: 2 of 4 open features would get the builder's effortHigh/m);
+  assert.match(s.cli('profile').stdout, /^risky: 2 of 4 open features/m);
   const r = s.cli('run');
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const build = (id: string) => launches(s.repo).filter((x) => x.id === id && x.mode === 'build').map((x) => [x.model, x.effort]);
@@ -458,21 +469,43 @@ test('fable-sonnet: a risky feature\'s builder gets effortHigh (tag or keywords)
   assert.deepEqual(build('list'), [['sonnet', 'medium']]);
   const ev = s.events();
   assert.ok(ev.some((e) => e.event === 'control' && e.detail === 'at start: running, lanes default, profile fable-sonnet; launch limit 3'));
-  assert.match(ev.find((e) => e.feature === 'pay' && e.event === 'prompt')!.detail, /^builder model=sonnet effort=high .* profile=fable-sonnet risk=high$/);
+  assert.match(ev.find((e) => e.feature === 'pay' && e.event === 'prompt')!.detail, /^builder model=sonnet effort=high .* profile=fable-sonnet risk=high effortBase=medium$/);
   assert.match(ev.find((e) => e.feature === 'list' && e.event === 'prompt')!.detail, /effort=medium .* profile=fable-sonnet$/);
 });
 
-test('an unknown profile in control.json during a run keeps the last good one (and its models)', async (t) => {
-  const s = setup(t, [F('a'), F('b', { priority: 2 })]);
-  await writeControl(s.repo, { paused: true, profile: 'fable-sonnet' }, 'cli');
+test('a resolver run inside a pass uses the pass\'s profile after a mid-pass switch', async (t) => {
+  const s = setup(t, [F('a')], { delayMs: 300, scenario: { a: 'slow,base-conflict' } });
+  const cfgFile = join(s.repo, '.fact-os/config.json');
+  writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), refreshBeforeTest: true, resolver: {} }));
+  assert.equal(s.cli('profile', 'fable-sonnet').status, 0);
+  const run = s.start();
+  assert.ok(await until(() => s.status().a === 'building' && s.at('a', 'prompt') >= 0), run.out());
+  assert.equal(launches(s.repo).length, 0, 'still in the build');
+  assert.equal(s.cli('profile', 'default').status, 0);
+  assert.equal(await run.exit, 0, run.out());
+  assert.ok(s.at(null, 'control', 1) >= 0 && s.at(null, 'control', 1) < s.at('a', 'resolving'), 'switched before the resolver ran');
+  const of = (mode: string) => launches(s.repo).filter((x) => x.mode === mode).map((x) => [x.model, x.effort]);
+  assert.deepEqual(of('build'), [['sonnet', 'medium']]);
+  assert.deepEqual(of('resolve'), [['sonnet', 'high']], 'the pass\'s fable-sonnet resolver, not opus mode\'s (no --model)');
+  assert.deepEqual(of('eval'), [['fable', 'high']]);
+  assert.equal(s.status().a, 'merged');
+});
+
+test('an unknown profile in control.json during a run keeps the last good control (running, fable-sonnet) for new launches', async (t) => {
+  const s = setup(t, [F('a'), F('b', { priority: 2 })], { delayMs: 300, scenario: { a: 'slow' } });
+  await writeControl(s.repo, { maxParallel: 1, profile: 'fable-sonnet' }, 'cli');
   const run = s.start('--watch');
-  assert.ok(await until(() => s.events().some((e) => e.event === 'paused-launch')), run.out());
-  writeFileSync(s.control, '{"paused":false,"profile":"nope"}');
+  assert.ok(await until(() => s.status().a === 'building'), run.out());
+  writeFileSync(s.control, '{"paused":false,"maxParallel":1,"profile":"nope"}'); // during a's build
   assert.ok(await until(() => s.events().some((e) => e.event === 'control-invalid')), run.out());
-  assert.match(s.events().find((e) => e.event === 'control-invalid')!.detail, /unknown profile "nope".*keeping the last good control \(paused, lanes default, profile fable-sonnet\)/);
-  await sleep(200);
-  assert.equal(launches(s.repo).length, 0, 'still paused');
+  assert.match(s.events().find((e) => e.event === 'control-invalid')!.detail, /unknown profile "nope".*keeping the last good control \(running, lanes 1, profile fable-sonnet\)/);
+  assert.ok(await until(() => launches(s.repo).some((x) => x.id === 'b' && x.mode === 'eval'), 20000), run.out());
+  assert.match(readFileSync(s.control, 'utf8'), /"nope"/, 'the file is still invalid');
+  const of = (id: string) => launches(s.repo).filter((x) => x.id === id).map((x) => [x.mode, x.model]);
+  assert.deepEqual(of('a'), [['build', 'sonnet'], ['eval', 'fable']]);
+  assert.deepEqual(of('b'), [['build', 'sonnet'], ['eval', 'fable']], 'b launched under the kept profile');
+  assert.ok(s.at('b', 'launch') > s.at(null, 'control-invalid'));
   writeFileSync(s.control, '{"paused":false,"profile":"fable-sonnet"}');
   assert.equal(await run.exit, 0, run.out());
-  assert.deepEqual([...new Set(launches(s.repo).map((x) => x.model))].sort(), ['fable', 'sonnet']);
+  assert.deepEqual(s.status(), { a: 'merged', b: 'merged' });
 });
