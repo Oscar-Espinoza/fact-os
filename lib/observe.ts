@@ -13,13 +13,13 @@ import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAli
 import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import { SLUG } from './ready.ts';
-import { passesOf, promptRates, reviewFailures, updateNotes, fileTemplateTasks, promptSummary, renderPromptSection, type PromptRate, type PromptReview } from './promptreview.ts';
+import { passesOf, promptRates, reviewFailures, updateNotes, fileTemplateTasks, promptSummary, renderPromptSection, type PromptState } from './promptreview.ts';
 import { readNotes } from './notes.ts';
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
 
 export const DEFAULT_OBSERVER: ObserverConfig = { pollSec: 60, retry: true, maxRetries: 1, infraPatterns: [], recurring: 2,
   agent: null, lessonsMaxBytes: 12000, curateEveryHours: 4,
-  improve: true, improveEveryHours: 6, maxOpenImprovements: 2, promptReview: { enabled: true, maxPerPass: 6, notesMaxBytes: 3000 } };
+  improve: true, improveEveryHours: 6, maxOpenImprovements: 2, promptReview: { enabled: true, maxPerPass: 6, notesMaxBytes: 3000, everyMinutes: 30, maxPerDay: 24 } };
 export const DEFAULT_AGENT: RoleConfig = { model: 'opus', effort: 'high' };
 const INFRA = ['out of shared memory', 'no space left on device', 'enospc', 'too many clients', 'econnrefused',
   'connection terminated unexpectedly', 'terminating connection due to administrator command',
@@ -251,7 +251,7 @@ export function runCosts(runsDir: string): RunCost[] {
 
 // ---- state ----
 
-export interface ObserverState {
+export interface ObserverState extends PromptState {
   offset: number;                               // bytes of log.jsonl already read
   retried: Record<string, string[]>;            // feature → signatures it was sent back for
   diagnoses: Diagnosis[];                       // newest last, capped
@@ -263,8 +263,6 @@ export interface ObserverState {
   improveAt?: string;                           // last improver run
   improvements: string[];                       // feature ids the improver queued
   agents?: Era[];                               // agent effectiveness per prompt version, last 7 days
-  promptReviews?: Record<string, PromptReview>; // why failed passes failed, by run (`<feature>/<tag>`), last 14 days
-  promptRates?: PromptRate[];                   // passes that ended well and badly per model, role and notes version, last 7 days
 }
 const fresh = (): ObserverState => ({ offset: 0, retried: {}, diagnoses: [], alerts: [], lastEvent: {}, bounces: [], improvements: [] });
 export const observerPaths = (root: string) => { const d = paths(root).dir; return { state: join(d, 'observer.json'), report: join(d, 'observer-report.md'), pid: join(d, '.observer') }; };
@@ -291,7 +289,8 @@ export function readNew(file: string, offset: number): { events: LogEvent[]; off
 // ---- one pass ----
 
 // `profile`: the observe loop's memory of the last valid control.json profile, kept when the file turns invalid.
-export interface ObserveOptions { agent?: boolean; out?: (s: string) => void; children?: Set<ChildProcess>; profile?: { last: string | null } }
+// `stopping`: true once the observer got a stop signal (the loop sets it): no new agent batch starts.
+export interface ObserveOptions { agent?: boolean; out?: (s: string) => void; children?: Set<ChildProcess>; profile?: { last: string | null }; stopping?: () => boolean }
 
 export async function observeOnce(root: string, opts: ObserveOptions = {}): Promise<ObserverState> {
   const out = opts.out || ((s: string) => console.log(s));
@@ -393,23 +392,37 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
 
   for (const [file, n] of hotFiles(state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < DAY)))
     if (n >= 5) alert(`merge conflicts in ${file} keep sending features that passed evaluation back to the builder (5 or more in 24h); make it merge-friendly`, now(), DAY);
-  // Failed passes: review each once (the observer's role model, read-only), then fold the answers into per-model notes and human
-  // tasks (the curator's role model tidies a notes file that outgrew its cap).
-  const all = readNew(P.log, 0).events, feat = (id: string) => ({ title: byId.get(id)?.title ?? id, branch: byId.get(id)?.branch || config.branchPrefix + id });
-  const passes = passesOf(all, (id, detail) => {
-    const { files, changed } = /^test command `/.test(detail) ? filesOf(byId.get(id)) : { files: [], changed: [] };
-    return classify(detail, resolveTests(failingTests(detail), files), changed, cfg.infraPatterns).cause;
+  // Failed passes: review each once (the curator's role model, read-only), then fold the answers into per-model notes and human
+  // tasks. The reviews are saved before anything else can fail: they cost money. A failing step is reported, not fatal.
+  const all = readNew(P.log, 0), feat = (id: string) => ({ title: byId.get(id)?.title ?? id, branch: byId.get(id)?.branch || config.branchPrefix + id });
+  const causes = new Map<string, Cause>();
+  const passes = passesOf(all.events, (id, detail) => { // memoized: a gate failure costs git calls
+    const key = `${id}\n${detail}`;
+    if (!causes.has(key)) {
+      // An evaluator's feedback or a keep-check report may quote anything (ECONNREFUSED): only a gate failure and the foreman's own
+      // failures are read for infrastructure patterns.
+      const gate = /^test command `/.test(detail);
+      const { files, changed } = gate ? filesOf(byId.get(id)) : { files: [], changed: [] };
+      causes.set(key, !gate && /^(Evaluator:|FAILED |CHEATING:|BLOCKING:)/m.test(detail) ? 'own' : /^The merge resolution lost lines/.test(detail) ? 'unknown'
+        : classify(detail, resolveTests(failingTests(detail), files), changed, cfg.infraPatterns).cause);
+    }
+    return causes.get(key)!;
   }, Date.now() - 7 * DAY);
+  const children = opts.children ?? new Set<ChildProcess>(), stopping = opts.stopping ?? (() => false), step = async (what: string, fn: () => Promise<unknown>) => {
+    try { await fn(); } catch (e) { out(`observer: ${what} failed: ${firstLine(String((e as Error).message ?? e))}`); log(root, null, 'observer-error', `${what}: ${firstLine(String((e as Error).message ?? e))}`); }
+  };
   if (cfg.agent && cfg.promptReview.enabled) {
-    await reviewFailures(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg.promptReview, state, passes, feat, out, opts.children ?? new Set());
-    await updateNotes(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg.promptReview, state, out, opts.children ?? new Set());
-    await fileTemplateTasks(root, state, out);
+    const curator = resolveRole(config, profile, 'curator', { agent: cfg.agent }), io = { out, children, stopping };
+    await step('prompt review', () => reviewFailures(root, config, curator, cfg.promptReview, state, passes, feat, io));
+    writeJsonAtomic(O.state, state);
+    if (!stopping()) await step('prompt notes', () => updateNotes(root, config, curator, cfg.promptReview, state, io));
+    await step('template tasks', () => fileTemplateTasks(root, state, out));
   }
   state.promptRates = promptRates(passes);
-  if (cfg.agent) await curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, opts.children ?? new Set());
-  if (cfg.agent && cfg.improve) await improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, opts.children ?? new Set());
+  if (cfg.agent) await curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, children);
+  if (cfg.agent && cfg.improve) await improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, children);
 
-  state.agents = agentStats(readNew(P.log, 0).events, runCosts(P.runs), Date.now() - 7 * DAY);
+  state.agents = agentStats([...all.events, ...readNew(P.log, all.offset).events], runCosts(P.runs), Date.now() - 7 * DAY); // what this pass logged too
   state.diagnoses = state.diagnoses.slice(-500);
   state.bounces = state.bounces.filter((b) => Date.now() - Date.parse(b.ts) < 7 * DAY);
   state.alerts = state.alerts.filter((a) => Date.now() - Date.parse(a.ts) < 7 * DAY);
@@ -590,7 +603,12 @@ export async function observe(root: string, opts: ObserveOptions & { watch?: boo
   const profile = { last: null as string | null };
   try {
     for (;;) {
-      await observeOnce(root, { ...opts, out, children, profile });
+      try { await observeOnce(root, { ...opts, out, children, profile, stopping: () => stopping }); } catch (e) {
+        if (!opts.watch) throw e;
+        const why = firstLine(String((e as Error).message ?? e)); // a bad pass must not end a watching observer: report it and try again at the next poll
+        out(`observer: pass failed: ${why}`);
+        try { log(root, null, 'observer-error', `pass: ${why}`); } catch {}
+      }
       if (!opts.watch || stopping) break;
       const cfg = observerConfig(loadConfig(root), opts);
       for (let t = 0; t < cfg.pollSec * 1000 && !stopping; t += 1000) await sleep(1000);

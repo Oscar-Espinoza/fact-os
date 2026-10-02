@@ -241,7 +241,7 @@ test('state carries the prompt summary: causes per model and role, top suggestio
       [{ text: 'Run the typecheck.', n: 1, target: 'briefs' }], { text: '- Run the typecheck.', bytes: 20 }]);
     rmSync(join(dir, 'observer.json'));
     writeFileSync(join(dir, 'observer.json'), JSON.stringify({ offset: 0, retried: {}, diagnoses: [], alerts: [] }));
-    assert.deepEqual(((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!.observer!.prompts, { reviewed: 0, invalid: 0, rows: [] }, 'an older observer.json has none');
+    assert.deepEqual(((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!.observer!.prompts, { reviewed: 0, invalid: 0, cost: 0, runs24h: 0, rows: [] }, 'an older observer.json has none');
   } finally { rmSync(join(dir, 'observer.json')); rmSync(join(dir, 'prompt-notes'), { recursive: true }); }
 });
 

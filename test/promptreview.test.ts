@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { passKind, passesOf, nextResult, selectPasses, parseFingerprint, promptFile, parseReview, eligible, promptRates, trend, promptSummary, renderPromptSection, reviewPrompt,
+import { passKind, passesOf, nextResult, selectPasses, parseFingerprint, promptFile, parseReview, eligible, promptRates, trend, promptSummary, renderPromptSection, reviewPrompt, reviewBudget, reviewTimeoutMin,
   type Pass, type PromptReview } from '../lib/promptreview.ts';
 import { mergeNotes, fitNotes, parseNotes, noteBullet, notesBlock, notesHash, notesFile, readNotes, overCap } from '../lib/notes.ts';
 import { promptFingerprint, builderPrompt } from '../lib/foreman.ts';
@@ -27,6 +27,7 @@ test('passKind: what a prompt review is for, and what it is not', () => {
   assert.equal(passKind('test command `g` exited 1:\nout of shared memory', 'failed', 'infra'), null);
   assert.equal(passKind('The merge resolution lost lines that one side added. Put them back', 'failed', 'unknown'), 'keep-check');
   assert.equal(passKind('the resolver failed: x', 'resolve-failed', 'unknown'), 'resolver-failed');
+  assert.equal(passKind('keep-check: 3 lines lost', 'resolve-failed', 'unknown'), 'keep-check', 'the resolver run\'s own keep-lines check');
   assert.equal(passKind('commit your work: no commits', 'failed', 'builder'), 'builder-failed');
   assert.equal(passKind('builder failed: timed out', 'failed', 'builder'), 'builder-failed');
   assert.equal(passKind('prepare `p` exited 1', 'failed', 'setup'), null);
@@ -46,13 +47,15 @@ test('passesOf cuts the log into passes and sorts each one: bad (reviewable), ok
     e(3, 'e', 'prompt', RES), e(6, 'e', 'resolve-failed', 'the resolver failed: exit 1'),
     // f: no builder prompt (the build was skipped); g: passed evaluation then bounced by a conflict; h: before the window
     e(0, 'f', 'launch'), e(1, 'f', 'failed', 'builder failed: timed out'),
+    e(0, 'k', 'launch'), e(0, 'k', 'prompt', B()), e(1, 'k', 'refreshed', 'conflicts in: x.ts'), e(1, 'k', 'resolving', 'x.ts'), e(1, 'k', 'prompt', RES), e(2, 'k', 'resolve-failed', 'keep-check: 3 lines lost'),
+    e(0, 'm', 'launch'), e(0, 'm', 'prompt', B()), e(1, 'm', 'merge-hook-failed', 'mergeHook exited 1'),
     e(0, 'g', 'launch'), e(0, 'g', 'prompt', B()), e(1, 'g', 'testing', 's'), e(2, 'g', 'evaluating'), e(4, 'g', 'refreshed', 'conflicts in: y.ts'),
     e(-5000, 'h', 'launch'), e(-5000, 'h', 'prompt', B()), e(-4990, 'h', 'failed', 'FAILED x'),
     e(20, 'z', 'prompt', B()), e(21, 'z', 'failed', 'FAILED a pass that never started'),
   ];
   const passes = passesOf(events, own, T0 - 3600e3);
   const sum = passes.map((p) => `${p.feature}:${p.outcome}${p.kind ? `:${p.kind}:${p.role}` : ''}`).sort();
-  assert.deepEqual(sum, ['a:bad:evaluator-rejected:builder', 'a:ok', 'b:bad:gate-failed:builder', 'c:other', 'e:bad:resolver-failed:resolver', 'f:other', 'g:ok']);
+  assert.deepEqual(sum, ['a:bad:evaluator-rejected:builder', 'a:ok', 'b:bad:gate-failed:builder', 'c:other', 'e:bad:resolver-failed:resolver', 'f:other', 'g:ok', 'k:bad:keep-check:resolver', 'm:other']);
   const e1 = passes.find((p) => p.feature === 'e')!;
   assert.deepEqual(e1.prompts.map((p) => p.role), ['builder', 'resolver'], 'the resolver run belongs to the pass that hit the conflict');
   assert.equal(passes.find((p) => p.feature === 'a' && p.outcome === 'ok')!.prompts[0]!.notes, 'n1');
@@ -214,7 +217,10 @@ test('promptSummary and the report section: causes, top suggestions, notes and r
   assert.match(md, /- 2× Run the typecheck\. \(briefs\)/);
   assert.match(md, /Notes in force: 2, 41 bytes\./);
   assert.match(md, /\| n1 \| Oct 1 \| 6 \| 1 \(17%\) \| better \|/);
-  assert.deepEqual(renderPromptSection({ reviewed: 0, invalid: 0, rows: [] }, () => ''), []);
+  assert.deepEqual(renderPromptSection({ reviewed: 0, invalid: 0, cost: 0, runs24h: 0, rows: [] }, () => ''), []);
+  const costly = promptSummary({ promptReviews: reviews, promptReviewCost: 1.5, promptReviewRuns: [now, '2020-01-01T00:00:00Z'] }, () => '');
+  assert.deepEqual([costly.cost, costly.runs24h, costly.invalid], [1.5, 1, 1], 'the cost so far, the runs of the last 24 hours, the invalid ones of the last 7 days (not the old review)');
+  assert.match(renderPromptSection(costly, () => '').join('\n'), /Review cost so far: \$1\.50 \(1 review runs in the last 24 hours\)/);
 });
 
 test('reviewPrompt carries the saved prompt, the outcome, the model and the six causes, and shortens a long prompt in the middle', () => {
@@ -224,4 +230,19 @@ test('reviewPrompt carries the saved prompt, the outcome, the model and the six 
   for (const c of ['prompt-missing-info', 'prompt-ambiguous', 'prompt-conflict', 'model-limitation', 'environment', 'spec-error']) assert.ok(p.includes(`- ${c}:`), c);
   for (const t of ['Feature: F1: Cart', 'Model: sonnet', 'the feature\'s own tests failed', 'FAIL cart.test.ts', 'cart.ts | 4', 'it passed: merged', 'HEAD', ' TAIL', 'characters omitted', '/r/runs/F1/1-build.prompt.md']) assert.ok(p.includes(t), t);
   assert.ok(p.length < 30000);
+});
+
+test('reviewBudget: one batch per everyMinutes, at most maxPerDay runs in 24 hours, at most maxPerPass at once; reviews are cut off after at most 20 minutes', () => {
+  const cfg = { enabled: true, maxPerPass: 6, notesMaxBytes: 3000, everyMinutes: 30, maxPerDay: 24 }, t = Date.parse('2026-10-01T12:00:00Z'), ago = (min: number) => new Date(t - min * 60e3).toISOString();
+  assert.deepEqual(reviewBudget(cfg, {}, t), { wait: false, max: 6 }, 'the first batch starts at once');
+  assert.deepEqual(reviewBudget(cfg, { promptReviewAt: ago(10) }, t), { wait: true, max: 0 }, 'a batch ran 10 minutes ago');
+  assert.deepEqual(reviewBudget(cfg, { promptReviewAt: ago(31) }, t), { wait: false, max: 6 });
+  assert.deepEqual(reviewBudget({ ...cfg, everyMinutes: 0 }, { promptReviewAt: ago(0) }, t), { wait: false, max: 6 });
+  const runs = (n: number, min = 60) => Array.from({ length: n }, () => ago(min));
+  assert.equal(reviewBudget(cfg, { promptReviewAt: ago(60), promptReviewRuns: runs(21) }, t).max, 3, 'what is left of the day');
+  assert.equal(reviewBudget(cfg, { promptReviewAt: ago(60), promptReviewRuns: runs(24) }, t).max, 0, 'the day\'s limit');
+  assert.equal(reviewBudget(cfg, { promptReviewAt: ago(60), promptReviewRuns: runs(24, 25 * 60) }, t).max, 6, 'runs older than a day do not count');
+  assert.equal(reviewTimeoutMin({ timeoutMin: null }), 20);
+  assert.equal(reviewTimeoutMin({ timeoutMin: 90 }), 20);
+  assert.equal(reviewTimeoutMin({ timeoutMin: 5 }), 5);
 });

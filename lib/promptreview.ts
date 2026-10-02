@@ -38,7 +38,7 @@ export interface Pass { feature: string; start: string; end: string; endEvent: s
 // Which failure kind a pass ended with (null: not one a prompt review is for). `cause` is the observer's classification of the
 // failure (infrastructure, setup and merge-conflict loops are never a prompt's fault; a gate failure counts only on the feature's own tests).
 export function passKind(detail: string, endEvent: string, cause: Cause): PassKind | null {
-  if (endEvent === 'resolve-failed') return 'resolver-failed';
+  if (endEvent === 'resolve-failed') return /^keep-check:/.test(detail) ? 'keep-check' : 'resolver-failed'; // a resolver run's own keep-lines check
   if (cause === 'infra' || cause === 'setup' || cause === 'conflict-loop' || cause === 'untouched') return null;
   if (/^The merge resolution lost lines/.test(detail)) return 'keep-check';
   if (/^Evaluator: (evaluator failed|evaluator output is not|verdict needs)/.test(detail)) return 'evaluator-run-failed';
@@ -47,7 +47,7 @@ export function passKind(detail: string, endEvent: string, cause: Cause): PassKi
   if (/^(builder failed|commit your work)/.test(detail)) return 'builder-failed';
   return null;
 }
-const roleOfKind = (k: PassKind): Role => (k === 'resolver-failed' ? 'resolver' : k === 'evaluator-run-failed' ? 'evaluator' : 'builder');
+const roleOfKind = (k: PassKind, endEvent: string): Role => (endEvent === 'resolve-failed' ? 'resolver' : k === 'evaluator-run-failed' ? 'evaluator' : 'builder');
 
 // The role, model, effort and notes version of a `prompt` event's fingerprint.
 export function parseFingerprint(detail: string): { role: Role; model: string; effort: string; notes: string } | null {
@@ -55,7 +55,7 @@ export function parseFingerprint(detail: string): { role: Role; model: string; e
   return m ? { role: m[1] as Role, model: m[2]!, effort: m[3]!, notes: /\bnotes=(\S+)/.exec(detail)?.[1] ?? '-' } : null;
 }
 
-const ENDS = ['merged', 'ready', 'failed', 'stuck', 'resolve-failed', 'interrupted', 'merge-skipped', 'merge-failed', 'error', 'recovered', 'unparked', 'refreshed'];
+const ENDS = ['merged', 'ready', 'failed', 'stuck', 'resolve-failed', 'interrupted', 'merge-skipped', 'merge-failed', 'merge-hook-failed', 'error', 'recovered', 'unparked', 'refreshed'];
 
 // The passes of every feature in `events` (a pass: `launch` up to its end event), those that ended after `since`. A refresh before
 // the test that merged cleanly, or a conflict a resolver run takes over (`resolving` next), does not end the pass.
@@ -68,7 +68,7 @@ export function passesOf(events: Pick<LogEvent, 'ts' | 'feature' | 'event' | 'de
     let cur: Pass | null = null, evaluated = false;
     const close = (end: string, endEvent: string, detail: string, outcome: Pass['outcome'], kind?: PassKind) => {
       if (!cur) return;
-      const role = kind ? roleOfKind(kind) : undefined, has = role && cur.prompts.some((p) => p.role === role);
+      const role = kind ? roleOfKind(kind, endEvent) : undefined, has = role && cur.prompts.some((p) => p.role === role);
       Object.assign(cur, { end, endEvent, detail, outcome: kind && has ? 'bad' : outcome === 'bad' ? 'other' : outcome, ...(kind && has ? { kind, role } : {}) });
       if (Date.parse(end) >= since) out.push(cur);
       cur = null;
@@ -83,7 +83,7 @@ export function passesOf(events: Pick<LogEvent, 'ts' | 'feature' | 'event' | 'de
       if (e.event === 'merged' || e.event === 'ready') close(e.ts, e.event, e.detail, 'ok');
       else if (e.event === 'refreshed') close(e.ts, e.event, e.detail, evaluated ? 'ok' : 'other');
       else if (e.event === 'failed' || e.event === 'stuck' || e.event === 'resolve-failed') {
-        const k = passKind(e.detail, e.event, e.event === 'resolve-failed' ? 'unknown' : causeOf(feature, e.detail));
+        const k = Date.parse(e.ts) < since ? null : passKind(e.detail, e.event, e.event === 'resolve-failed' ? 'unknown' : causeOf(feature, e.detail)); // older passes are dropped: no classification (git) for them
         close(e.ts, e.event, e.detail, k ? 'bad' : 'other', k ?? undefined);
       } else close(e.ts, e.event, e.detail, 'other');
     }
@@ -158,7 +158,7 @@ export function reviewPrompt(i: ReviewInput): string {
     'Read the repository if you need to check what the prompt did or did not tell the model. You are read-only: change nothing.', '',
     `Feature: ${i.feature}: ${i.title}`, `Role: ${i.role}. Model: ${i.model}. Effort: ${i.effort}.`, `How it ended: ${KIND_WORDS[i.kind]}.`,
     `What happened in the feature's next pass: ${i.next}.`, '', 'The outcome:', '```', tail(i.outcome, 4000), '```', '',
-    'What the pass changed (git diff --stat):', '```', i.diffStat || '(nothing)', '```', '',
+    'What the feature\'s branch changes now (git diff --stat, as of now: it may have changed since this pass):', '```', i.diffStat || '(nothing)', '```', '',
     'Choose exactly ONE primary cause:', ...PROMPT_CAUSES.map((c) => `- ${c}: ${CAUSE_HELP[c]}`), '',
     'Be skeptical in both directions: do not blame the prompt for what it said clearly, and do not blame the model for what the prompt left out.',
     `For the three prompt-* causes, "suggestion" is the change to this model's prompt that would have prevented the failure: one or two plain sentences, ` +
@@ -193,7 +193,11 @@ export interface PromptReview { ts: string; feature: string; tag: string; role: 
   noted?: boolean;   // its suggestion went into the model's notes
   filed?: boolean }  // its suggestion went into a human task (a change to the role's template)
 export interface PromptRate { model: string; role: Role; notes: string; since: string; ok: number; bad: number }
-export interface PromptState { promptReviews?: Record<string, PromptReview>; promptRates?: PromptRate[] }
+// What the observer keeps beside the reviews: when the last batch ran and the start of every review run in the last 24 hours
+// (the throttle), the running cost of review runs, and how often a pass's review run failed (it is asked again at most once).
+export interface PromptState { promptReviews?: Record<string, PromptReview>; promptRates?: PromptRate[]; promptReviewAt?: string; promptReviewRuns?: string[];
+  promptReviewCost?: number; promptReviewTries?: Record<string, { n: number; ts: string }> }
+export const MAX_TRIES = 2;
 
 // A prompt-* review whose suggestion is worth keeping: the reviewer is sure of it, or the same kind of failure came again
 // (another review of the same cause for the same model and role; for a template change, any model in that role).
@@ -205,35 +209,62 @@ export function eligible(r: PromptReview, all: PromptReview[], scope: 'model' | 
 
 // ---- running reviews ----
 
-// The agent's own model and effort for the review come from the caller (the `observer` role of the active profile); the run is
-// always read-only (plan mode).
+// A review or tidying run is cut off after this many minutes (the foreman's timeoutMin is often null, and a hung agent would block the observer).
+export const reviewTimeoutMin = (config: Pick<Config, 'timeoutMin'>): number => Math.min(config.timeoutMin ?? 20, 20);
+
+// How many reviews may start now: none within `everyMinutes` of the last batch, and no more than `maxPerDay` review runs in 24 hours.
+export function reviewBudget(cfg: PromptReviewConfig, st: Pick<PromptState, 'promptReviewAt' | 'promptReviewRuns'>, nowMs = Date.now()): { max: number; wait: boolean } {
+  const runs = (st.promptReviewRuns ?? []).filter((t) => nowMs - Date.parse(t) < DAY).length;
+  const wait = !!st.promptReviewAt && nowMs - Date.parse(st.promptReviewAt) < cfg.everyMinutes * 60e3;
+  return { wait, max: wait ? 0 : Math.max(0, Math.min(cfg.maxPerPass, cfg.maxPerDay - runs)) };
+}
+
+// The agent's own model and effort for the review come from the caller (the `curator` role of the active profile); the run is
+// always read-only (plan mode). `stopping`: the observer got a stop signal (no new batch; a run it killed is not counted as a failure).
 type Out = (s: string) => void;
-export async function reviewFailures(root: string, config: Config, agent: RoleConfig, cfg: PromptReviewConfig, state: PromptState, passes: Pass[], feature: (id: string) => { title: string; branch: string }, out: Out, children: Set<ChildProcess>): Promise<number> {
-  const P = paths(root), reviews = state.promptReviews ??= {};
+export interface Io { out: Out; children: Set<ChildProcess>; stopping: () => boolean }
+export async function reviewFailures(root: string, config: Config, agent: RoleConfig, cfg: PromptReviewConfig, state: PromptState, passes: Pass[], feature: (id: string) => { title: string; branch: string }, io: Io): Promise<number> {
+  const P = paths(root), { out, children, stopping } = io, reviews = state.promptReviews ??= {}, tries = state.promptReviewTries ??= {};
   for (const [k, r] of Object.entries(reviews)) if (Date.now() - Date.parse(r.ts) > KEEP) delete reviews[k];
+  for (const [k, t] of Object.entries(tries)) if (Date.now() - Date.parse(t.ts) > KEEP) delete tries[k];
+  state.promptReviewRuns = (state.promptReviewRuns ?? []).filter((t) => Date.now() - Date.parse(t) < DAY);
+  const { max } = reviewBudget(cfg, state);
+  if (!max || stopping()) return 0;
   const keyed = new Map<Pass, ReturnType<typeof reviewKey>>();
   const keyOf = (p: Pass) => { if (!keyed.has(p)) keyed.set(p, reviewKey(P.runs, p)); return keyed.get(p)!; };
-  const todo = selectPasses(passes, { since: Date.now() - REVIEW_WINDOW, max: cfg.maxPerPass, reviewed: (p) => !keyOf(p) || !!reviews[keyOf(p)!.key] });
+  const todo = selectPasses(passes, { since: Date.now() - REVIEW_WINDOW, max, reviewed: (p) => !keyOf(p) || !!reviews[keyOf(p)!.key] || (tries[keyOf(p)!.key]?.n ?? 0) >= MAX_TRIES });
   if (!todo.length) return 0;
+  state.promptReviewAt = now();
   out(`observer: reviewing ${todo.length} failed passes (${todo.map((p) => p.feature).join(', ')})`);
   let done = 0;
+  const failed = (key: string) => { const t = tries[key] ?? { n: 0, ts: now() }; tries[key] = { n: t.n + 1, ts: now() }; };
   const one = async (p: Pass): Promise<void> => {
-    try { await review(p); } catch (e) { out(`observer: review of ${p.feature} failed: ${firstLine(String((e as Error).message ?? e))}`); } // e.g. the prompt file vanished: asked again next pass
+    try { await review(p); } catch (e) { // e.g. the prompt file vanished
+      out(`observer: review of ${p.feature} failed: ${firstLine(String((e as Error).message ?? e))}`);
+      const k = keyOf(p); if (k) failed(k.key);
+    }
   };
   const review = async (p: Pass): Promise<void> => {
     const k = keyOf(p)!, used = p.prompts.filter((x) => x.role === p.role).at(-1)!, branch = feature(p.feature).branch;
     const has = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).code === 0;
     const input: ReviewInput = { feature: p.feature, title: feature(p.feature).title, role: p.role!, model: used.model, effort: used.effort, kind: p.kind!, outcome: p.detail || '(no detail logged)',
       diffStat: has ? git(['diff', '--stat=120', `${config.base}...${branch}`], root).out : '(the branch no longer exists)', next: nextResult(passes, p), prompt: readFileSync(k.file, 'utf8'), file: k.file };
-    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: process.env, input: reviewPrompt(input), children, timeoutMin: config.timeoutMin });
+    state.promptReviewRuns!.push(now());
+    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: process.env, input: reviewPrompt(input), children, timeoutMin: reviewTimeoutMin(config) });
     const c = parseClaudeOutput(r.out);
-    if (!c.ok) { out(`observer: review of ${k.key} failed: ${firstLine(c.error ?? '')}`); return; } // not recorded: asked again next pass
+    state.promptReviewCost = Math.round(((state.promptReviewCost ?? 0) + c.cost) * 1e6) / 1e6;
+    if (!c.ok) { // not recorded: asked again next time, at most MAX_TRIES runs in all (a run the observer's own stop killed does not count)
+      out(`observer: review of ${k.key} failed: ${firstLine(c.error ?? '')}`);
+      if (!stopping()) failed(k.key);
+      return;
+    }
     const a = parseReview(c.text), base = { ts: now(), feature: p.feature, tag: k.tag, role: p.role!, model: used.model, effort: used.effort, notes: used.notes, kind: p.kind!, next: input.next, cost: c.cost };
     reviews[k.key] = 'error' in a ? { ...base, cause: null, evidence: [], confidence: null, suggestion: '', target: null, error: `invalid answer: ${a.error}` } : { ...base, ...a };
+    delete tries[k.key];
     log(root, null, 'observer-review', `${k.key} ${p.role} ${used.model}: ${'error' in a ? `invalid answer (${a.error})` : `${a.cause} (${a.confidence})`}; $${c.cost.toFixed(2)}`);
     done++;
   };
-  for (let i = 0; i < todo.length; i += PARALLEL) await Promise.all(todo.slice(i, i + PARALLEL).map(one));
+  for (let i = 0; i < todo.length && !stopping(); i += PARALLEL) await Promise.all(todo.slice(i, i + PARALLEL).map(one));
   out(`observer: reviewed ${done} of ${todo.length} failed passes`);
   return done;
 }
@@ -243,7 +274,8 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
 // Merges the eligible, not yet used suggestions of each model and role into its notes file. Within the cap it is plain code; when
 // the merged notes outgrow it the curator agent rewrites them shorter (as lessons are curated), and when it cannot, the oldest
 // bullets go to the archive. Template suggestions are skipped here: they are for a person (fileTemplateTasks).
-export async function updateNotes(root: string, config: Config, agent: RoleConfig, cfg: PromptReviewConfig, state: PromptState, out: Out, children: Set<ChildProcess>): Promise<void> {
+export async function updateNotes(root: string, config: Config, agent: RoleConfig, cfg: PromptReviewConfig, state: PromptState, io: Io): Promise<void> {
+  const { out, children } = io;
   const all = Object.values(state.promptReviews ?? {}), groups = new Map<string, PromptReview[]>();
   for (const r of all) {
     if (r.noted || r.target === 'template' || !eligible(r, all, 'model')) continue;
@@ -255,13 +287,13 @@ export async function updateNotes(root: string, config: Config, agent: RoleConfi
     let bullets = mergeNotes(noteBullets(before), rs.map((r) => r.suggestion));
     const added = bullets.length - noteBullets(before).length;
     if (added > 0) {
+      mkdirSync(notesDir(root), { recursive: true });
       let note = `${added} added`;
       if (overCap(bullets, cfg.notesMaxBytes)) {
         const kept = await tidyNotes(root, config, agent, cfg, model, role, bullets, children);
         if (kept) { archive(root, model, role, `${noteBullets(before).length} notes before tidying`, noteBullets(before)); bullets = kept; note += ', tidied by the curator'; }
         else { const f = fitNotes(bullets, cfg.notesMaxBytes); archive(root, model, role, `${f.dropped.length} oldest notes dropped`, f.dropped); bullets = f.kept; note += `, ${f.dropped.length} oldest archived`; }
       }
-      mkdirSync(notesDir(root), { recursive: true });
       writeFileSync(file, renderNotes(bullets));
       log(root, null, 'observer-notes', `${model} as ${role}: ${note}; ${bullets.length} notes, ${Buffer.byteLength(renderNotes(bullets))} bytes`);
       out(`observer: notes for ${model} as ${role}: ${note}`);
@@ -282,7 +314,7 @@ async function tidyNotes(root: string, config: Config, agent: RoleConfig, cfg: P
     `- At most ${cfg.notesMaxBytes} bytes in total, each note one or two plain sentences starting with "- ". No headings, no dates.`,
     '- Merge duplicates and near-duplicates into one rule. Keep concrete paths, commands and names. Drop notes that only describe one feature.',
     '- Do not use tools; answer from the text below.', '', 'The notes:', '', bullets.join('\n'), '', 'Answer with the notes only, between <notes> and </notes>.'].join('\n');
-  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, agent, root), { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
+  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, agent, root), { cwd: root, env: process.env, input: prompt, children, timeoutMin: reviewTimeoutMin(config) });
   const p = parseClaudeOutput(r.out), n = p.ok ? parseNotes(p.text, cfg.notesMaxBytes) : { error: p.error };
   return 'bullets' in n ? n.bullets : null;
 }
@@ -294,12 +326,16 @@ export async function fileTemplateTasks(root: string, state: PromptState, out: O
   for (const [k, r] of all) if (!r.filed && r.target === 'template' && eligible(r, all.map(([, x]) => x), 'role')) (roles.get(r.role) ?? roles.set(r.role, []).get(r.role)!).push([k, r]);
   for (const [role, rs] of roles) {
     const title = `Prompt template change suggested for ${role}`;
-    const steps = [`The review agent found ${rs.length} failed ${role} pass${rs.length === 1 ? '' : 'es'} where the ${role} prompt template itself was the problem. The template is fixed text in ${NAME} (lib/foreman.ts), so it needs a person.`,
+    const head = (n: number) => `The review agent found ${n} failed ${role} pass${n === 1 ? '' : 'es'} where the ${role} prompt template itself was the problem. The template is fixed text in ${NAME} (lib/foreman.ts), so it needs a person.`;
+    const steps = [head(rs.length),
       ...rs.flatMap(([k, r]) => [`Suggested change (${r.model}, ${r.confidence} confidence, ${CAUSE_WORDS[r.cause!]}): ${r.suggestion}`,
         `Evidence from ${k}: ${r.evidence.length ? r.evidence.join(' | ') : 'none given'}`])];
     await mutate(root, 'human', (d) => {
       const open = d.tasks.find((t) => t.status === 'open' && t.title === title);
-      if (open) open.steps.push(...steps.slice(1));
+      if (open) { // the new suggestions join it, and the count in its first step follows
+        const n = rs.length + (Number(/found (\d+) failed/.exec(open.steps[0] ?? '')?.[1]) || 0);
+        open.steps.splice(0, 1, head(n)); open.steps.push(...steps.slice(1));
+      }
       else d.tasks.push({ id: `observer-prompt-${role}-${Date.now().toString(36)}`, title, steps, unblocks: [], mockable: false, status: 'open' } satisfies HumanTask);
     });
     for (const [, r] of rs) r.filed = true;
@@ -334,7 +370,7 @@ export function trend(prev: { ok: number; bad: number } | undefined, cur: { ok: 
 
 export interface PromptRow { model: string; role: Role; reviewed: number; causes: { cause: PromptCause; n: number }[]; suggestions: { text: string; n: number; target: Target }[];
   notes: { text: string; bytes: number } | null; versions: { notes: string; since: string; ok: number; bad: number; trend: string }[] }
-export interface PromptSummary { reviewed: number; invalid: number; rows: PromptRow[] }
+export interface PromptSummary { reviewed: number; invalid: number; cost: number; runs24h: number; rows: PromptRow[] } // cost: all review runs so far
 
 // Per model and role: the causes of the reviewed failures in the last 7 days, the suggestions most often made, the notes in force
 // and the results by notes version. `readNotesText` reads a model's notes ('' when none).
@@ -354,14 +390,15 @@ export function promptSummary(state: PromptState, readNotesText: (model: string,
       suggestions: [...sug.values()].sort((a, b) => b.n - a.n).slice(0, 3), notes: text ? { text, bytes: Buffer.byteLength(text) } : null,
       versions: vs.map((x, i) => ({ notes: x.notes, since: x.since, ok: x.ok, bad: x.bad, trend: i ? trend(vs[i - 1], x) : '' })) };
   }).sort((a, b) => b.reviewed - a.reviewed || a.model.localeCompare(b.model) || a.role.localeCompare(b.role));
-  return { reviewed: rs.length, invalid: Object.values(state.promptReviews ?? {}).filter((r) => !r.cause).length, rows };
+  return { reviewed: rs.length, invalid: Object.values(state.promptReviews ?? {}).filter((r) => !r.cause && Date.parse(r.ts) >= since).length, cost: state.promptReviewCost ?? 0,
+    runs24h: (state.promptReviewRuns ?? []).filter((t) => Date.now() - Date.parse(t) < DAY).length, rows };
 }
 
 export function renderPromptSection(s: PromptSummary, at: (iso: string) => string): string[] {
-  if (!s.rows.length) return [];
+  if (!s.rows.length && !s.cost) return [];
   const pct = (a: number, b: number) => (b ? `${Math.round((100 * a) / b)}%` : '–');
   return ['## Why runs failed, by model', '',
-    `The review agent read ${s.reviewed} failed passes from the last 7 days (the saved prompt and how the pass ended) and named one main cause for each.`, '',
+    `The review agent read ${s.reviewed} failed passes from the last 7 days (the saved prompt and how the pass ended) and named one main cause for each. Review cost so far: $${s.cost.toFixed(2)} (${s.runs24h} review runs in the last 24 hours).`, '',
     ...s.rows.flatMap((r) => [`### ${r.model} as ${r.role}`, '',
       r.causes.length ? `Causes: ${r.causes.map((c) => `${CAUSE_WORDS[c.cause]} ${c.n}`).join(', ')}.` : 'No failed passes reviewed yet.',
       ...(r.suggestions.length ? ['', 'Suggested prompt changes, most often first:', ...r.suggestions.map((x) => `- ${x.n > 1 ? `${x.n}× ` : ''}${x.text} (${x.target === 'template' ? 'the role template: a task for you' : x.target})`)] : []),

@@ -71,6 +71,8 @@ export interface PromptReviewConfig {
   enabled: boolean;                   // default true; only runs when an observer agent is configured
   maxPerPass: number;                 // reviews started in one observer pass
   notesMaxBytes: number;              // size cap of one <model>-<role> notes file
+  everyMinutes: number;               // at most one batch of reviews this often
+  maxPerDay: number;                  // review runs (successful or not) in any 24 hours
 }
 export const PROMPT_CAUSES = ['prompt-missing-info', 'prompt-ambiguous', 'prompt-conflict', 'model-limitation', 'environment', 'spec-error'] as const;
 export type PromptCause = typeof PROMPT_CAUSES[number];
