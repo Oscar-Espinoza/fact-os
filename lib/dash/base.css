@@ -73,15 +73,16 @@ b{font-weight:600}
 .ctl.paused .pz:hover{background:#ffc75a;border-color:#ffc75a}
 .status.on.paused .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
 .status.on.paused b{color:var(--amber)}
-/* Up to 1600px the header tightens in steps so brand, five tabs, picker, status and the controls stay on one line:
-   from 1600 the tagline goes and the picker narrows; from 1400 the wordmark goes (the logo stays), the pause button shows only
-   its icon (aria-label and tooltip carry the words), and "(default n)" and the mode switch's "Mode:" are hidden from view
-   only (screen readers still read them; the tooltips and aria-labels carry them too); at 900–1180 (a 1024 screen) the lanes read "2 of 3" (the word "lanes" hidden
-   the same way) and the tabs and picker narrow, so the longest mode name ("Fable + Sonnet") still fits. */
-@media (max-width:1600px) and (min-width:901px){.top{gap:16px;padding:0 14px}.tabs a{padding:0 12px}.brand small{display:none}.status{padding-left:12px}#pick{width:200px}.ctl{gap:8px}}
-@media (max-width:1400px) and (min-width:901px){.brand span{display:none}#pick{width:180px}.pz .lbl{display:none}.pz{width:32px;padding:0}
-  .lanes-t small,.mode .mode-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
-@media (max-width:1180px) and (min-width:901px){.top{gap:10px}.tabs a{padding:0 10px}#pick{width:130px}.mode{padding:0 10px}
+/* Up to 1720px the header tightens in steps so brand, five tabs, picker, status and the controls (mode switch, lanes, pause)
+   stay on one line, checked with the longest content ("Mode: Fable + Sonnet", "12 of 12 lanes (default 3)", "Pause new work"):
+   from 1720 the tagline goes and the picker narrows; from 1460 the wordmark goes (the logo stays), the pause button shows only
+   its icon (aria-label and tooltip carry the words), and "(default n)" is hidden from view only (screen readers still read
+   it; the tooltip and the group's aria-label carry it too); at 900–1210 (a 1024 screen) the lanes read "2 of 3" (the word
+   "lanes" hidden the same way) and the gaps, tabs and picker narrow. "Mode:" stays visible down to 901. */
+@media (max-width:1720px) and (min-width:901px){.top{gap:16px;padding:0 14px}.tabs a{padding:0 12px}.brand small{display:none}.status{padding-left:12px}#pick{width:200px}.ctl{gap:8px}}
+@media (max-width:1460px) and (min-width:901px){.brand span{display:none}#pick{width:180px}.pz .lbl{display:none}.pz{width:32px;padding:0}
+  .lanes-t small{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
+@media (max-width:1210px) and (min-width:901px){.top{gap:8px}.tabs a{padding:0 8px}#pick{width:105px}.mode{padding:0 10px}
   .lanes-w{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
 @media (max-width:1023px) and (min-width:901px){.status>span:last-child{display:none}} /* just the dot; its tooltip has the text */
 

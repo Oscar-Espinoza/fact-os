@@ -33,7 +33,7 @@ export interface ProjectState {
 // profile: the active model profile (null = opus; also null while the file is invalid); roles: what each role runs with under it;
 // profiles: every selectable profile, opus first, with its label ("Opus", "Fable + Sonnet", else the name) and role table.
 export type ControlState = Pick<Control, 'paused' | 'maxParallel' | 'updatedAt' | 'by'> & { effective: number | null; configMax: number; invalid?: string;
-  profile: string | null; roles: RoleRow[]; profiles: ProfileInfo[] };
+  profile: string | null; roles: RoleRow[]; profiles: ProfileInfo[]; observerAgent: boolean /* config.observer.agent set; else the observer rows are what `observe --agent` would use */ };
 export interface ProfileInfo { name: string; label: string; roles: RoleRow[] }
 export interface ObserverSummary {
   updatedAt: string; running: boolean; alerts24h: { ts: string; text: string }[]; stuck: { id: string; cause: string; evidence: string }[];
@@ -62,9 +62,9 @@ const CONTROL = ['pause', 'resume', 'lanes', 'profile'] as const;
 export function controlState(dir: string, config: Config): ControlState {
   const r = readControlFile(dir, config), configMax = Math.max(1, config.maxParallel), agent = observerConfig(config, { agent: true }).agent;
   const profiles = profileNames(config).map((name) => ({ name, label: profileLabel(name), roles: roleTable(config, name, agent) }));
-  const profile = r.ok ? r.control.profile ?? null : null, roles = profiles.find((p) => p.name === (profile ?? 'opus'))!.roles;
-  return r.ok ? { ...r.control, profile, effective: effectiveLimit(r.control, config), configMax, roles, profiles }
-    : { paused: false, maxParallel: null, effective: null, configMax, invalid: r.error, profile, roles, profiles };
+  const profile = r.ok ? r.control.profile ?? null : null, roles = profiles.find((p) => p.name === (profile ?? 'opus'))!.roles, observerAgent = !!config.observer?.agent;
+  return r.ok ? { ...r.control, profile, effective: effectiveLimit(r.control, config), configMax, roles, profiles, observerAgent }
+    : { paused: false, maxParallel: null, effective: null, configMax, invalid: r.error, profile, roles, profiles, observerAgent };
 }
 // Page scripts, styles and pixel art under lib/dash/ and lib/assets/, served at /dash/* and /assets/*.
 const ASSET_TYPES: Record<string, string> = { js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png' };

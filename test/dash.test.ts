@@ -21,7 +21,7 @@ function project(dir: string, { merge = 'auto', features = [], tasks = [], gitFi
   writeFileSync(join(dir, '.fact-os/human.json'), JSON.stringify({ tasks }));
 }
 // control without the profile tables (their own test checks them)
-const core = (c: ControlState | undefined) => { const { roles, profiles, ...rest } = c!; return rest; };
+const core = (c: ControlState | undefined) => { const { roles, profiles, observerAgent, ...rest } = c!; return rest; };
 const humanOf = (p: string): HumanTask[] => JSON.parse(readFileSync(join(root, p, '.fact-os/human.json'), 'utf8')).tasks;
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(dash.url + path, { method: 'POST',
   headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
@@ -338,6 +338,7 @@ test('profile route: sets the model profile (known name, "opus" or null), refuse
   try {
     let c = (await get()).control!;
     assert.equal(c.profile, null);
+    assert.equal(c.observerAgent, false, 'no observer agent configured: the page labels the observer rows "observe --agent"');
     assert.deepEqual(c.profiles.map((p) => [p.name, p.label]), [['opus', 'Opus'], ['fable-sonnet', 'Fable + Sonnet']]);
     assert.deepEqual(c.roles.map((r) => [r.role, r.model, r.effort]), [['builder', 'opus', 'medium'], ['resolver', 'opus', 'medium'], ['evaluator', 'opus', 'high'],
       ['observer', 'opus', 'high'], ['curator', 'opus', 'high']]);
