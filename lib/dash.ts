@@ -8,6 +8,8 @@ import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errM
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
 import { observerPaths, observerConfig, recurringTests, hotFiles, type ObserverState, type Era } from './observe.ts';
+import { promptSummary, type PromptSummary } from './promptreview.ts';
+import { readNotes } from './notes.ts';
 import { profileNames, profileLabel, roleTable, validProfile, type RoleRow } from './profiles.ts';
 import { IN_FLIGHT, type ActivityEvent, type Config, type Control, type Diagnosis, type Feature, type HumanTask, type LogEvent, type MergeMode, type RoleConfig } from './types.ts';
 
@@ -38,7 +40,7 @@ export interface ProfileInfo { name: string; label: string; roles: RoleRow[] }
 export interface ObserverSummary {
   updatedAt: string; running: boolean; alerts24h: { ts: string; text: string }[]; stuck: { id: string; cause: string; evidence: string }[];
   decisions: Diagnosis[]; causes24h: { cause: string; n: number }[]; recurring: { test: string; features: string[] }[];
-  improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; agents: Era[]; proposals: { id: string; title: string }[];
+  improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; agents: Era[]; prompts: PromptSummary; proposals: { id: string; title: string }[];
   conflicts24h: Conflict[]; titles: Record<string, string>; // titles: feature id → title, for every id the view shows
 }
 // One merge conflict followed to its outcome (see conflictTimeline). `resolving`: the resolver is working on it right now.
@@ -244,7 +246,7 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[], events: 
       recurring: recurringTests(diags, since, 2).map(([test, features]) => ({ test, features })),
       improvements: (Array.isArray(o.improvements) ? o.improvements : []).slice(-10).reverse().map((id) => { const f = features.find((x) => x.id === id); return { id, title: f?.title ?? '(removed)', status: f?.status ?? 'removed' }; }), sentBack24h: recent.filter((d) => d.action === 'sent back').length,
       ...(() => { const b = (Array.isArray(o.bounces) ? o.bounces : []).filter((x) => Date.parse(x.ts) >= since); return { bounces24h: b.length, hotFiles: hotFiles(b).slice(0, 5).map(([file, n]) => ({ file, n })) }; })(),
-      ...(o.improveAt ? { improveAt: o.improveAt } : {}), agents: Array.isArray(o.agents) ? o.agents : [], ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
+      ...(o.improveAt ? { improveAt: o.improveAt } : {}), agents: Array.isArray(o.agents) ? o.agents : [], prompts: promptSummary(o, (model, role) => readNotes(dir, model, role) ?? ''), ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
       proposals: tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-')).map((t) => ({ id: t.id, title: t.title })),
       conflicts24h: conflictTimeline(events.filter((e) => Date.parse(e.ts) >= since - 3600e3), Date.now(), titles), titles };
   } catch { return null; }

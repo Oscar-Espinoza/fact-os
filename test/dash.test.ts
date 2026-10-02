@@ -225,6 +225,26 @@ test('state carries the observer summary from observer.json, and null without it
   writeFileSync(join(dir, 'human.json'), human);
 });
 
+test('state carries the prompt summary: causes per model and role, top suggestions, the notes in force and results by notes version', async () => {
+  const dir = join(root, 'shop/.fact-os'), now = new Date().toISOString();
+  const rev = (o: object) => ({ ts: now, feature: 'a', tag: '1', role: 'builder', model: 'sonnet', effort: 'medium', notes: '-', kind: 'gate-failed', next: '', cause: 'prompt-missing-info', evidence: ['q'], confidence: 'high', suggestion: 'Run the typecheck.', target: 'briefs', cost: 0, ...o });
+  writeFileSync(join(dir, 'observer.json'), JSON.stringify({ offset: 0, retried: {}, diagnoses: [], alerts: [],
+    promptReviews: { 'a/1': rev({}), 'b/1': rev({ feature: 'b', cause: 'model-limitation', suggestion: '', target: null }), 'c/1': rev({ feature: 'c', cause: null, confidence: null, suggestion: '', target: null, error: 'invalid answer: x' }) },
+    promptRates: [{ model: 'sonnet', role: 'builder', notes: '-', since: now, ok: 1, bad: 2 }] }));
+  mkdirSync(join(dir, 'prompt-notes'), { recursive: true });
+  writeFileSync(join(dir, 'prompt-notes/sonnet-builder.md'), '- Run the typecheck.\n');
+  try {
+    const o = ((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!.observer!;
+    assert.deepEqual([o.prompts.reviewed, o.prompts.invalid, o.prompts.rows.length], [2, 1, 1]);
+    const row = o.prompts.rows[0]!;
+    assert.deepEqual([row.model, row.role, row.causes, row.suggestions, row.notes], ['sonnet', 'builder', [{ cause: 'prompt-missing-info', n: 1 }, { cause: 'model-limitation', n: 1 }],
+      [{ text: 'Run the typecheck.', n: 1, target: 'briefs' }], { text: '- Run the typecheck.', bytes: 20 }]);
+    rmSync(join(dir, 'observer.json'));
+    writeFileSync(join(dir, 'observer.json'), JSON.stringify({ offset: 0, retried: {}, diagnoses: [], alerts: [] }));
+    assert.deepEqual(((await (await fetch(dash.url + '/api/state')).json()) as DashState).projects.find((p) => p.name === 'shop')!.observer!.prompts, { reviewed: 0, invalid: 0, rows: [] }, 'an older observer.json has none');
+  } finally { rmSync(join(dir, 'observer.json')); rmSync(join(dir, 'prompt-notes'), { recursive: true }); }
+});
+
 test('state carries the merge conflict timeline from the log: who resolved each conflict and how it ended', async () => {
   const dir = join(root, 'shop/.fact-os'), t0 = Date.now() - 20 * 3600e3, min = (m: number) => new Date(t0 + m * 60e3).toISOString();
   const ev = (m: number, feature: string, event: string, detail = '') => JSON.stringify({ ts: min(m), feature, event, detail });
