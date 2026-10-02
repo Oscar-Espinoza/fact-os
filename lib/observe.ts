@@ -150,24 +150,43 @@ export interface Era { since: string; change: string; launches: number; setup: n
 const median = (xs: number[]): number | null => { if (!xs.length) return null; const a = [...xs].sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m]! : (a[m - 1]! + a[m]!) / 2; };
 const top = (xs: string[], n = 5): [string, number][] => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]).slice(0, n);
 
+// A builder fingerprint as a prompt-version key: without the lessons hash (a curation is its own change) and with a risky
+// feature's escalation undone (` risk=high effortBase=<e>` → effort=<e>), so risky launches neither split nor skip versions.
+export const versionKey = (detail: string): string => {
+  const base = / risk=high(?: effortBase=(\S+))?/.exec(detail);
+  const d = detail.replace(/ lessons=\S+/, '').replace(/ risk=high(?: effortBase=\S+)?/, '');
+  return base?.[1] ? d.replace(/ effort=\S+/, ` effort=${base[1]}`) : d;
+};
+
 // How the agents did, per prompt version. A version starts at a lessons curation or when the builder's model, effort,
-// briefs or model profile change (from `prompt` events; a risky feature's effortHigh does not start one). Each `launch` is one pass: did the build reach the test, the test pass, the
+// briefs or model profile change (each launch keyed by its own pass's builder `prompt`; a risky feature's effortHigh does not
+// start one). Each `launch` is one pass: did the build reach the test, the test pass, the
 // evaluator pass, and did it merge or bounce on a merge conflict. Costs come from the run files, by completion time.
 // A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's version: counted in `resolves`,
 // and a merge after it in `merged` and `resolvedMerged`; its gate and evaluation are not counted again.
 export function agentStats(events: LogEvent[], runs: RunCost[], since: number): Era[] {
   const t = (e: { ts: string }) => Date.parse(e.ts);
-  const changes: { ts: string; change: string }[] = [];
-  let setup = '';
+  // Each launch's version is its own pass's builder fingerprint (the first builder `prompt` of that feature after the launch),
+  // not whatever was logged last: a pass still in prepare when the profile switches logs its prompt after newer launches.
+  // A launch with no builder prompt (build skipped, setup failed) stays in the version in force. Versions change, in launch
+  // order, when a launch's key differs from the one before, or at a lessons curation.
+  const keyOf = new Map<LogEvent, string>(), pending = new Map<string, LogEvent>();
   for (const e of events) {
-    if (e.event === 'observer-lessons' && /^curated /.test(e.detail)) changes.push({ ts: e.ts, change: `lessons ${e.detail.split(';')[0]}` });
-    // A risky feature's escalated effort (` risk=high`) is a per-feature choice inside the same profile, not a new version.
-    if (e.event === 'prompt' && e.detail.startsWith('builder ') && !/ risk=high$/.test(e.detail)) {
-      const key = e.detail.replace(/ lessons=\S+/, '');
-      if (key !== setup) { if (setup) changes.push({ ts: e.ts, change: key }); setup = key; }
-    }
+    if (!e.feature) continue;
+    if (e.event === 'launch') pending.set(e.feature, e);
+    else if (e.event === 'prompt' && e.detail.startsWith('builder ') && pending.has(e.feature)) { keyOf.set(pending.get(e.feature)!, versionKey(e.detail)); pending.delete(e.feature); }
   }
-  const starts = [{ ts: new Date(since).toISOString(), change: 'start of the window' }, ...changes.filter((c) => t(c) >= since)];
+  const starts = [{ ts: new Date(since).toISOString(), change: 'start of the window' }], eraOfLaunch = new Map<LogEvent, number>();
+  let key = '';
+  for (const e of events) {
+    const inWindow = t(e) >= since;
+    if (e.event === 'observer-lessons' && /^curated /.test(e.detail) && inWindow) starts.push({ ts: e.ts, change: `lessons ${e.detail.split(';')[0]}` });
+    if (e.event !== 'launch' || !e.feature) continue;
+    const k = keyOf.get(e) ?? key;
+    if (k !== key && key && inWindow) starts.push({ ts: e.ts, change: k });
+    key = k;
+    if (inWindow) eraOfLaunch.set(e, starts.length - 1);
+  }
   const eraOf = (ms: number) => { let i = 0; while (i + 1 < starts.length && t(starts[i + 1]!) <= ms) i++; return i; };
   const eras: (Era & { b: number[]; g: number[]; v: number[]; rej: string[]; bf: string[] })[] = starts.map((s) => ({ since: s.ts, change: s.change, launches: 0, setup: 0, built: 0, gated: 0,
     evaluated: 0, passed: 0, bounced: 0, merged: 0, resolves: 0, resolvedMerged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
@@ -176,7 +195,7 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
   for (const e of events) {
     if (!e.feature) continue;
     const ms = t(e), cur = open.get(e.feature);
-    if (e.event === 'launch') { if (ms >= since) { const era = eraOf(ms); eras[era]!.launches++; open.set(e.feature, { era, stage: 'build', at: ms }); lastEra.set(e.feature, era); } else { open.delete(e.feature); lastEra.delete(e.feature); } continue; }
+    if (e.event === 'launch') { if (ms >= since) { const era = eraOfLaunch.get(e)!; eras[era]!.launches++; open.set(e.feature, { era, stage: 'build', at: ms }); lastEra.set(e.feature, era); } else { open.delete(e.feature); lastEra.delete(e.feature); } continue; }
     if (e.event === 'resolving' && lastEra.has(e.feature)) { const era = lastEra.get(e.feature)!; eras[era]!.resolves++; open.set(e.feature, { era, stage: 'resolve', at: ms }); continue; }
     if (!cur) continue;
     const E = eras[cur.era]!;

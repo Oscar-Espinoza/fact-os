@@ -133,12 +133,13 @@ export function runTag(existing: string[], attempt: number): string {
 
 // What a prompt was made of, to compare agents across prompt versions: role, the model and effort actually passed, and short
 // hashes of the lessons and briefs it included (the feature's own text is left out). Under a model profile it ends with
-// ` profile=<name>`, plus ` risk=high` when the builder got the profile's effortHigh for a risky feature (opus adds nothing,
-// so its fingerprints are unchanged).
-export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string, profile: string | null = null, risky = false): string {
+// ` profile=<name>`, plus ` risk=high effortBase=<effort>` when the builder got the profile's effortHigh for a risky feature
+// (effortBase: what it would have had otherwise, so the observer can key prompt versions without it). Opus adds nothing, so
+// its fingerprints are unchanged.
+export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string, profile: string | null = null, effortBase: string | null = null): string {
   const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 8);
   return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}` +
-    (profile ? ` profile=${profile}` : '') + (risky ? ' risk=high' : '');
+    (profile ? ` profile=${profile}` : '') + (effortBase != null ? ` risk=high effortBase=${effortBase || '-'}` : '');
 }
 
 // The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
@@ -442,7 +443,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     const recordPrompt = (role: Role, prompt: string) => {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
       log(root, id, 'prompt', promptFingerprint(role, roleCfg(role), role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
-        profile, role === 'builder' && escalates(config, profile, f)));
+        profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null));
     };
     // A conflicted refresh resolved at once by a resolver run (config.resolver), in this same pass: the feature keeps its slot
     // and its claims, and goes on to test and evaluation. Returns the note for the evaluator, or null when the feature went

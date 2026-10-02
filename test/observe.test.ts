@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFile
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observerPaths, lessonSection, parseCurated, bulletsOf } from '../lib/observe.ts';
+import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observerPaths, lessonSection, parseCurated, bulletsOf, versionKey } from '../lib/observe.ts';
 import type { Diagnosis, Feature } from '../lib/types.ts';
 
 const VITEST = `test command \`gate.sh\` exited 1:
@@ -376,13 +376,22 @@ test('observe: the active model profile picks the improver\'s and the curator\'s
   }
 });
 
-test('agentStats: a profile switch starts a new prompt version; a risky feature\'s escalated effort does not', () => {
+test('agentStats: each launch counts in its own pass\'s version; a late opus prompt after a switch starts no stray version; risky prompts neither split nor skip', () => {
   const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
   const e = (min: number, feature: string | null, event: string, detail = '') => ({ ts: at(min), feature, event, detail });
   const opus = 'builder model=opus effort=medium lessons=aaaaaaaa briefs=-', fs = 'builder model=sonnet effort=medium lessons=bbbbbbbb briefs=- profile=fable-sonnet';
-  const events = [e(0, 'a', 'launch'), e(0, 'a', 'prompt', opus), e(10, 'b', 'launch'), e(10, 'b', 'prompt', fs),
-    e(20, 'c', 'launch'), e(20, 'c', 'prompt', 'builder model=sonnet effort=high lessons=bbbbbbbb briefs=- profile=fable-sonnet risk=high'),
-    e(30, 'd', 'launch'), e(30, 'd', 'prompt', fs)];
+  const risky = 'builder model=sonnet effort=high lessons=bbbbbbbb briefs=- profile=fable-sonnet risk=high effortBase=medium';
+  const events = [
+    e(0, 'a', 'launch'), e(1, 'b', 'launch'), e(2, 'b', 'prompt', opus), // a is still in prepare
+    e(5, null, 'control', 'running, lanes 3, profile opus → running, lanes 3, profile fable-sonnet'),
+    e(6, 'c', 'launch'), e(7, 'c', 'prompt', fs),
+    e(8, 'a', 'prompt', opus),                                            // a's own (opus) pass, logged after the switch
+    e(9, 'd', 'launch'), e(10, 'd', 'prompt', risky),
+    e(11, 'f', 'launch'),                                                  // build skipped: no prompt, the version in force
+    e(12, 'a', 'testing', 'sha'), e(13, 'c', 'testing', 'sha'), e(14, 'd', 'testing', 'sha')];
   const eras = agentStats(events, [], T0 - 60e3);
-  assert.deepEqual(eras.map((x) => [x.change, x.launches]), [['start of the window', 1], ['builder model=sonnet effort=medium briefs=- profile=fable-sonnet', 3]]);
+  assert.deepEqual(eras.map((x) => [x.change, x.launches, x.built]), [['start of the window', 2, 1], ['builder model=sonnet effort=medium briefs=- profile=fable-sonnet', 3, 2]]);
+  assert.equal(eras[1]!.since, at(6), 'the version starts at its first launch, not at a prompt');
+  assert.equal(versionKey(risky), versionKey(fs));
+  assert.equal(versionKey(opus), 'builder model=opus effort=medium briefs=-');
 });
