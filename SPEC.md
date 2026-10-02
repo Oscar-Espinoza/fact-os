@@ -84,6 +84,7 @@ HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
 `.fact-os/log.jsonl` — one JSON line per event (`{ts, feature, event, detail}`).
 `.fact-os/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
 `.fact-os/runs/<feature>/<tag>-{build,eval,resolve}.json` — raw `claude -p --output-format json` results (tag: see Observer 7).
+`.fact-os/prompt-notes/<model>-<role>.md` (+ `.archive.md`) — per-model prompt notes (see Observer 8), git-ignored by `init`.
 `.fact-os/.foreman` — pid of the running foreman (one per repo).
 `.fact-os/control.json` — a person's runtime limits on new launches (CLI `pause-all`/`resume-all`/`lanes`/`profile`, or the dashboard):
 ```
@@ -363,7 +364,12 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
     runs to now. **Agents** shows each rate with its counts, a short label of what changed per prompt version (a
     version with fewer than 5 builds is not judged), and marks a rate that moved 5+ points against the previous
     version, when each side has at least 5 runs behind that rate, with an arrow and the word better or worse
-    (bounced: lower is better).
+    (bounced: lower is better). Under it, **Prompts by model** (`prompts` in the observer summary: `{reviewed, invalid,
+    rows: [{model, role, reviewed, causes, suggestions, notes, versions}]}` from `promptReviews`, `promptRates` and the notes
+    files; Observer 8) has one card per model and role in plain words: why its failed runs failed (the prompt left
+    something out, could be read two ways, contradicted itself; the model got it wrong; infrastructure; the spec was wrong),
+    what would have helped most and where it belongs, the notes sent with its prompts (in a `<details>`) and how many
+    passes failed per notes version, against the version before.
   - **Project**: `<state dir>/project-view.html` if present, in an iframe with `sandbox="allow-scripts"`
     and served with `Content-Security-Policy: sandbox allow-scripts` (opaque origin: it cannot call
     the API). The dashboard posts `{type: "fact-os-state", project, features: [{id, title, status,
@@ -453,17 +459,61 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    evaluator's top rejection reasons. A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's
    version (`resolves`; a merge after it counts in `merged` and `resolvedMerged`; its gate and evaluation are not counted
    again). The foreman logs a `prompt` event per run (`<role> model= effort= lessons=<sha8> briefs=<sha8>`, with the model and
-   effort actually passed, then ` profile=<name>` under a non-opus profile and ` risk=high effortBase=<effort>` when the builder got effortHigh), saves the
+   effort actually passed, then ` notes=<sha8>` when the prompt carries per-model notes (item 8: a notes change starts a new prompt
+   version), ` profile=<name>` under a non-opus profile and ` risk=high effortBase=<effort>` when the builder got effortHigh), saves the
    prompt as `runs/<id>/<tag>-(build|eval|resolve).prompt.md`, and tags run files `<attempt>` or `<attempt>.<k>` so a later pass
    of the same attempt never overwrites them.
-8. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
+8. **Reviews failed passes and keeps per-model prompt notes** (with an agent and `observer.promptReview.enabled`, default true;
+   `lib/promptreview.ts`, `lib/notes.ts`). Was it the prompt or the model? A *pass* is one `launch` up to its end event
+   (`merged`, `ready`, `failed`, `stuck`, `resolve-failed`, `interrupted`, `merge-skipped`, a `refreshed` that is not a
+   clean refresh before the test or a conflict a resolver run takes over, …); its `prompt` events say which role ran with which
+   model, effort and notes. A pass is *reviewable* when it ended in: an evaluator rejection (`FAILED`/`CHEATING`/`BLOCKING`
+   feedback), a test-gate failure on the feature's **own** tests (classification `own`; a test it does not change, infrastructure,
+   setup and conflict loops are never reviewed), a failed keep-lines check, `resolve-failed`, a builder failure or "commit your
+   work", or an evaluator run that gave no valid verdict. Each observer pass takes the newest reviewable passes (ended in
+   the last 48h, not reviewed yet, at most `maxPerPass` (6), three at a time) and runs `claude -p` in **plan mode**
+   (read-only) with the `observer` role of the active profile (else `observer.agent`). It gets the saved prompt
+   (`runs/<id>/<tag>-<role>.prompt.md`, found by role and write time; the middle is cut over 22 KB), the model and effort,
+   the outcome (the failure text, last 4000 characters), `git diff --stat base...branch` and how the feature's next pass went.
+   It answers with a JSON object `{cause, evidence, confidence, suggestion, target}`: exactly one cause of
+   `prompt-missing-info` (context the model needed was not in the prompt), `prompt-ambiguous` (two readings, the model took
+   the other), `prompt-conflict` (instructions or an acceptance check contradicted each other or were impossible),
+   `model-limitation` (the prompt was clear and complete), `environment` (infrastructure, a flaky test, a merge conflict) or
+   `spec-error`; one to four evidence quotes; `confidence` low/medium/high; and, for the three `prompt-*` causes, a concrete
+   `suggestion` for that model and a `target`: `template` (the role's fixed prompt text), `briefs` or `lessons`. An answer that
+   is not that is kept as an invalid review (`error`), never retried: **a pass is reviewed once** (key `<feature>/<tag>` of its
+   first saved prompt, in `observer.json` under `promptReviews`, kept 14 days). If the agent run itself fails, nothing is
+   recorded and the pass is asked about again next time. Logged `observer-review`.
+   - **Notes.** A `prompt-*` review whose target is `briefs` or `lessons` is *eligible* when its confidence is high or
+     another review has the same cause, model and role (a recurrence). Each model and role's eligible, not yet used
+     suggestions are merged (duplicates dropped, ignoring case and punctuation) into `<state dir>/prompt-notes/<model>-<role>.md`:
+     bullets, at most `notesMaxBytes` (3000). When the merge outgrows the cap the **curator** role's agent rewrites the notes
+     shorter (answer between `<notes>` tags, bullets only, within the cap, as lessons are curated); if it cannot, the oldest
+     bullets go. What is replaced or dropped is appended to `<model>-<role>.archive.md`. Logged `observer-notes`. The foreman reads
+     the file at every launch and appends `## Notes for <model> as <role>` (and the bullets) to the end of that role's prompt
+     (builder, evaluator or resolver); other models and roles get nothing. The notes' sha8 is in the prompt fingerprint
+     (`notes=`), so item 7's agent stats split by notes version.
+   - **Template changes stay manual.** An eligible review with target `template` (any model in that role counts for the
+     recurrence) is never applied: it becomes one open human task "Prompt template change suggested for <role>"
+     (`observer-prompt-<role>-<time>`) with each suggestion, its model, confidence and evidence; later ones join the open
+     task. Logged `observer-proposal`.
+   - **Rates by notes version.** `observer.json` keeps `promptRates` (last 7 days): per model, role and notes version, the
+     passes that ended well (`merged`, `ready`, or passed evaluation and bounced) and the reviewable ones that ended badly.
+     A version counts as better or worse than the one before only with at least 5 passes on each side and a failure rate 15
+     points apart.
+9. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
    person (alerts, stuck features with their cause, open proposals), the last 24h (failures by cause, tests failing
-   in several features, retries, fixes) and the last 15 decisions. Times are local.
+   in several features, retries, fixes), **Why runs failed, by model** (per model and role: the reviews' causes of the
+   last 7 days, the suggestions made most often, the notes in force and the results by notes version, with the verdict
+   against the version before), the agents per prompt version and the last 15 decisions. Times are local.
 
 `--watch` repeats every `observer.pollSec` (60). `--agent` turns on the agent (opus, high effort) when the config has none.
 Config (`observer` in `config.json`, all optional): `pollSec`, `retry` (true), `maxRetries` (1),
 `infraPatterns` ([]), `recurring` (2), `agent` (null or `{model, effort, permissionMode}`), `improve` (true), `improveEveryHours` (6),
-`maxOpenImprovements` (2), `lessonsMaxBytes` (12000), `curateEveryHours` (4). The foreman ignores the key, but editing `config.json` during a run still halts it.
+`maxOpenImprovements` (2), `lessonsMaxBytes` (12000), `curateEveryHours` (4),
+`promptReview` (`{enabled: true, maxPerPass: 6, notesMaxBytes: 3000}`; the keys not given keep their defaults; `enabled` only
+matters with an agent). The review uses each profile's `observer` role and the notes tidying its `curator` role: no profile
+entry of its own. The foreman ignores the key, but editing `config.json` during a run still halts it.
 
 ## Skills copied by init
 
