@@ -293,7 +293,7 @@ export async function fileTemplateTasks(root: string, state: PromptState, out: O
     const title = `Prompt template change suggested for ${role}`;
     const steps = [`The review agent found ${rs.length} failed ${role} pass${rs.length === 1 ? '' : 'es'} where the ${role} prompt template itself was the problem. The template is fixed text in ${NAME} (lib/foreman.ts), so it needs a person.`,
       ...rs.flatMap(([k, r]) => [`Suggested change (${r.model}, ${r.confidence} confidence, ${CAUSE_WORDS[r.cause!]}): ${r.suggestion}`,
-        `Evidence from ${k}: ${r.evidence.length ? r.evidence.map((e) => `"${e}"`).join('; ') : 'none given'}`])];
+        `Evidence from ${k}: ${r.evidence.length ? r.evidence.join(' | ') : 'none given'}`])];
     await mutate(root, 'human', (d) => {
       const open = d.tasks.find((t) => t.status === 'open' && t.title === title);
       if (open) open.steps.push(...steps.slice(1));
@@ -339,7 +339,7 @@ export function promptSummary(state: PromptState, readNotesText: (model: string,
   const since = Date.now() - 7 * DAY, rs = Object.values(state.promptReviews ?? {}).filter((r) => Date.parse(r.ts) >= since && r.cause), rates = state.promptRates ?? [];
   const keys = new Map<string, { model: string; role: Role }>();
   for (const r of rs) keys.set(`${r.model}\n${r.role}`, { model: r.model, role: r.role });
-  for (const r of rates) if (r.notes !== '-' || r.bad) keys.set(`${r.model}\n${r.role}`, { model: r.model, role: r.role });
+  for (const r of rates) if (r.notes !== '-') keys.set(`${r.model}\n${r.role}`, { model: r.model, role: r.role });
   const rows = [...keys.values()].map(({ model, role }): PromptRow => {
     const mine = rs.filter((r) => r.model === model && r.role === role), count = new Map<PromptCause, number>(), sug = new Map<string, { text: string; n: number; target: Target }>();
     for (const r of mine) {

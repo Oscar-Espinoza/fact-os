@@ -395,3 +395,149 @@ test('agentStats: each launch counts in its own pass\'s version; a late opus pro
   assert.equal(versionKey(risky), versionKey(fs));
   assert.equal(versionKey(opus), 'builder model=opus effort=medium briefs=-');
 });
+
+// ---- prompt review ----
+
+// Failed passes F<k>: a builder prompt saved under runs/, the log events of the pass, ending in a rejection `k` seconds from now.
+function failedPass(root: string, id: string, k: number, model = 'sonnet') {
+  const dir = join(root, '.fact-os/runs', id), t = Date.now();
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '1-build.prompt.md'), `You are the builder for feature "${id}": ${id}\n\nBuild it.\n`);
+  const at = (ms: number) => new Date(ms).toISOString(), e = (ms: number, event: string, detail = '') => JSON.stringify({ ts: at(ms), feature: id, event, detail }) + '\n';
+  appendFileSync(join(root, '.fact-os/log.jsonl'), e(t, 'launch') + e(t, 'prompt', `builder model=${model} effort=medium lessons=- briefs=-`) + e(t + 1, 'testing', 'sha') + e(t + 2, 'evaluating')
+    + e(t + k * 1000, 'failed', `FAILED check 1: ${id} is missing`));
+}
+const reviewConfig = (root: string, observer: object = {}) => writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh',
+  observer: { agent: { model: 'x', effort: 'low', permissionMode: 'auto' }, improve: false, ...observer } }));
+const answer = (o: object | string) => JSON.stringify({ type: 'result', is_error: false, result: typeof o === 'string' ? o : JSON.stringify(o), total_cost_usd: 0.2 }).replace(/'/g, "'\\''");
+
+test('observeOnce reviews each failed pass once (newest first, at most maxPerPass, read-only), keeps an invalid answer, and turns answers into notes and a human task', async () => {
+  const root = repo(), fake = join(root, 'fake-claude.sh'), args = join(root, 'args.txt');
+  const prev = process.env.FACTOS_CLAUDE;
+  try {
+    reviewConfig(root, { promptReview: { maxPerPass: 2 } });
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: ['F1', 'F2', 'F3', 'F4'].map((id) => F(id, { status: 'todo' })) }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), '');
+    for (const [i, id] of ['F1', 'F2', 'F3', 'F4'].entries()) failedPass(root, id, i + 1, id === 'F4' ? 'opus' : 'sonnet');
+    const tpl = (feature: string) => ({ cause: 'prompt-ambiguous', evidence: [`"${feature} is missing"`], confidence: 'medium', suggestion: `State the exact file ${feature} must create.`, target: 'template' });
+    writeFileSync(fake, `#!/bin/sh\necho "$@" >> ${args}\nin=$(cat)\ncase "$in" in\n` +
+      `*"Feature: F1:"*) printf '%s' '${answer({ cause: 'prompt-missing-info', evidence: ['"no typecheck"'], confidence: 'high', suggestion: 'Run bun run typecheck before you commit.', target: 'briefs' })}';;\n` +
+      `*"Feature: F2:"*) printf '%s' '${answer(tpl('F2'))}';;\n*"Feature: F4:"*) printf '%s' '${answer(tpl('F4'))}';;\n` +
+      `*) printf '%s' '${answer('I think the model was just unlucky.')}';;\nesac\n`, { mode: 0o755 });
+    process.env.FACTOS_CLAUDE = fake;
+    const reviews = () => (JSON.parse(readFileSync(observerPaths(root).state, 'utf8')) as { promptReviews: Record<string, { cause: string | null; error?: string; noted?: boolean; filed?: boolean }> }).promptReviews;
+    const calls = () => readFileSync(args, 'utf8').split('\n').filter(Boolean);
+
+    await observeOnce(root, { out: () => {} });
+    assert.equal(calls().length, 2, 'maxPerPass');
+    assert.deepEqual(Object.keys(reviews()).sort(), ['F3/1', 'F4/1'], 'the newest failures first');
+    assert.match(reviews()['F3/1']!.error!, /^invalid answer: not a JSON object/);
+    assert.equal(reviews()['F3/1']!.cause, null);
+    for (const c of calls()) assert.match(c, /--model x --effort low --permission-mode plan/, 'read-only, with the observer agent\'s model');
+
+    await observeOnce(root, { out: () => {} });
+    assert.equal(calls().length, 4);
+    assert.deepEqual(Object.keys(reviews()).sort(), ['F1/1', 'F2/1', 'F3/1', 'F4/1']);
+    const notes = join(root, '.fact-os/prompt-notes');
+    assert.equal(readFileSync(join(notes, 'sonnet-builder.md'), 'utf8'), '- Run bun run typecheck before you commit.\n', 'a high-confidence suggestion for the briefs becomes a note for the model that failed');
+    assert.ok(!existsSync(join(notes, 'opus-builder.md')), 'and only for that model: a template suggestion is not a note');
+    assert.equal(reviews()['F1/1']!.noted, true);
+    const tasks = (JSON.parse(readFileSync(join(root, '.fact-os/human.json'), 'utf8')) as { tasks: { title: string; steps: string[]; id: string }[] }).tasks;
+    assert.equal(tasks.length, 1, 'F2 and F4 are the same kind of template problem: one task for the role');
+    assert.equal(tasks[0]!.title, 'Prompt template change suggested for builder');
+    assert.match(tasks[0]!.id, /^observer-/);
+    assert.match(tasks[0]!.steps.join('\n'), /State the exact file F2 must create\./);
+    assert.match(tasks[0]!.steps.join('\n'), /State the exact file F4 must create\./);
+    assert.match(tasks[0]!.steps.join('\n'), /Evidence from F2\/1: "F2 is missing"/);
+    assert.equal(reviews()['F2/1']!.filed, true);
+    assert.ok(!existsSync(join(notes, 'sonnet-builder.archive.md')));
+
+    await observeOnce(root, { out: () => {} });
+    assert.equal(calls().length, 4, 'a pass is reviewed at most once');
+    const log = readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8');
+    assert.match(log, /"event":"observer-review","detail":"F1\/1 builder sonnet: prompt-missing-info \(high\)/);
+    assert.match(log, /"event":"observer-review","detail":"F3\/1 builder sonnet: invalid answer/);
+    assert.match(log, /"event":"observer-notes","detail":"sonnet as builder: 1 added/);
+    assert.match(log, /"event":"observer-proposal","detail":"Prompt template change suggested for builder/);
+    const report = readFileSync(observerPaths(root).report, 'utf8');
+    assert.match(report, /## Why runs failed, by model/);
+    assert.match(report, /### sonnet as builder\n\nCauses: .*the prompt left something out 1/);
+    assert.match(report, /### opus as builder\n\nCauses: the prompt could be read two ways 1\./);
+    assert.match(report, /Run bun run typecheck before you commit\. \(briefs\)/);
+    assert.match(report, /Notes in force: 1, \d+ bytes\./);
+  } finally {
+    if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('observeOnce does not review failed passes without an agent or with promptReview off, and the observer role of the profile picks the reviewer', async () => {
+  const root = repo(), fake = join(root, 'fake-claude.sh'), args = join(root, 'args.txt');
+  const prev = process.env.FACTOS_CLAUDE;
+  try {
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [F('F1', { status: 'todo' })] }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), '');
+    failedPass(root, 'F1', 1);
+    writeFileSync(fake, `#!/bin/sh\necho "$@" >> ${args}\ncat >/dev/null\nprintf '%s' '${answer({ cause: 'model-limitation', evidence: [], confidence: 'low', suggestion: '', target: 'lessons' })}'\n`, { mode: 0o755 });
+    writeFileSync(args, '');
+    process.env.FACTOS_CLAUDE = fake;
+    const calls = () => readFileSync(args, 'utf8').split('\n').filter(Boolean);
+    writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh' }));
+    await observeOnce(root, { out: () => {} });
+    reviewConfig(root, { promptReview: { enabled: false } });
+    await observeOnce(root, { out: () => {} });
+    assert.equal(calls().length, 0);
+    assert.equal(readFileSync(observerPaths(root).report, 'utf8').includes('Why runs failed'), false);
+    reviewConfig(root);
+    writeFileSync(join(root, '.fact-os/control.json'), JSON.stringify({ profile: 'fable-sonnet' }));
+    await observeOnce(root, { out: () => {} });
+    assert.equal(calls().length, 1);
+    assert.match(calls()[0]!, /--model fable --effort high --permission-mode plan/, 'the profile\'s observer role');
+  } finally {
+    if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('notes over their cap: the curator tidies them, and when it cannot the oldest go to the archive', async () => {
+  const root = repo(), fake = join(root, 'fake-claude.sh'), args = join(root, 'args.txt');
+  const prev = process.env.FACTOS_CLAUDE;
+  try {
+    reviewConfig(root, { promptReview: { notesMaxBytes: 300 } });
+    writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [] }));
+    writeFileSync(join(root, '.fact-os/log.jsonl'), '');
+    const old = ['alpha', 'beta', 'gamma'].map((w) => `- ${w}: ${'keep this rule in mind while building. '.repeat(2).trim()}`), file = join(root, '.fact-os/prompt-notes/sonnet-builder.md');
+    const seed = () => {
+      mkdirSync(join(root, '.fact-os/prompt-notes'), { recursive: true });
+      writeFileSync(file, old.join('\n') + '\n');
+      rmSync(file.replace('.md', '.archive.md'), { force: true });
+      const r = { ts: new Date().toISOString(), feature: 'x', tag: '1', role: 'builder', model: 'sonnet', effort: 'medium', notes: '-', kind: 'gate-failed', next: '', cause: 'prompt-conflict',
+        evidence: ['q'], confidence: 'high', suggestion: 'Never touch the generated client; regenerate it with bun run gen instead of editing it by hand.', target: 'lessons', cost: 0 };
+      writeFileSync(observerPaths(root).state, JSON.stringify({ promptReviews: { 'x/1': r } }));
+    };
+    process.env.FACTOS_CLAUDE = fake;
+    // the curator cannot tidy them (no usable answer): the oldest notes are archived
+    writeFileSync(fake, `#!/bin/sh\necho "$@" >> ${args}\ncat >/dev/null\nprintf '%s' '${answer('no thanks')}'\n`, { mode: 0o755 });
+    seed();
+    await observeOnce(root, { out: () => {} });
+    const kept = readFileSync(file, 'utf8');
+    assert.ok(Buffer.byteLength(kept) <= 300, kept);
+    assert.match(kept, /bun run gen/);
+    assert.ok(!kept.includes('alpha'));
+    assert.match(readFileSync(file.replace('.md', '.archive.md'), 'utf8'), /^## Archived \d{4}-\d\d-\d\d \(\d oldest notes dropped\)\n\n- alpha:/);
+    // the curator rewrites them
+    writeFileSync(args, '');
+    writeFileSync(fake, `#!/bin/sh\necho "$@" >> ${args}\ncat >/dev/null\nprintf '%s' '${answer('<notes>\n- Merged rule one.\n- Never edit the generated client by hand; run bun run gen.\n</notes>')}'\n`, { mode: 0o755 });
+    seed();
+    await observeOnce(root, { out: () => {} });
+    assert.equal(readFileSync(file, 'utf8'), '- Merged rule one.\n- Never edit the generated client by hand; run bun run gen.\n');
+    assert.match(readFileSync(args, 'utf8'), /--model x --effort low --permission-mode auto/, 'the curator role, not read-only plan mode');
+    const archive = readFileSync(file.replace('.md', '.archive.md'), 'utf8');
+    assert.match(archive, /\(3 notes before tidying\)/);
+    assert.ok(archive.includes('alpha') && archive.includes('gamma'));
+    assert.match(readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8'), /"event":"observer-notes","detail":"sonnet as builder: 1 added, tidied by the curator/);
+  } finally {
+    if (prev === undefined) delete process.env.FACTOS_CLAUDE; else process.env.FACTOS_CLAUDE = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
