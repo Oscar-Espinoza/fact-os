@@ -159,3 +159,72 @@ test('run --watch waits while a feature is paused and builds it once resumed fro
   assert.match(events, /"feature":"b","event":"testing"/);
   assert.match(events, /"feature":"b","event":"evaluating"/);
 });
+
+test('prompt review end to end: a failed pass is reviewed once, and only that model\'s next build prompt carries the notes', { timeout: 90000 }, async (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'fact-os-review-'));
+  const repo = join(base, 'app');
+  t.after(() => { reap(repo); rmSync(base, { recursive: true, force: true }); });
+  mkdirSync(repo);
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
+  writeFileSync(join(repo, 'README.md'), '# app\n');
+  git('add', '.'); git('commit', '-qm', 'init');
+  chmodSync(FAKE, 0o755);
+  const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100', FAKE_DELAY_MS: '50', FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json'), FAKE_REVIEWS: join(base, 'reviews.json') };
+  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 45000, killSignal: 'SIGKILL' });
+  const state = (f: string) => join(repo, '.fact-os', f);
+  const addFeature = (id: string) => { const d = JSON.parse(readFileSync(state('features.json'), 'utf8')) as FeaturesFile; d.features.push(F(id)); writeFileSync(state('features.json'), JSON.stringify(d)); };
+  const calls = () => readFileSync(env.FAKE_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { mode: string; id: string; model: string; prompt: string; args: string[] });
+  const events = () => readFileSync(state('log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { feature: string | null; event: string; detail: string });
+  const NOTE = 'Create a.txt at the repository root, then run git add and git commit.';
+  assert.equal(cli('init', '--test', 'true').status, 0);
+  assert.match(readFileSync(join(repo, '.git/info/exclude'), 'utf8'), /\.fact-os\/prompt-notes\//);
+  writeFileSync(state('features.json'), JSON.stringify({ features: [F('a')] }));
+  writeFileSync(env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'nothing was committed at the root' }], cheating: [] }] }));
+  writeFileSync(env.FAKE_REVIEWS, JSON.stringify({ a: [{ cause: 'prompt-missing-info', evidence: ['"a.txt exists"', 'nothing was committed at the root'], confidence: 'high', suggestion: NOTE, target: 'briefs' }] }));
+
+  // A first run: the evaluator rejects the first pass of `a` (opus builds it), the second passes.
+  let r = cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(calls().filter((c) => c.mode === 'build' && c.id === 'a').length, 2);
+  assert.ok(calls().every((c) => !c.prompt.includes('## Notes for')), 'no notes yet');
+
+  // The observer reviews the failed pass, once, read-only, and writes the notes for opus as builder.
+  r = cli('observe', '--agent');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const reviews = () => calls().filter((c) => c.mode === 'review');
+  assert.equal(reviews().length, 1);
+  assert.equal(reviews()[0]!.id, 'a');
+  assert.ok(reviews()[0]!.args.join(' ').includes('--permission-mode plan'), 'read-only');
+  assert.match(reviews()[0]!.prompt, /nothing was committed|FAILED a\.txt exists/, 'the review gets the outcome');
+  assert.match(reviews()[0]!.prompt, /You are the builder for feature "a"/, 'and the saved prompt');
+  assert.equal(readFileSync(state('prompt-notes/opus-builder.md'), 'utf8'), `- ${NOTE}\n`);
+  assert.equal(cli('observe', '--agent').status, 0);
+  assert.equal(reviews().length, 1, 'a pass is reviewed once');
+  const obs = JSON.parse(readFileSync(state('observer.json'), 'utf8')) as { promptReviews: Record<string, { cause: string; model: string; role: string; noted: boolean }> };
+  assert.deepEqual(Object.entries(obs.promptReviews).map(([k, v]) => [k, v.cause, v.model, v.role, v.noted]), [['a/1', 'prompt-missing-info', 'opus', 'builder', true]]);
+  assert.match(readFileSync(state('observer-report.md'), 'utf8'), /### opus as builder[\s\S]*Notes in force: 1/);
+
+  // The next opus build gets the notes, with the notes in its fingerprint; the evaluator, another role, does not.
+  addFeature('b');
+  r = cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const bb = calls().find((c) => c.mode === 'build' && c.id === 'b')!;
+  assert.equal(bb.model, 'opus');
+  assert.match(bb.prompt, new RegExp(`\\n## Notes for opus as builder\\n\\n[^\\n]*\\n\\n- ${NOTE.replace(/\./g, '\\.')}\\n$`));
+  assert.ok(!calls().find((c) => c.mode === 'eval' && c.id === 'b')!.prompt.includes('## Notes for'), 'notes are per role');
+  const fp = (id: string, role: string) => events().filter((e) => e.feature === id && e.event === 'prompt' && e.detail.startsWith(role + ' ')).map((e) => e.detail);
+  assert.match(fp('b', 'builder')[0]!, /^builder model=opus effort=medium lessons=- briefs=- notes=[0-9a-f]{8}$/);
+  assert.ok(fp('a', 'builder').every((d) => !d.includes('notes=')), 'the earlier passes had none');
+
+  // Another model (the fable-sonnet profile: sonnet builds) is not given opus's notes.
+  assert.equal(cli('profile', 'fable-sonnet').status, 0);
+  addFeature('c');
+  r = cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const bc = calls().find((c) => c.mode === 'build' && c.id === 'c')!;
+  assert.equal(bc.model, 'sonnet');
+  assert.ok(!bc.prompt.includes('## Notes for') && !bc.prompt.includes(NOTE), 'sonnet does not get opus\'s notes');
+  assert.ok(fp('c', 'builder')[0]!.includes('profile=fable-sonnet') && !fp('c', 'builder')[0]!.includes('notes='));
+});
