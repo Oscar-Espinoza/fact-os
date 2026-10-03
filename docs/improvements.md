@@ -12,7 +12,9 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | — | done (522aa4c) | Prompt notes cut mid-sentence at 400 characters; both ecommerce notes restored |
 | — | queued in ecommerce | `F99-43-gate-direct-builder-check`: a fast `pnpm gate --direct` builders run after each step |
 | I01 | done | B: report edits to existing tests. C: one inline fix after a gate failure, then a diagnosis |
-| — | deferred | Codex reviewer: WIP branch deleted 2026-10-03 (commit 94603fe); rescope on current `main` later |
+| I02 | done | Codex for the read-only roles (evaluator, diagnoser), Claude fallback and cooldown |
+| I03 | done | Feature tiers set at intake, mapped to role models by the active profile |
+| — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
 
@@ -100,3 +102,26 @@ builder fingerprint; R12 credits the final builder prompt of the pass, which is 
   `diagnoser: {model: "opus", effort: "high"}`. Codex can become the diagnoser once a provider exists.
 - Worst case per pass becomes three gate runs. F99-43's direct check is meant to make the first
   failure rarer; measure the gate-failure rate before and after both land.
+
+## I02 — Codex for the read-only roles
+
+Oscar's model guidance (2026-10-03): routine review on Sol 6.1 High, deep or adversarial review on Sol 6.1 XHigh,
+investigation-heavy debugging on Sol 6.1 High, Opus High as the fallback when Codex is out of credits.
+
+- `provider: "codex"` on the evaluator (role config, a profile entry or a tier entry) or the diagnoser. Builders and
+  resolvers stay on Claude: they write code, need the factory's edit restrictions, the activity hook and session resume.
+- `codex exec -m <model> -c model_reasoning_effort="<effort>" -s workspace-write` with network (reviews run the database
+  suites), no approval prompts, JSONL events (`thread.started`, `turn.completed` usage, `turn.failed`) and `-o` for the
+  answer. `item.completed` items of type `error` are warnings and never a failure. The run file keeps the Claude result
+  shape (`result`, `session_id`, `provider`, `model`, `usage`), so the dashboard, statistics and prompt review read it as is.
+- After every Codex run the worktree is reset to its commit (`codex-cleaned` when something was left).
+- A run that cannot answer falls back to `codex.fallback` for that call (`codex-fallback`); limit, quota, credit and login
+  errors also cool Codex down (`.fact-os/codex.json`). A malformed verdict is an ordinary evaluator failure (R04, R15),
+  not a fallback. Codex costs are not in the USD totals: the CLI reports tokens only.
+
+## I03 — feature tiers
+
+Intake sets `tier`; the active profile maps it to role overrides. Ecommerce's `opus-sonnet` profile, from the same
+guidance: normal = Sonnet medium builder and Sol high review; multi = Sonnet high; hard = Opus medium; risky = Opus high
+builder and Sol xhigh review; investigate = Opus high (Sol as a builder comes with Codex builders). The keyword heuristic
+flagged 16 of 37 open ecommerce features as risky, too broad for a model upgrade, so it stays only for untiered features.

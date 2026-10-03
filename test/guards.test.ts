@@ -21,7 +21,7 @@ const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catc
 const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: `Feature ${id}`, description: `Build ${id}`, acceptance: [`${id}.txt exists`],
   surface: 'any', deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '', ...o });
 
-interface FakeCall { mode: string; id: string; t0: number; t1: number; prompt: string; args: string[]; model?: string; effort?: string }
+interface FakeCall { mode: string; id: string; t0: number; t1: number; prompt: string; args: string[]; model?: string; effort?: string; provider?: string }
 function setup(t: TestContext, { features, config = {}, scenario = {}, verdicts = {} }:
   { features: Feature[]; config?: Partial<Config>; scenario?: Record<string, string>; verdicts?: Record<string, Partial<Verdict>[]> }) {
   const base = mkdtempSync(join(tmpdir(), 'fact-os-guard-'));
@@ -1198,4 +1198,74 @@ test('I01: stopping during a resumed fix leaves the feature todo with no attempt
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['todo', 0]);
   assert.equal(s.calls('eval', 'a').length, 0);
   assert.ok(events(s, 'a').some((e) => e.event === 'interrupted'));
+});
+
+// ---- I02: Codex for the read-only roles, with a Claude fallback (docs/improvements.md) ----
+const FAKE_CODEX = fileURLToPath(new URL('../fixtures/fake-codex.ts', import.meta.url));
+const SOL = { provider: 'codex' as const, model: 'gpt-6.1-sol', effort: 'high', permissionMode: 'auto' };
+const codexSetup = (t: TestContext, o: Parameters<typeof setup>[1]) => {
+  chmodSync(FAKE_CODEX, 0o755);
+  const s = setup(t, o); (s.env as Record<string, string>).FACTOS_CODEX = FAKE_CODEX; return s;
+};
+
+test('I02: a Codex evaluator reviews with its model and effort; its verdict decides the merge', (t) => {
+  const s = codexSetup(t, { features: [F('a')], config: { evaluator: SOL } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  const [codex] = s.calls('codex', 'a'), [ev] = s.calls('eval', 'a');
+  assert.ok(codex); assert.equal(codex.model, 'gpt-6.1-sol'); assert.equal(codex.effort, 'high');
+  assert.ok(codex.args.includes('workspace-write') && codex.args.includes('--json'), 'sandboxed, JSON events');
+  assert.equal(ev!.provider, 'codex', 'the verdict came through Codex');
+  const run = JSON.parse(readFileSync(join(s.repo, '.fact-os', 'runs', 'a', '1-eval.json'), 'utf8'));
+  assert.deepEqual([run.provider, run.model, run.session_id], ['codex', 'gpt-6.1-sol', 'fake-codex-thread']);
+  assert.ok(events(s, 'a').some((e) => e.event === 'prompt' && /^evaluator model=gpt-6\.1-sol effort=high/.test(e.detail)));
+});
+
+test('I02: a Codex usage limit falls back to Claude Opus high and cools Codex down for later reviews', (t) => {
+  const s = codexSetup(t, { features: [F('a'), F('b', { priority: 2 })], config: { evaluator: SOL, maxParallel: 1 },
+    scenario: { a: 'codex:limit', b: 'codex:limit' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const id of ['a', 'b']) assert.equal(s.feature(id).status, 'merged');
+  const [ev] = s.calls('eval', 'a');
+  assert.deepEqual([ev!.provider, ev!.model, ev!.effort], ['claude', 'opus', 'high']);
+  assert.ok(events(s, 'a').some((e) => e.event === 'codex-fallback' && /usage limit/.test(e.detail)));
+  assert.equal(s.calls('codex', 'b').length, 0, 'during the cooldown Codex is not called');
+  assert.ok(events(s, 'b').some((e) => e.event === 'codex-fallback' && /cooling down/.test(e.detail)));
+  assert.ok(existsSync(join(s.repo, '.fact-os', 'codex.json')));
+});
+
+test('I02: another Codex failure falls back for that call only, without a cooldown', (t) => {
+  const s = codexSetup(t, { features: [F('a')], config: { evaluator: SOL }, scenario: { a: 'codex:fail' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.calls('eval', 'a')[0]!.provider, 'claude');
+  assert.equal(existsSync(join(s.repo, '.fact-os', 'codex.json')), false);
+});
+
+test('I02: whatever a Codex review leaves in the worktree is undone before the merge', (t) => {
+  const s = codexSetup(t, { features: [F('a')], config: { evaluator: SOL }, scenario: { a: 'codex:edit' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(existsSync(join(s.repo, '..', 'app-worktrees', 'a', 'codex-was-here.txt')), false);
+  assert.ok(events(s, 'a').some((e) => e.event === 'codex-cleaned'));
+});
+
+test('I02: a Codex diagnoser diagnoses a repeated gate failure', (t) => {
+  const s = codexSetup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: SOL },
+    scenario: { a: 'break,fix:noop1' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(s.calls('diagnose', 'a')[0]!.provider, 'codex');
+  assert.match(s.feature('a').lastFeedback ?? '', /^$/);
+});
+
+test('I03: a tiered feature launches its builder and reviewer with the tier models of the active profile', async (t) => {
+  const s = codexSetup(t, { features: [F('a', { tier: 'risky' }), F('b', { priority: 2 })], config: { maxParallel: 1, profiles: { tiered: {
+    builder: { model: 'sonnet', effort: 'medium' }, evaluator: { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' },
+    tiers: { risky: { builder: { model: 'opus', effort: 'high' }, evaluator: { effort: 'xhigh' } } } } } } });
+  await writeControl(s.repo, { profile: 'tiered' }, 'cli');
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  const build = (id: string) => s.calls('build', id)[0]!, review = (id: string) => s.calls('codex', id)[0]!;
+  assert.deepEqual([build('a').model, build('a').effort, review('a').effort], ['opus', 'high', 'xhigh']);
+  assert.deepEqual([build('b').model, build('b').effort, review('b').effort], ['sonnet', 'medium', 'high'], 'untiered: the profile itself');
+  assert.ok(events(s, 'a').some((e) => e.event === 'prompt' && /^builder model=opus effort=high .* tier=risky$/.test(e.detail)));
 });

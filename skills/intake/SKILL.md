@@ -18,6 +18,13 @@ Turn what the user wants built into fact-os's feature list and human inbox.
      appears in GET /api/cart", not "cart works"),
    - `surface`: `web` | `api` | `ios` | `android` | `desktop` | `any`,
    - `deps`: ids that must merge first; `priority`: lower = sooner,
+   - `tier`: what the feature needs from its builder and reviewer (the active model profile maps each tier to
+     models; under the "opus" mode tiers change nothing). Judge it from the work, not from keywords:
+     - `normal`: a clear, well-specified change in one area (most features);
+     - `multi`: several files or packages, moderate complexity;
+     - `hard`: the plan will likely change once the builder is inside the code;
+     - `risky`: large refactors, tricky state, concurrency, migrations, money, auth or tenant isolation;
+     - `investigate`: the root cause or the right approach is unknown and needs digging first.
    - `status: "todo"`, `attempts: 0`, `updatedAt`: now (ISO). Optional `branch` to continue an existing branch.
    Prefer small features that one agent can finish in one session.
 4. Write `.fact-os/human.json` as `{ "tasks": [HumanTask] }`. Anything only the user can do becomes a

@@ -8,14 +8,21 @@ export type Surface = 'web' | 'api' | 'ios' | 'android' | 'desktop' | 'any';
 export type MergeMode = 'auto' | 'manual';
 export type Role = 'builder' | 'evaluator' | 'resolver';
 
-export interface RoleConfig { model?: string; effort?: string; permissionMode?: string }
+// provider: 'claude' (default) or 'codex' (`codex exec`; only the evaluator and the diagnoser, which change no code).
+export type Provider = 'claude' | 'codex';
+export interface RoleConfig { model?: string; effort?: string; permissionMode?: string; provider?: Provider }
 
 // Model profiles (profiles.ts): a named set of model/effort per role, chosen at runtime in control.json. "opus" is the
 // reserved name of the main mode, each role's own config. permissionMode never comes from a profile: always the role's.
 export type ProfileRole = 'builder' | 'resolver' | 'evaluator' | 'observer' | 'curator';
 export const PROFILE_ROLES: ProfileRole[] = ['builder', 'resolver', 'evaluator', 'observer', 'curator'];
-export interface ProfileEntry { model?: string; effort?: string; effortHigh?: string } // effortHigh: the builder's effort on a risky feature
-export type Profile = Partial<Record<ProfileRole, ProfileEntry>>;
+export interface ProfileEntry { model?: string; effort?: string; effortHigh?: string; provider?: Provider } // effortHigh: the builder's effort on a risky feature
+// Feature tiers, set at intake: what a feature needs from its builder and reviewer (see README "Feature tiers").
+export type Tier = 'normal' | 'multi' | 'hard' | 'risky' | 'investigate';
+export const TIERS: Tier[] = ['normal', 'multi', 'hard', 'risky', 'investigate'];
+export const TIER_ROLES = ['builder', 'resolver', 'evaluator'] as const;
+export type TierEntry = Pick<ProfileEntry, 'model' | 'effort' | 'provider'>;
+export type Profile = Partial<Record<ProfileRole, ProfileEntry>> & { tiers?: Partial<Record<Tier, Partial<Record<typeof TIER_ROLES[number], TierEntry>>>> };
 
 export interface Config {
   base: string;
@@ -45,6 +52,7 @@ export interface Config {
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
   gateFixes: number;                  // safe integer >= 0: resumed builder fixes after a test-gate failure, per pass (0 = none)
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
+  codex: { fallback: RoleConfig; cooldownMin: number }; // a Codex run that cannot answer falls back to this Claude role config
   observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`
   profiles?: Record<string, Profile>; // added to (or replacing, by name) the built-in profiles; "opus" is reserved
 }
@@ -109,6 +117,7 @@ export interface Feature {
   pausedAt?: string;                  // ISO, while paused
   issue?: number;                     // GitHub issue number
   touches?: string[];                 // files (or dir prefixes ending in "/") it is expected to change: claimed while it runs
+  tier?: Tier;                        // set at intake; picks role models from the active profile's tiers (absent: the risk heuristic)
   risk?: 'high' | 'normal';           // "high": the builder gets its profile's effortHigh; "normal": never; absent: keyword heuristic
   conflict?: { ours: string; theirs: string; files: string[] }; // a conflicted base refresh whose committed resolution is not checked yet
   pid?: number;                       // current child

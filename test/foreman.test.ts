@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis } from '../lib/foreman.ts';
+import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE } from '../lib/foreman.ts';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -301,4 +301,15 @@ test('parseDiagnosis: fault, evidence and fix, bare, fenced or in prose; anythin
   assert.match((parseDiagnosis('{"fault":"maybe","evidence":"x","fix":"y"}') as { error: string }).error, /fault/);
   assert.match((parseDiagnosis('{"fault":"code","evidence":" ","fix":"y"}') as { error: string }).error, /evidence/);
   assert.match((parseDiagnosis('no idea') as { error: string }).error, /not a JSON object/);
+});
+
+test('parseCodexEvents: thread id, usage and real failures; warning items are not failures', () => {
+  const events = [{ type: 'thread.started', thread_id: 't-1' },
+    { type: 'item.completed', item: { id: 'item_0', type: 'error', message: 'Under-development features enabled: reasoning_effort_override.' } },
+    { type: 'turn.started' }, { type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: '{"ok": true}' } },
+    { type: 'turn.completed', usage: { input_tokens: 18967, output_tokens: 9 } }].map((e) => JSON.stringify(e)).join('\n');
+  assert.deepEqual(parseCodexEvents(events), { threadId: 't-1', usage: { input_tokens: 18967, output_tokens: 9 } });
+  assert.equal(parseCodexEvents(JSON.stringify({ type: 'turn.failed', error: { message: 'usage limit reached' } })).error, 'usage limit reached');
+  assert.ok(CODEX_UNAVAILABLE.test("You've hit your usage limit") && !CODEX_UNAVAILABLE.test('stream disconnected before completion'));
+  assert.deepEqual(codexArgs({ model: 'gpt-6.1-sol', effort: 'xhigh' }, '/tmp/last').slice(0, 5), ['exec', '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="xhigh"']);
 });

@@ -60,7 +60,10 @@ and one dashboard across projects.
   "claims": null,               // file claims (see Launch): null = off; {hot: [paths or "dir/"], minScore: 3, days: 7}
   "conflictBrief": false,       // true: a conflicting refresh's feedback carries both sides' context; resolutions are keep-checked
   "resolver": null,             // null = the builder resolves conflicts on its next build; {model, effort, permissionMode} = a resolver run, same pass
-  "profiles": {}                // extra model profiles (see Model profiles); optional
+  "profiles": {},               // extra model profiles (see Model profiles); optional; a profile may add "tiers" (below)
+  "gateFixes": 0,               // resumed builder fixes after a test-gate failure, per pass (see Pass, Test)
+  "diagnoser": null,            // null, or a role config (provider "claude" or "codex") diagnosing a repeated gate failure
+  "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30} // when a Codex run cannot answer
 }
 ```
 Configuration is validated by `loadConfig()` before it becomes a `Config`, including in
@@ -111,6 +114,9 @@ Feature {
   branch?: string                 // existing branch to continue/evaluate instead of starting fresh
   group?: string                  // conflict group: never in flight together with another feature of the same group
   touches?: string[]              // files (or "dir/" prefixes) it is expected to change: claimed while it runs (see Launch)
+  tier?: "normal" | "multi" | "hard" | "risky" | "investigate" // set at intake; the active profile's tiers map it to role
+                                  // overrides {builder|resolver|evaluator: {model?, effort?, provider?}}; a tier replaces the
+                                  // risk heuristic (effortHigh) for this feature; the "opus" mode ignores tiers
   risk?: "high"|"normal"          // "high": the builder gets its model profile's effortHigh; "normal": never; absent: keywords decide (see Model profiles)
   conflict?: {ours, theirs, files} // a conflicted base refresh whose committed resolution is not keep-checked yet (foreman-owned)
   status: "todo"|"building"|"testing"|"evaluating"|"ready"|"merged"|"stuck"|"paused"

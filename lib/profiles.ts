@@ -1,7 +1,7 @@
 // Model profiles: which model and effort each role runs with, switched at runtime in control.json (`profile`). "opus", the
 // main mode, is each role's own config; any other profile overrides model/effort for the roles it names (permissionMode
 // always stays the role's). Pure: no I/O, so the foreman, the observer, the CLI and the dashboard resolve roles alike.
-import { PROFILE_ROLES, type Config, type Feature, type Profile, type ProfileEntry, type ProfileRole, type RoleConfig } from './types.ts';
+import { PROFILE_ROLES, TIERS, TIER_ROLES, type Config, type Feature, type Profile, type ProfileEntry, type ProfileRole, type RoleConfig, type Tier, type TierEntry } from './types.ts';
 
 export const OPUS = 'opus';
 // Fable thinks (evaluation, the observer's improver, lessons curation); Sonnet writes the code (builder, merge resolver).
@@ -81,18 +81,31 @@ const baseOf = (config: Config, role: ProfileRole, agent?: RoleConfig | null): R
 const entryOf = (config: Config, profile: string | null, role: ProfileRole): ProfileEntry | undefined =>
   profile == null || profile === OPUS ? undefined : profiles(config)[profile]?.[role];
 
-// The builder escalates to its profile's effortHigh on a risky feature; opus never escalates (its effort is the config's).
-export const escalates = (config: Config, profile: string | null, feature?: Parameters<typeof isRisky>[0]): boolean =>
-  !!feature && !!entryOf(config, profile, 'builder')?.effortHigh && isRisky(feature);
+// A feature as role resolution sees it: the risk heuristic's fields and the tier set at intake.
+type Tiered = Parameters<typeof isRisky>[0] & { tier?: Tier };
+// The tier entry a launch uses for `role`: only under a profile (opus is each role's own config), only for a tiered feature.
+const tierEntryOf = (config: Config, profile: string | null, role: ProfileRole, feature?: Tiered): TierEntry | undefined =>
+  profile == null || profile === OPUS || !feature?.tier || !(TIER_ROLES as readonly string[]).includes(role) ? undefined
+    : profiles(config)[profile]?.tiers?.[feature.tier]?.[role as typeof TIER_ROLES[number]];
+// The tier that changed `role` for this feature (for its prompt fingerprint), or null.
+export const tierApplies = (config: Config, profile: string | null, role: ProfileRole, feature?: Tiered): Tier | null =>
+  tierEntryOf(config, profile, role, feature) ? feature!.tier! : null;
+
+// The builder escalates to its profile's effortHigh on a risky feature that has no tier; opus never escalates (its effort is
+// the config's). A tier set at intake replaces the heuristic.
+export const escalates = (config: Config, profile: string | null, feature?: Tiered): boolean =>
+  !!feature && !feature.tier && !!entryOf(config, profile, 'builder')?.effortHigh && isRisky(feature);
 
 // The RoleConfig a launch actually uses. Base: the role's config (resolver falls back to builder, like claudeArgs always did;
 // observer/curator take the observer's agent config, passed in by the caller). A profile naming the role overrides model and
 // effort where its entry has them; permissionMode stays the base's. An unknown profile resolves like opus (callers validate).
-export function resolveRole(config: Config, profile: string | null, role: ProfileRole, { feature, agent }: { feature?: Parameters<typeof isRisky>[0]; agent?: RoleConfig | null } = {}): RoleConfig {
-  const base = baseOf(config, role, agent), e = entryOf(config, profile, role);
-  if (!e) return { ...base };
-  const effort = role === 'builder' && e.effortHigh && feature && isRisky(feature) ? e.effortHigh : e.effort ?? base.effort;
-  return { ...base, ...(e.model ? { model: e.model } : {}), ...(effort ? { effort } : {}) };
+// Then the feature's tier entry in that profile overrides model, effort and provider for the roles it names.
+export function resolveRole(config: Config, profile: string | null, role: ProfileRole, { feature, agent }: { feature?: Tiered; agent?: RoleConfig | null } = {}): RoleConfig {
+  const base = baseOf(config, role, agent), e = entryOf(config, profile, role), t = tierEntryOf(config, profile, role, feature);
+  if (!e && !t) return { ...base };
+  const effort = role === 'builder' && e?.effortHigh && feature && !feature.tier && isRisky(feature) ? e.effortHigh : e?.effort ?? base.effort;
+  const r: RoleConfig = { ...base, ...(e?.model ? { model: e.model } : {}), ...(effort ? { effort } : {}), ...(e?.provider ? { provider: e.provider } : {}) };
+  return { ...r, ...(t?.model ? { model: t.model } : {}), ...(t?.effort ? { effort: t.effort } : {}), ...(t?.provider ? { provider: t.provider } : {}) };
 }
 
 export interface RoleRow { role: ProfileRole; model: string | null; effort: string | null; effortHigh?: string; fromProfile: boolean }
@@ -106,6 +119,28 @@ export function roleTable(config: Config, profile: string | null, agent: RoleCon
 }
 
 // Problems with config.profiles, for doctor: an object of objects, known role keys, string fields, "opus" not redefined.
+// Codex runs only the read-only roles: a provider is "claude" or, for the evaluator, "codex".
+const providerProblems = (path: string, role: string, v: unknown): string[] =>
+  v === 'claude' || (v === 'codex' && role === 'evaluator') ? [] : [`${path}.provider must be "claude"${role === 'evaluator' ? ' or "codex"' : ' (only the evaluator can use "codex")'}`];
+function tierProblems(path: string, raw: unknown): string[] {
+  if (!isObj(raw)) return [`${path} must be an object of {tier: {role: {model?, effort?, provider?}}}`];
+  const out: string[] = [];
+  for (const [tier, roles] of Object.entries(raw)) {
+    if (!(TIERS as string[]).includes(tier)) { out.push(`${path}.${tier}: unknown tier (tiers: ${TIERS.join(', ')})`); continue; }
+    if (!isObj(roles)) { out.push(`${path}.${tier} must be an object of roles`); continue; }
+    for (const [role, e] of Object.entries(roles)) {
+      if (!(TIER_ROLES as readonly string[]).includes(role)) { out.push(`${path}.${tier}.${role}: unknown role (tier roles: ${TIER_ROLES.join(', ')})`); continue; }
+      if (!isObj(e)) { out.push(`${path}.${tier}.${role} must be an object {model?, effort?, provider?}`); continue; }
+      for (const [k, v] of Object.entries(e)) {
+        if (k === 'provider') out.push(...providerProblems(`${path}.${tier}.${role}`, role, v));
+        else if (!['model', 'effort'].includes(k)) out.push(`${path}.${tier}.${role}.${k}: unknown field (model, effort, provider)`);
+        else if (typeof v !== 'string' || !v.trim()) out.push(`${path}.${tier}.${role}.${k} must be a non-empty string`);
+      }
+    }
+  }
+  return out;
+}
+
 export function profileProblems(raw: unknown): string[] {
   if (raw === undefined) return [];
   if (!isObj(raw)) return ['config.profiles must be an object of {name: {role: {model?, effort?, effortHigh?}}}'];
@@ -114,9 +149,11 @@ export function profileProblems(raw: unknown): string[] {
     if (RESERVED.includes(name)) { out.push(`config.profiles.${name}: "${name}" is reserved (each role's own config)`); continue; }
     if (!isObj(p)) { out.push(`config.profiles.${name} must be an object of roles`); continue; }
     for (const [role, e] of Object.entries(p)) {
+      if (role === 'tiers') { out.push(...tierProblems(`config.profiles.${name}.tiers`, e)); continue; }
       if (!(PROFILE_ROLES as string[]).includes(role)) { out.push(`config.profiles.${name}.${role}: unknown role (roles: ${PROFILE_ROLES.join(', ')})`); continue; }
       if (!isObj(e)) { out.push(`config.profiles.${name}.${role} must be an object {model?, effort?, effortHigh?}`); continue; }
       for (const [k, v] of Object.entries(e)) {
+        if (k === 'provider') { out.push(...providerProblems(`config.profiles.${name}.${role}`, role, v)); continue; }
         if (!['model', 'effort', 'effortHigh'].includes(k)) out.push(`config.profiles.${name}.${role}.${k}: unknown field (model, effort, effortHigh${k === 'permissionMode' ? '; permissionMode always comes from the role config' : ''})`);
         else if (typeof v !== 'string' || !v.trim()) out.push(`config.profiles.${name}.${role}.${k} must be a non-empty string`);
       }

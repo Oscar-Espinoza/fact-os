@@ -209,3 +209,21 @@ test('I01: gateFixes is a safe integer >= 0 and diagnoser is null or role settin
   s.set({ diagnoser: null });
   assert.equal(loadConfig(s.root).diagnoser, null);
 });
+
+test('I02: only the evaluator and the diagnoser can use Codex; codex settings keep their defaults when partial', (t) => {
+  const s = setup(t);
+  s.set({ evaluator: { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' }, diagnoser: { provider: 'codex', model: 'gpt-6.1-sol' } });
+  assert.equal(loadConfig(s.root).evaluator.provider, 'codex');
+  for (const key of ['builder', 'resolver']) {
+    s.set({ [key]: { provider: 'codex', model: 'gpt-6.1-sol' } });
+    assert.throws(() => loadConfig(s.root), new RegExp(`config\\.${key}\\.provider`), key);
+  }
+  s.set({ evaluator: { provider: 'openai' } });
+  assert.throws(() => loadConfig(s.root), /config\.evaluator\.provider/);
+  s.set({ codex: { cooldownMin: 5 } });
+  assert.deepEqual(loadConfig(s.root).codex, { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 5 });
+  for (const codex of [{ cooldownMin: -1 }, { fallback: { provider: 'codex' } }, 'x']) {
+    s.set({ codex });
+    assert.throws(() => loadConfig(s.root), /config\.codex/, JSON.stringify(codex));
+  }
+});

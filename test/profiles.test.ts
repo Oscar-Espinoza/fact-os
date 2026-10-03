@@ -2,8 +2,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { DEFAULT_PROFILES, profiles, profileNames, validProfile, normalizeProfile, resolveRole, isRisky, escalates, roleTable, profileProblems, profileLabel, riskFamilies } from '../lib/profiles.ts';
-import type { Config } from '../lib/types.ts';
+import { DEFAULT_PROFILES, profiles, profileNames, validProfile, normalizeProfile, resolveRole, isRisky, escalates, roleTable, profileProblems, profileLabel, riskFamilies, tierApplies } from '../lib/profiles.ts';
+import { promptFingerprint } from '../lib/foreman.ts';
+import type { Config, Tier } from '../lib/types.ts';
 
 const C = (o: Partial<Config> = {}): Config => ({ ...DEFAULT_CONFIG, ...o });
 const plain = { title: 'Product list page', description: 'Show the products in a grid' };
@@ -105,4 +106,49 @@ test('profileProblems (doctor): object of objects, known roles, string fields, o
   for (const re of [/profiles\.opus: "opus" is reserved/, /profiles\.a must be an object/, /profiles\.b\.reviewer: unknown role/, /profiles\.c\.builder must be an object/,
     /profiles\.d\.evaluator\.model must be a non-empty string/, /profiles\.d\.evaluator\.permissionMode: unknown field.*role config/, /profiles\.d\.evaluator\.effortHigh: only the builder/])
     assert.ok(p.some((x) => re.test(x)), `${re} in ${JSON.stringify(p)}`);
+});
+
+// ---- I03: feature tiers, set at intake ----
+const tiered = C({ builder: { model: 'opus', effort: 'medium', permissionMode: 'auto' }, evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
+  profiles: { 'opus-sonnet': {
+    builder: { model: 'sonnet', effort: 'medium', effortHigh: 'high' }, evaluator: { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' },
+    tiers: { multi: { builder: { effort: 'high' } }, hard: { builder: { model: 'opus', effort: 'medium' } },
+      risky: { builder: { model: 'opus', effort: 'high' }, evaluator: { effort: 'xhigh' } }, investigate: { builder: { model: 'opus', effort: 'high' } } },
+  } } });
+const tier = (t: Tier | undefined, base = risky) => ({ ...base, tier: t });
+
+test('I03: a feature tier picks role models from the active profile; the risk heuristic is only the fallback', () => {
+  const b = (t: Tier | undefined, base = risky) => resolveRole(tiered, 'opus-sonnet', 'builder', { feature: tier(t, base) });
+  assert.deepEqual(b('normal'), { model: 'sonnet', effort: 'medium', permissionMode: 'auto' }, 'an explicit tier wins over risk keywords');
+  assert.deepEqual(b('multi'), { model: 'sonnet', effort: 'high', permissionMode: 'auto' });
+  assert.deepEqual(b('hard'), { model: 'opus', effort: 'medium', permissionMode: 'auto' });
+  assert.deepEqual(b('risky', plain), { model: 'opus', effort: 'high', permissionMode: 'auto' });
+  assert.deepEqual(b(undefined), { model: 'sonnet', effort: 'high', permissionMode: 'auto' }, 'untiered: the heuristic escalates effort');
+  assert.deepEqual(b(undefined, plain), { model: 'sonnet', effort: 'medium', permissionMode: 'auto' });
+  assert.deepEqual(resolveRole(tiered, 'opus-sonnet', 'evaluator', { feature: tier('risky') }),
+    { model: 'gpt-6.1-sol', effort: 'xhigh', permissionMode: 'auto', provider: 'codex' }, 'risky: deep Codex review');
+  assert.deepEqual(resolveRole(tiered, 'opus-sonnet', 'evaluator', { feature: tier('multi') }),
+    { model: 'gpt-6.1-sol', effort: 'high', permissionMode: 'auto', provider: 'codex' });
+  assert.deepEqual(resolveRole(tiered, null, 'builder', { feature: tier('risky') }), tiered.builder, 'opus mode ignores tiers');
+  assert.equal(escalates(tiered, 'opus-sonnet', tier('normal')), false);
+  assert.equal(escalates(tiered, 'opus-sonnet', tier(undefined)), true);
+  assert.equal(tierApplies(tiered, 'opus-sonnet', 'builder', tier('hard')), 'hard');
+  assert.equal(tierApplies(tiered, 'opus-sonnet', 'evaluator', tier('hard')), null, 'the hard tier names no evaluator');
+  assert.equal(tierApplies(tiered, null, 'builder', tier('hard')), null);
+});
+
+test('I03: profileProblems checks tiers, providers and their roles', () => {
+  assert.deepEqual(profileProblems(tiered.profiles), []);
+  const bad = (p: unknown) => profileProblems({ x: p }).join('\n');
+  assert.match(bad({ tiers: { huge: { builder: { model: 'opus' } } } }), /tiers\.huge: unknown tier/);
+  assert.match(bad({ tiers: { hard: { observer: { model: 'opus' } } } }), /tiers\.hard\.observer: unknown role/);
+  assert.match(bad({ tiers: { hard: { builder: { effortHigh: 'high' } } } }), /tiers\.hard\.builder\.effortHigh: unknown field/);
+  assert.match(bad({ tiers: { hard: { builder: { provider: 'codex' } } } }), /tiers\.hard\.builder\.provider/);
+  assert.match(bad({ builder: { provider: 'codex' } }), /x\.builder\.provider/);
+  assert.match(bad({ tiers: 'x' }), /tiers must be an object/);
+});
+
+test('I03: a tier that changed a role shows in its prompt fingerprint', () => {
+  assert.match(promptFingerprint('builder', { model: 'opus', effort: 'high' }, null, '', 'opus-sonnet', null, null, 'risky'), / tier=risky$/);
+  assert.doesNotMatch(promptFingerprint('builder', { model: 'opus', effort: 'high' }, null, '', 'opus-sonnet'), /tier=/);
 });

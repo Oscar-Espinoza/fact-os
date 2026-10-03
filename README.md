@@ -87,7 +87,18 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   it, spending no attempt) and `diagnoser` (null; `{model, effort}`: when a resumed fix fails the gate again, a
   read-only run diagnoses a code, test or environment fault, and the builder gets one more fix with that brief).
   Edits to tests that already exist on base are always listed for the evaluator (`test-edits` event).
-- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?, touches?, risk?,
+  The evaluator and the diagnoser can run on Codex: `provider: "codex"` in their role config, a profile's
+  evaluator entry or a tier entry (e.g. `{provider: "codex", model: "gpt-6.1-sol", effort: "high"}`). It runs
+  `codex exec` in the worktree (workspace-write sandbox with network, no access to the repository's `.git`) and
+  undoes anything the run leaves behind (`codex-cleaned`). A run that cannot answer falls back to a Claude run of the
+  same prompt with `codex.fallback` (default `{model: "opus", effort: "high"}`); a usage-limit, rate-limit or login
+  error also cools Codex down for `codex.cooldownMin` minutes (default 30; `.fact-os/codex.json`). Codex reports
+  tokens, not dollars, so its runs add nothing to the cost totals or budgets.
+- **Feature tiers.** Intake sets each feature's `tier` (`normal`, `multi`, `hard`, `risky`, `investigate`); a profile's
+  `tiers` maps tiers to builder, resolver and evaluator overrides, e.g. `"tiers": {"risky": {"builder": {"model":
+  "opus", "effort": "high"}, "evaluator": {"effort": "xhigh"}}}`. A tier replaces the keyword risk heuristic for that
+  feature; untiered features keep the heuristic. The "opus" mode ignores tiers. Prompt fingerprints add ` tier=<tier>`.
+- `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?, touches?, risk?, tier?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is
   `todo|building|testing|evaluating|ready|merged|stuck|paused`. `risk: "high"` gives the builder its profile's

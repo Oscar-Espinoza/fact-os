@@ -1,13 +1,13 @@
 // Foreman: plan → build → test → evaluate → merge → compound, over ready features, in parallel worktrees.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
+import { paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
-import { escalates, resolveRole } from './profiles.ts';
+import { escalates, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
@@ -170,10 +170,10 @@ export function runTag(existing: string[], attempt: number): string {
 // (effortBase: what it would have had otherwise, so the observer can key prompt versions without it). A prompt that carries
 // per-model notes (notes.ts) has ` notes=<sha8>` after the briefs, so agent stats split by notes version. Opus adds nothing, so
 // its fingerprints are unchanged.
-export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string, profile: string | null = null, effortBase: string | null = null, notes: string | null = null): string {
+export function promptFingerprint(role: Role, r: { model?: string; effort?: string }, lessons: string | null, briefs: string, profile: string | null = null, effortBase: string | null = null, notes: string | null = null, tier: string | null = null): string {
   const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 8);
   return `${role} model=${r.model || '-'} effort=${r.effort || '-'} lessons=${lessons == null ? '-' : h(lessons)} briefs=${briefs ? h(briefs) : '-'}` + (notes ? ` notes=${notesHash(notes)}` : '') +
-    (profile ? ` profile=${profile}` : '') + (effortBase != null ? ` risk=high effortBase=${effortBase || '-'}` : '');
+    (profile ? ` profile=${profile}` : '') + (effortBase != null ? ` risk=high effortBase=${effortBase || '-'}` : '') + (tier ? ` tier=${tier}` : '');
 }
 
 // The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
@@ -354,6 +354,35 @@ function resolverPrompt(root: string, config: Config, f: Feature, branch: string
 }
 
 // `role` is the resolved RoleConfig the launch uses (resolveRole), or a role name for its plain config (as in opus mode).
+// ---- codex (read-only roles: the evaluator and the diagnoser) ----
+
+// `codex exec`: the role's model and reasoning effort; a workspace-write sandbox with network access (reviews run the tests,
+// including local database suites) that cannot reach the repository's .git, so a review cannot commit; no approval prompts;
+// JSONL events on stdout and the last message in `lastFile`; the prompt on stdin.
+export function codexArgs(cfg: RoleConfig, lastFile: string): string[] {
+  return ['exec', ...(cfg.model ? ['-m', cfg.model] : []), ...(cfg.effort ? ['-c', `model_reasoning_effort="${cfg.effort}"`] : []),
+    '-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '-c', 'approval_policy="never"',
+    '--json', '--color', 'never', '-o', lastFile, '-'];
+}
+// Codex JSONL events: the thread (session) id, the token usage and a turn or stream error. `item.completed` items of type
+// "error" are warnings (Codex reports enabled preview features that way), never a failure.
+export function parseCodexEvents(stdout: string): { threadId?: string; usage?: unknown; error?: string } {
+  const out: { threadId?: string; usage?: unknown; error?: string } = {};
+  for (const line of stdout.split('\n')) {
+    const e = tryJson(line) as Record<string, unknown> | undefined;
+    if (!e || typeof e !== 'object') continue;
+    if (e.type === 'thread.started' && typeof e.thread_id === 'string') out.threadId = e.thread_id;
+    else if (e.type === 'turn.completed') out.usage = e.usage;
+    else if (e.type === 'turn.failed' || e.type === 'error') {
+      const err = e.error as { message?: unknown } | undefined;
+      out.error = String(err?.message ?? e.message ?? JSON.stringify(e));
+    }
+  }
+  return out;
+}
+// A Codex failure that will not clear by itself soon: the account is out of credits, rate limited or logged out.
+export const CODEX_UNAVAILABLE = /usage limit|rate.?limit|quota|credits?|insufficient|\b429\b|unauthori[sz]ed|\b401\b|not logged in|log ?in|authenticat/i;
+
 export function claudeArgs(config: Config, role: Role | RoleConfig, root: string): string[] {
   const r = typeof role === 'string' ? resolveRole(config, null, role) : role;
   const hook = [{ matcher: '*', hooks: [{ type: 'command', command: `"${process.execPath}" "${BIN}" hook` }] }];
@@ -533,15 +562,58 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       return r.code === 0 || !p.ok ? p : { ...p, ok: false, error: `exit ${r.code}: ${tail(r.err, 500)}` };
     };
 
+    // A role run by its provider. Codex (evaluator, diagnoser): whatever the run leaves in the worktree is undone (`cleaned`);
+    // a run that cannot answer (an error, a timeout, no last message) falls back to config.codex.fallback, a Claude run of the
+    // same prompt; an exhausted, rate-limited or logged-out account also cools Codex down for config.codex.cooldownMin.
+    const codexState = join(P.dir, 'codex.json');
+    const codexCooling = (): string | null => {
+      let c: { until?: string; reason?: string } | null = null;
+      try { c = readJson(codexState, null) as { until?: string; reason?: string } | null; } catch { c = null; }
+      const until = c?.until;
+      return until && Date.parse(until) > Date.now() ? `cooling down until ${until} after: ${c?.reason ?? 'unavailable'}` : null;
+    };
+    const agent = async (role: Role, prompt: string, file: string, opts: { cfg?: RoleConfig } = {}): Promise<ClaudeResult & { cleaned?: boolean }> => {
+      const cfg = opts.cfg ?? roleCfg(role);
+      if (cfg.provider !== 'codex') return claude(role, prompt, file, { cfg });
+      const fallback = async (why: string, cleaned = false) => {
+        const fcfg: RoleConfig = { permissionMode: cfg.permissionMode, ...config.codex.fallback, provider: 'claude' };
+        log(root, id, 'codex-fallback', `${why}; ${[fcfg.model, fcfg.effort].filter(Boolean).join(' ') || 'claude'} instead`);
+        out(`codex ${id}: ${why.split('\n')[0]}; falling back to ${fcfg.model ?? 'claude'}`);
+        recordPrompt(role, prompt, null, fcfg);
+        return { ...await claude(role, prompt, file, { cfg: fcfg }), cleaned };
+      };
+      const cooling = codexCooling();
+      if (cooling) return fallback(`codex is ${cooling}`);
+      const head = git(['rev-parse', 'HEAD'], wt).out, started = Date.now(), last = join(runDir, `.${file}.codex-last`);
+      const r = await exec(envVar('CODEX') || 'codex', codexArgs(cfg, last), { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin, onSpawn });
+      const text = (readIf(last) ?? '').trim(), ev = parseCodexEvents(r.out);
+      try { unlinkSync(last); } catch {}
+      let cleaned = false;
+      if (git(['rev-parse', 'HEAD'], wt).out !== head || git(['status', '--porcelain'], wt).out) {
+        git(['reset', '-q', '--hard', head], wt); git(['clean', '-q', '-fd'], wt); cleaned = true;
+        log(root, id, 'codex-cleaned', `the ${role === 'evaluator' ? 'review' : 'run'} left changes in the worktree; undone`);
+      }
+      if (r.code !== 0 || r.timedOut || !text || ev.error) {
+        const why = r.timedOut ? `timed out after ${config.timeoutMin} min` : ev.error ?? (tail(r.err, 300).trim() || `exit ${r.code}, no answer`);
+        writeFileSync(join(runDir, file.replace(/\.json$/, '.codex-failed.json')), JSON.stringify({ provider: 'codex', model: cfg.model, exitCode: r.code, stderr: tail(r.err), events: tail(r.out) }));
+        if (!r.timedOut && CODEX_UNAVAILABLE.test(`${why}\n${r.err}`))
+          writeJsonAtomic(codexState, { until: new Date(Date.now() + config.codex.cooldownMin * 60e3).toISOString(), reason: why.split('\n')[0] });
+        return fallback(`codex unavailable: ${why.split('\n')[0]}`, cleaned);
+      }
+      writeFileSync(join(runDir, file), JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: 0,
+        duration_ms: Date.now() - started, session_id: ev.threadId, provider: 'codex', model: cfg.model, effort: cfg.effort, usage: ev.usage }));
+      return { ok: true, text, cost: 0, ...(ev.threadId ? { sessionId: ev.threadId } : {}), cleaned };
+    };
+
     mkdirSync(runDir, { recursive: true });
     let tag = runTag(readdirSync(runDir), attempt);
     // The per-model notes (notes.ts) for the model this role launches with; read once per prompt, so the text in the prompt
     // and the `notes=` in its fingerprint are the same version.
     const notesFor = (role: Role) => readNotes(root, roleCfg(role).model, role);
-    const recordPrompt = (role: Role, prompt: string, notes: string | null) => {
+    const recordPrompt = (role: Role, prompt: string, notes: string | null, cfg?: RoleConfig) => {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
-      log(root, id, 'prompt', promptFingerprint(role, roleCfg(role), role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
-        profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes));
+      log(root, id, 'prompt', promptFingerprint(role, cfg ?? roleCfg(role), role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
+        profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes, cfg ? null : tierApplies(config, profile, role, f)));
     };
     // A conflicted refresh resolved at once by a resolver run (config.resolver), in this same pass: the feature keeps its slot
     // and its claims, and goes on to test and evaluation. Returns the note for the evaluator, or null when the feature went
@@ -702,9 +774,9 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const mb = git(['merge-base', config.base, head], wt).out;
       const prompt = diagnosisPrompt(config, f, branch, failure, git(['diff', '--stat=160', `${mb}..${head}`], wt).out, testEdits(wt, mb, head));
       writeFileSync(join(runDir, `${tag}-diagnose.prompt.md`), prompt);
-      const r = await claude('builder', prompt, `${tag}-diagnose.json`, { cfg: dcfg });
+      const r = await agent('builder', prompt, `${tag}-diagnose.json`, { cfg: dcfg });
       if (await stopped()) return 'stopped';
-      if (git(['rev-parse', 'HEAD'], wt).out !== head || git(['status', '--porcelain'], wt).out) { // read-only, or nothing
+      if (r.cleaned || git(['rev-parse', 'HEAD'], wt).out !== head || git(['status', '--porcelain'], wt).out) { // read-only, or nothing
         git(['reset', '-q', '--hard', head], wt); git(['clean', '-q', '-fd'], wt);
         log(root, id, 'diagnosis', 'refused: the diagnosis changed the worktree; its edits were undone'); return null;
       }
@@ -761,7 +833,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (edits.length) log(root, id, 'test-edits', edits.join('; '));
       const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits);
       recordPrompt('evaluator', ep, en);
-      const e = await claude('evaluator', ep, `${tag}-eval.json`);
+      const e = await agent('evaluator', ep, `${tag}-eval.json`);
       if (await stopped()) return;
       const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };
       const lesson = v.lesson;

@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
-import { STATUSES, IN_FLIGHT, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
+import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
 import { profileNames, profileLabel, roleTable, riskyOpen } from './profiles.ts';
 
@@ -58,7 +58,7 @@ function init(test: string | undefined): void {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/'].map((f) => `${paths(root).name}/${f}`)
+  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');
@@ -119,6 +119,7 @@ function doctor(): number {
     if (!STATUS.includes(f?.status as string)) bad(`status must be one of ${STATUS.join('|')}`);
     if (f?.touches !== undefined && !strs(f.touches)) bad('touches must be an array of repo paths (or dir prefixes ending in "/")');
     if (f?.risk !== undefined && !['high', 'normal'].includes(f.risk as string)) bad('risk must be "high" or "normal" (absent: decided from the title and description)');
+    if (f?.tier !== undefined && !(TIERS as string[]).includes(f.tier as string)) bad(`tier must be one of ${TIERS.join('|')} (absent: the risk heuristic decides)`);
   }
   for (const t of tasks) {
     const bad = (m: string) => problems.push(`human task ${t?.id ?? '?'}: ${m}`);

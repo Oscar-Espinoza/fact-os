@@ -12,7 +12,7 @@ export const DEFAULT_CONFIG: Config = {
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
-  gateFixes: 0, diagnoser: null,
+  gateFixes: 0, diagnoser: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
@@ -193,9 +193,10 @@ function configProblems(raw: unknown): string[] {
   const strings = (x: unknown): boolean => Array.isArray(x) && x.every(str);
   const uint = (x: unknown): boolean => Number.isSafeInteger(x) && (x as number) >= 0;
   const nonnegative = (x: unknown): boolean => typeof x === 'number' && Number.isFinite(x) && x >= 0;
-  const role = (x: unknown, path: string) => {
+  const role = (x: unknown, path: string, codexOk = false) => {
     const r = obj(x, path); if (!r) return;
     for (const key of ['model', 'effort', 'permissionMode']) field(r, path, key, str, 'a non-empty string');
+    field(r, path, 'provider', (p) => p === 'claude' || (codexOk && p === 'codex'), codexOk ? '"claude" or "codex"' : '"claude" (only the evaluator and the diagnoser can use "codex")');
   };
   const c = obj(raw, 'config'); if (!c) return problems;
   for (const key of ['base', 'worktreesDir', 'test', 'lessonsFile']) field(c, 'config', key, str, 'a non-empty string');
@@ -213,8 +214,15 @@ function configProblems(raw: unknown): string[] {
   field(c, 'config', 'timeoutMin', (x) => x === null || (nonnegative(x) && (x as number) > 0 && (x as number) * 60000 <= 2 ** 31 - 1),
     'positive finite minutes within the timer range (<= (2^31 - 1) / 60000), or null');
   for (const key of ['builder', 'evaluator', 'resolver'])
-    if (Object.hasOwn(c, key) && !(key === 'resolver' && c[key] === null)) role(c[key], `config.${key}`);
-  if (Object.hasOwn(c, 'diagnoser') && c.diagnoser !== null) role(c.diagnoser, 'config.diagnoser');
+    if (Object.hasOwn(c, key) && !(key === 'resolver' && c[key] === null)) role(c[key], `config.${key}`, key === 'evaluator');
+  if (Object.hasOwn(c, 'diagnoser') && c.diagnoser !== null) role(c.diagnoser, 'config.diagnoser', true);
+  if (Object.hasOwn(c, 'codex')) {
+    const cx = obj(c.codex, 'config.codex');
+    if (cx) {
+      if (Object.hasOwn(cx, 'fallback')) role(cx.fallback, 'config.codex.fallback');
+      field(cx, 'config.codex', 'cooldownMin', (x) => nonnegative(x) && Number.isFinite((x as number) * 60e3), 'finite minutes >= 0');
+    }
+  }
   if (Object.hasOwn(c, 'claims') && c.claims !== null) {
     const cl = obj(c.claims, 'config.claims');
     if (cl) {
@@ -254,6 +262,7 @@ export function loadConfig(root: string): Config {
   if (problems.length) throw new Error(`${file}: invalid configuration:\n${problems.join('\n')}`);
   const c: Config = { ...DEFAULT_CONFIG, ...(raw as Partial<Config>) };
   c.worktreesDir = c.worktreesDir.replace('<repo>', basename(root));
+  c.codex = { ...DEFAULT_CONFIG.codex, ...c.codex }; // a partial codex block keeps the default fallback or cooldown
   return c;
 }
 
