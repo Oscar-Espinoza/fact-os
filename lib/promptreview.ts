@@ -235,21 +235,23 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
   const keyOf = (p: Pass) => { if (!keyed.has(p)) keyed.set(p, reviewKey(P.runs, p)); return keyed.get(p)!; };
   const todo = selectPasses(passes, { since: Date.now() - REVIEW_WINDOW, max, reviewed: (p) => !keyOf(p) || !!reviews[keyOf(p)!.key] || (tries[keyOf(p)!.key]?.n ?? 0) >= MAX_TRIES });
   if (!todo.length) return 0;
-  state.promptReviewAt = now();
   out(`observer: reviewing ${todo.length} failed passes (${todo.map((p) => p.feature).join(', ')})`);
-  let done = 0;
+  let done = 0, started = false;
   const failed = (key: string) => { const t = tries[key] ?? { n: 0, ts: now() }; tries[key] = { n: t.n + 1, ts: now() }; };
   const one = async (p: Pass): Promise<void> => {
     try { await review(p); } catch (e) { // e.g. the prompt file vanished
       out(`observer: review of ${p.feature} failed: ${firstLine(String((e as Error).message ?? e))}`);
-      const k = keyOf(p); if (k) failed(k.key);
+      const k = keyOf(p); if (k && !stopping()) failed(k.key);
     }
   };
   const review = async (p: Pass): Promise<void> => {
+    if (stopping()) return;
     const k = keyOf(p)!, used = p.prompts.filter((x) => x.role === p.role).at(-1)!, branch = feature(p.feature).branch;
     const has = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).code === 0;
     const input: ReviewInput = { feature: p.feature, title: feature(p.feature).title, role: p.role!, model: used.model, effort: used.effort, kind: p.kind!, outcome: p.detail || '(no detail logged)',
       diffStat: has ? git(['diff', '--stat=120', `${config.base}...${branch}`], root).out : '(the branch no longer exists)', next: nextResult(passes, p), prompt: readFileSync(k.file, 'utf8'), file: k.file };
+    if (stopping()) return;
+    if (!started) { state.promptReviewAt = now(); started = true; }
     state.promptReviewRuns!.push(now());
     const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: process.env, input: reviewPrompt(input), children, timeoutMin: reviewTimeoutMin(config) });
     const c = parseClaudeOutput(r.out);
@@ -276,7 +278,8 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
 // the merged notes outgrow it the curator agent rewrites them shorter (as lessons are curated), and when it cannot, the oldest
 // bullets go to the archive. Template suggestions are skipped here: they are for a person (fileTemplateTasks).
 export async function updateNotes(root: string, config: Config, agent: RoleConfig, cfg: PromptReviewConfig, state: PromptState, io: Io): Promise<void> {
-  const { out, children } = io;
+  const { out, children, stopping } = io;
+  if (stopping()) return;
   const all = Object.values(state.promptReviews ?? {}), groups = new Map<string, PromptReview[]>();
   for (const r of all) {
     if (r.noted || r.target === 'template' || !eligible(r, all, 'model')) continue;
@@ -284,6 +287,7 @@ export async function updateNotes(root: string, config: Config, agent: RoleConfi
     (groups.get(k) ?? groups.set(k, []).get(k)!).push(r);
   }
   for (const [g, rs] of groups) {
+    if (stopping()) return;
     const [model, role] = g.split('\n') as [string, Role], file = notesFile(root, model, role), before = existsSync(file) ? readFileSync(file, 'utf8') : '';
     let bullets = mergeNotes(noteBullets(before), rs.map((r) => r.suggestion));
     const added = bullets.length - noteBullets(before).length;
@@ -291,7 +295,9 @@ export async function updateNotes(root: string, config: Config, agent: RoleConfi
       mkdirSync(notesDir(root), { recursive: true });
       let note = `${added} added`;
       if (overCap(bullets, cfg.notesMaxBytes)) {
+        if (stopping()) return;
         const kept = await tidyNotes(root, config, agent, cfg, model, role, bullets, children);
+        if (stopping()) return;
         if (kept) { archive(root, model, role, `${noteBullets(before).length} notes before tidying`, noteBullets(before)); bullets = kept; note += ', tidied by the curator'; }
         else { const f = fitNotes(bullets, cfg.notesMaxBytes); archive(root, model, role, `${f.dropped.length} oldest notes dropped`, f.dropped); bullets = f.kept; note += `, ${f.dropped.length} oldest archived`; }
       }
@@ -322,23 +328,27 @@ async function tidyNotes(root: string, config: Config, agent: RoleConfig, cfg: P
 
 // One open human task per role for suggested changes to its prompt template (never applied by the observer). New suggestions
 // join the open task; once it is done, later ones open another.
-export async function fileTemplateTasks(root: string, state: PromptState, out: Out): Promise<void> {
+export async function fileTemplateTasks(root: string, state: PromptState, out: Out, stopping: () => boolean = () => false): Promise<void> {
   const all = Object.entries(state.promptReviews ?? {}), roles = new Map<Role, [string, PromptReview][]>();
   for (const [k, r] of all) if (!r.filed && r.target === 'template' && eligible(r, all.map(([, x]) => x), 'role')) (roles.get(r.role) ?? roles.set(r.role, []).get(r.role)!).push([k, r]);
   for (const [role, rs] of roles) {
+    if (stopping()) return;
     const title = `Prompt template change suggested for ${role}`;
     const head = (n: number) => `The review agent found ${n} failed ${role} pass${n === 1 ? '' : 'es'} where the ${role} prompt template itself was the problem. The template is fixed text in ${NAME} (lib/foreman.ts), so it needs a person.`;
     const steps = [head(rs.length),
       ...rs.flatMap(([k, r]) => [`Suggested change (${r.model}, ${r.confidence} confidence, ${CAUSE_WORDS[r.cause!]}): ${r.suggestion}`,
         `Evidence from ${k}: ${r.evidence.length ? r.evidence.join(' | ') : 'none given'}`])];
-    await mutate(root, 'human', (d) => {
+    const filed = await mutate(root, 'human', (d) => {
+      if (stopping()) return false;
       const open = d.tasks.find((t) => t.status === 'open' && t.title === title);
       if (open) { // the new suggestions join it, and the count in its first step follows
         const n = rs.length + (Number(/found (\d+) failed/.exec(open.steps[0] ?? '')?.[1]) || 0);
         open.steps.splice(0, 1, head(n)); open.steps.push(...steps.slice(1));
       }
       else d.tasks.push({ id: `observer-prompt-${role}-${Date.now().toString(36)}`, title, steps, unblocks: [], mockable: false, status: 'open' } satisfies HumanTask);
+      return true;
     });
+    if (!filed) return;
     for (const [, r] of rs) r.filed = true;
     log(root, null, 'observer-proposal', `${title} (${rs.length} reviews)`);
     out(`observer: proposal: ${title}`);

@@ -611,7 +611,18 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    `observer.json`); the cost of every review run is summed in `promptReviewCost` and shown in the report and the dashboard.
    The reviews are saved to `observer.json` as soon as the batch ends, and a failing review, notes or template-task step is logged
    (`observer-error`) without ending the pass; the `--watch` loop likewise reports a pass that throws and goes on. On a stop
-   signal no further batch starts and notes are not updated.
+   signal no further provider starts (including later parallel batches, notes groups, curation and improvement).
+   Cancellation is checked again after checkout/state lock waits and provider completion before applying notes,
+   lessons, template tasks or improver proposals; unused suggestions remain eligible for a later pass. Completed
+   paid review answers/costs are still saved; a canceled failed run does not consume a retry, and an unstarted
+   batch/curation/improvement does not start its throttle. The first SIGINT/SIGTERM stops launches and SIGTERMs
+   owned child groups; a second SIGKILLs them before immediate exit 130. On normal/exceptional return, any
+   still-owned children are SIGKILLed and their close events drained before releasing supervisor ownership and
+   removing signal listeners. Forced exit can leave a stale ownership marker, recovered on the next start.
+   A provider that ignores SIGTERM may need the second signal when no timeout is configured. Tracking lasts
+   until the child closes; daemonized descendants, changed process groups and detached children whose parent
+   already closed with redirected stdio are outside this guarantee. Direct `observeOnce` callers supply their
+   own cancellation signal and remain responsible for stopping their child set.
    It answers with a JSON object `{cause, evidence, confidence, suggestion, target}`: exactly one cause of
    `prompt-missing-info` (context the model needed was not in the prompt), `prompt-ambiguous` (two readings, the model took
    the other), `prompt-conflict` (instructions or an acceptance check contradicted each other or were impossible),

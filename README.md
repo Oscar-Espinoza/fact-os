@@ -134,7 +134,9 @@ generated paths by name only).
   worktrees. Only touches the repo, its worktrees dir and `~/.local/state/fact-os/`.
 - Only kills processes it started. Each child runs in its own process group; on timeout or SIGINT/SIGTERM
   the whole group gets SIGTERM and in-flight features go back to `todo` without spending an attempt; a
-  second Ctrl-C SIGKILLs the groups and exits at once. One foreman per repo (`.fact-os/.foreman`).
+  second Ctrl-C SIGKILLs the groups and exits at once. The observer uses the same signal
+  sequence: no later review, notes, curation or improver starts, and canceled agent output
+  is not applied. Completed paid reviews are retained for the next pass. One foreman per repo (`.fact-os/.foreman`).
   Features left in flight by a dead foreman are marked `merged` if their branch is already merged into
   `base`, left alone while their recorded child is alive (same pid and start time; `EPERM` counts as dead;
   without `/proc`, dead once its foreman is dead) for at most `timeoutMin`; a child still running after that
