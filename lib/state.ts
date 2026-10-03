@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, append
 import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
 import type { Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
-import { OPUS, normalizeProfile, profileNames, validProfile } from './profiles.ts';
+import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } from './profiles.ts';
 
 export const DEFAULT_CONFIG: Config = {
   base: 'main', worktreesDir: '../<repo>-worktrees', branchPrefix: 'ship/', maxParallel: 3, maxAttempts: 2,
@@ -177,14 +177,91 @@ export function mutate<N extends StateName, R>(root: string, name: N, fn: (data:
   });
 }
 
+// Validate only supplied known fields. Missing fields keep existing shallow defaults;
+// observer/claims partial defaults are still applied by their own consumers.
+function configProblems(raw: unknown): string[] {
+  const problems: string[] = [];
+  const obj = (x: unknown, path: string): Record<string, unknown> | null => {
+    if (x !== null && typeof x === 'object' && !Array.isArray(x)) return x as Record<string, unknown>;
+    problems.push(`${path} must be a JSON object`); return null;
+  };
+  const field = (o: Record<string, unknown>, path: string, key: string, valid: (x: unknown) => boolean, expected: string) => {
+    if (Object.hasOwn(o, key) && !valid(o[key])) problems.push(`${path}.${key} must be ${expected}`);
+  };
+  const str = (x: unknown): boolean => typeof x === 'string' && x.trim().length > 0;
+  const strings = (x: unknown): boolean => Array.isArray(x) && x.every(str);
+  const uint = (x: unknown): boolean => Number.isSafeInteger(x) && (x as number) >= 0;
+  const nonnegative = (x: unknown): boolean => typeof x === 'number' && Number.isFinite(x) && x >= 0;
+  const role = (x: unknown, path: string) => {
+    const r = obj(x, path); if (!r) return;
+    for (const key of ['model', 'effort', 'permissionMode']) field(r, path, key, str, 'a non-empty string');
+  };
+  const c = obj(raw, 'config'); if (!c) return problems;
+  for (const key of ['base', 'worktreesDir', 'test', 'lessonsFile']) field(c, 'config', key, str, 'a non-empty string');
+  field(c, 'config', 'branchPrefix', (x) => typeof x === 'string', 'a string');
+  for (const key of ['postMerge', 'prepare', 'mergeHook', 'groupBy', 'restoreFrom'])
+    field(c, 'config', key, (x) => x === null || typeof x === 'string', 'a string or null');
+  for (const key of ['briefFiles', 'evaluatorDiffExclude']) field(c, 'config', key, strings, 'an array of non-empty strings');
+  for (const key of ['refreshBeforeTest', 'conflictBrief']) field(c, 'config', key, (x) => typeof x === 'boolean', 'a boolean');
+  field(c, 'config', 'merge', (x) => x === 'auto' || x === 'manual', '"auto" or "manual"');
+  for (const key of ['maxParallel', 'maxRefreshes']) field(c, 'config', key, uint, 'a safe integer >= 0');
+  field(c, 'config', 'maxAttempts', (x) => uint(x) && (x as number) >= 1, 'a safe integer >= 1');
+  for (const key of ['budgetUsdPerRun', 'budgetUsdTotal'])
+    field(c, 'config', key, (x) => x === null || nonnegative(x), 'a finite number >= 0 or null');
+  // exec() passes milliseconds directly to setTimeout: larger delays overflow its native range.
+  field(c, 'config', 'timeoutMin', (x) => x === null || (nonnegative(x) && (x as number) > 0 && (x as number) * 60000 <= 2 ** 31 - 1),
+    'positive finite minutes within the timer range (<= (2^31 - 1) / 60000), or null');
+  for (const key of ['builder', 'evaluator', 'resolver'])
+    if (Object.hasOwn(c, key) && !(key === 'resolver' && c[key] === null)) role(c[key], `config.${key}`);
+  if (Object.hasOwn(c, 'claims') && c.claims !== null) {
+    const cl = obj(c.claims, 'config.claims');
+    if (cl) {
+      field(cl, 'config.claims', 'hot', strings, 'an array of non-empty strings');
+      field(cl, 'config.claims', 'minScore', nonnegative, 'a finite number >= 0');
+      field(cl, 'config.claims', 'days', (x) => nonnegative(x) && Number.isFinite((x as number) * 86400e3), 'finite days >= 0');
+    }
+  }
+  if (Object.hasOwn(c, 'observer')) {
+    const o = obj(c.observer, 'config.observer');
+    if (o) {
+      for (const key of ['retry', 'improve']) field(o, 'config.observer', key, (x) => typeof x === 'boolean', 'a boolean');
+      for (const key of ['maxRetries', 'maxOpenImprovements']) field(o, 'config.observer', key, uint, 'a safe integer >= 0');
+      for (const key of ['recurring', 'lessonsMaxBytes']) field(o, 'config.observer', key, (x) => uint(x) && (x as number) > 0, 'a safe integer >= 1');
+      field(o, 'config.observer', 'pollSec', (x) => nonnegative(x) && (x as number) > 0 && Number.isFinite((x as number) * 1000), 'positive finite seconds');
+      for (const key of ['improveEveryHours', 'curateEveryHours'])
+        field(o, 'config.observer', key, (x) => nonnegative(x) && Number.isFinite((x as number) * 3600e3), 'finite hours >= 0');
+      field(o, 'config.observer', 'infraPatterns', strings, 'an array of non-empty strings');
+      if (Object.hasOwn(o, 'agent') && o.agent !== null) role(o.agent, 'config.observer.agent');
+      if (Object.hasOwn(o, 'promptReview')) {
+        const pr = obj(o.promptReview, 'config.observer.promptReview');
+        if (pr) {
+          field(pr, 'config.observer.promptReview', 'enabled', (x) => typeof x === 'boolean', 'a boolean');
+          for (const key of ['maxPerPass', 'maxPerDay']) field(pr, 'config.observer.promptReview', key, uint, 'a safe integer >= 0');
+          field(pr, 'config.observer.promptReview', 'notesMaxBytes', (x) => uint(x) && (x as number) > 0, 'a safe integer >= 1');
+          field(pr, 'config.observer.promptReview', 'everyMinutes', (x) => nonnegative(x) && Number.isFinite((x as number) * 60e3), 'finite minutes >= 0');
+        }
+      }
+    }
+  }
+  problems.push(...profileProblems(c.profiles));
+  return problems;
+}
+
 export function loadConfig(root: string): Config {
-  const c: Config = { ...DEFAULT_CONFIG, ...(readJson(paths(root).config, {}) as Partial<Config>) };
+  const file = paths(root).config, raw: unknown = readJson(file, {}), problems = configProblems(raw);
+  if (problems.length) throw new Error(`${file}: invalid configuration:\n${problems.join('\n')}`);
+  const c: Config = { ...DEFAULT_CONFIG, ...(raw as Partial<Config>) };
   c.worktreesDir = c.worktreesDir.replace('<repo>', basename(root));
   return c;
 }
 
+// Read mutable feature/human state independently of the configuration snapshot a supervisor owns.
+export function loadState(root: string): { features: Feature[]; tasks: HumanTask[] } {
+  return { features: readState(root, 'features').features, tasks: readState(root, 'human').tasks };
+}
+
 export function load(root: string): { config: Config; features: Feature[]; tasks: HumanTask[] } {
-  return { config: loadConfig(root), features: readState(root, 'features').features, tasks: readState(root, 'human').tasks };
+  return { config: loadConfig(root), ...loadState(root) };
 }
 
 // ---- control.json: pause new work / lanes ----

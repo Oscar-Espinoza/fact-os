@@ -467,6 +467,28 @@ test('acceptance: inline conflict resolution retains launch checks in its own-fe
   assert.equal(s.calls('build', 'a').length, 1);
 });
 
+for (const invalid of ['shape', 'json']) test(`invalid config during a live run (${invalid}) retains supervisor ownership until owned children finish`, async (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { priority: 2 })],
+    config: { maxParallel: 1, timeoutMin: 0.02 }, scenario: { a: 'hang' } });
+  const run = s.start('--watch');
+  assert.ok(await until(() => s.pids().length === 2 && s.feature('a').pid), run.out());
+  const cfg = join(s.repo, '.fact-os/config.json');
+  writeFileSync(cfg, invalid === 'json' ? '{invalid JSON' : JSON.stringify({ ...JSON.parse(readFileSync(cfg, 'utf8')), maxAttempts: 'oops' }));
+  await writeControl(s.repo, { maxParallel: 2 }, 'cli'); // wake the loop while its builder is still alive
+  assert.ok(await until(() => /config\.json changed/.test(run.out()) || !existsSync(join(s.repo, '.fact-os/.foreman'))), run.out());
+  assert.ok(existsSync(join(s.repo, '.fact-os/.foreman')), 'keep ownership while the in-flight child drains');
+  assert.ok(alive(s.pids()[0]), 'the existing builder is still draining');
+  const second = s.cli('run', '--once');
+  assert.equal(second.status, 1);
+  assert.match(second.stderr, /another foreman is running/);
+  assert.equal(await run.exit, 2, run.out());
+  assert.match(run.out(), /config\.json changed/);
+  for (const pid of s.pids()) assert.equal(alive(pid), false, `owned pid ${pid} outlived supervisor ownership`);
+  assert.equal(existsSync(join(s.repo, '.fact-os/.foreman')), false);
+  assert.equal(s.calls('eval', 'a').length, 0);
+  assert.equal(s.calls('build', 'b').length, 0);
+});
+
 test('budgetUsdTotal counts only this run\'s spend and stops launching; null means unlimited', (t) => {
   const s = setup(t, { features: [F('a', { costUsd: 100 }), F('b', { priority: 2, costUsd: 100 })],
     config: { maxParallel: 1, budgetUsdTotal: 0.015 } });

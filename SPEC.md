@@ -63,6 +63,43 @@ and one dashboard across projects.
   "profiles": {}                // extra model profiles (see Model profiles); optional
 }
 ```
+Configuration is validated by `loadConfig()` before it becomes a `Config`, including in
+foreman, observer, CLI/actions and dashboard consumers. `doctor` uses the same boundary
+and reports all invalid fields. Foreman validates config before reading/recovering state,
+then uses `loadState()` for later feature/human reads and its validated config snapshot
+for the whole run. A config edit (even malformed JSON) trips the existing raw-text tamper
+halt; in-flight work drains with supervisor ownership and signal handlers retained.
+Invalid configuration refuses new work at startup; a watching
+observer reports the failed pass and retains its last polling interval. A missing
+config file or omitted fields use defaults. Present roots/nested configs must be JSON
+objects; values are never coerced from numeric strings or silently replaced by defaults.
+Unknown extra fields remain permitted, except the existing stricter profile contract.
+
+- `maxParallel` is a safe integer ≥0; its legacy value 0 still gives one effective lane.
+  Config has no new 32-lane cap (the separate runtime control retains 0–32).
+  `maxAttempts` is a safe integer ≥1; `maxRefreshes` is a safe integer ≥0.
+- Budgets are null or finite numbers ≥0: per-run 0 omits the provider cap; total 0
+  prevents launches. Timeout is null or positive finite minutes whose converted delay
+  is ≤2^31−1 ms, avoiding timer overflow. Use null for no timeout; 0/negative is invalid.
+- Required paths/test command and supplied role fields are nonempty strings. Empty
+  branch prefixes and optional strings retain their existing behavior; merge is
+  `auto|manual`, flags are booleans and path/pattern lists contain nonempty strings.
+  Models, efforts and permission modes pass through to the provider; validation checks
+  their shapes rather than a provider-specific allowlist or executable semantics.
+- Roles remain partial objects that replace their top-level defaults, not deep overlays.
+  Nullable resolver/observer agent and empty role objects remain supported. Claims and
+  observer/review partial objects retain their existing consumer defaults. Claims
+  thresholds/windows are finite nonnegative values (fractional thresholds allowed).
+- Observer poll seconds are positive and finite. Retry/open-improvement/review counts
+  are safe integers ≥0; recurring threshold and byte caps are safe integers ≥1.
+  Throttle intervals are finite ≥0, with finite converted durations; zero disables
+  throttling. Invalid arrays/nulls cannot masquerade as these nested objects.
+
+The low-level `writeControl()` pause/lanes recovery path still permits writing controls
+with unreadable/invalid config, while profile changes require valid config. CLI and
+dashboard controls load configuration first and report its errors. This validates config
+shape/ranges, not feature/human state, Git refs, filesystem permissions or live providers.
+
 `.fact-os/features.json` — `{ "features": [Feature] }`
 ```
 Feature {

@@ -98,6 +98,12 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   `doctor` and the dashboard flag it, and any control command rewrites it. An unknown `profile` makes the file invalid too.
   `bun scripts/replay-conflicts.ts <repo>` replays a project's real merge conflicts against the merge process, read-only.
 
+Config loads validate known field shapes and operational ranges; `doctor` reports the same
+errors. Numeric strings and malformed nested objects cannot bypass limits. Missing fields
+and supported partial configs keep their existing defaults. Use null for no timeout;
+non-null timeouts must be positive and fit the native timer range. Budget/count/throttle
+zeros retain their documented meanings; config `maxParallel: 0` still gives one lane.
+
 **Readiness:** a `todo` feature is ready when every dep is `merged` in either merge mode and
 every open human task that unblocks it is `mockable` (it is then built `onMock`). An open non-mockable task
 makes it *waiting-on-human*. Ready features run by priority, then number of transitive dependents, then id.

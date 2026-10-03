@@ -8,7 +8,7 @@ import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLoc
 import { analyze, validate, SLUG } from './ready.ts';
 import { STATUSES, IN_FLIGHT, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
-import { profileNames, profileLabel, profileProblems, roleTable, riskyOpen } from './profiles.ts';
+import { profileNames, profileLabel, roleTable, riskyOpen } from './profiles.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const USAGE = `usage: ${NAME} <command>
@@ -127,12 +127,6 @@ function doctor(): number {
     if (typeof t?.mockable !== 'boolean') bad('mockable must be boolean');
     if (!['open', 'done'].includes(t?.status as string)) bad('status must be open|done');
   }
-  if (!['auto', 'manual'].includes(config.merge)) problems.push('config.merge must be "auto" or "manual"');
-  const cl = config.claims as Record<string, unknown> | null;
-  if (cl != null && (typeof cl !== 'object' || !strs(cl.hot ?? []) || typeof (cl.minScore ?? 0) !== 'number' || typeof (cl.days ?? 0) !== 'number'))
-    problems.push('config.claims must be null or {hot: string[], minScore: number, days: number}');
-  if (config.resolver != null && typeof config.resolver !== 'object') problems.push('config.resolver must be null or {model, effort, permissionMode}');
-  problems.push(...profileProblems(config.profiles));
   const cr = readControlFile(root, config);
   if (!cr.ok) problems.push(`${cr.error} (the foreman keeps its last good control, or holds all new work; fix it, or rewrite it with pause-all, resume-all, lanes or profile)`);
   if (!problems.length) problems.push(...validate(features as unknown as Feature[], tasks as unknown as HumanTask[])); // shapes checked above

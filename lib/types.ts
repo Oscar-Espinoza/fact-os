@@ -1,5 +1,5 @@
-// Shapes of the state files and events, as specified in SPEC.md. JSON read from disk is only trusted
-// after readJson (state.ts) casts it; doctor (cli.ts) is what validates it.
+// Shapes of state files and events, as specified in SPEC.md. loadConfig validates configuration
+// at runtime; feature/human JSON is cast at the state boundary and validated by doctor (cli.ts).
 
 export type Status = 'todo' | 'building' | 'testing' | 'evaluating' | 'ready' | 'merged' | 'stuck' | 'paused';
 export const STATUSES: Status[] = ['todo', 'building', 'testing', 'evaluating', 'ready', 'merged', 'stuck', 'paused'];
@@ -21,11 +21,11 @@ export interface Config {
   base: string;
   worktreesDir: string;               // '<repo>' is replaced by the repo's dir name on load
   branchPrefix: string;
-  maxParallel: number;
-  maxAttempts: number;
+  maxParallel: number;               // safe integer >= 0; legacy 0 gives one effective lane
+  maxAttempts: number;               // safe integer >= 1
   budgetUsdPerRun: number | null;     // null = no cap; > 0 is passed as --max-budget-usd
   budgetUsdTotal: number | null;      // cost reported during this run; null = unlimited
-  timeoutMin: number | null;          // per child; null = no timeout
+  timeoutMin: number | null;          // per child; null = none; positive, converted ms <= 2^31-1
   builder: RoleConfig;
   evaluator: RoleConfig;
   test: string;

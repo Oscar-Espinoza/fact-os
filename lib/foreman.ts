@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, load, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
+import { paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole } from './profiles.ts';
@@ -363,10 +363,9 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   const edit = (id: string, fn: (f: Feature) => void) => mutate(root, 'features', (d) => { const f = d.features.find((x) => x.id === id); if (f) fn(f); });
   const set = (id: string, patch: Partial<Feature>) => edit(id, (f) => Object.assign(f, patch, { updatedAt: now() }));
 
-  { const { features, tasks } = load(root); for (const e of validate(features, tasks)) { out(`warning: ${e}`); log(root, null, 'invalid', e); } }
-
-  // Evaluate against what was on disk at launch; stop if config.json or base change behind fact-os's back.
+  // Config stays fixed for this foreman run; acceptance is captured separately at each locked launch.
   const config = loadConfig(root), configText = readIf(P.config);
+  { const { features, tasks } = loadState(root); for (const e of validate(features, tasks)) { out(`warning: ${e}`); log(root, null, 'invalid', e); } }
   if (config.groupBy != null && !/^idPrefix:\d+$/.test(config.groupBy)) out(`warning: groupBy ${JSON.stringify(config.groupBy)} is not "idPrefix:<n>"; ignored`);
   const baseHead = () => git(['rev-parse', '--verify', '--quiet', `refs/heads/${config.base}`], root).out;
   let baseSha = baseHead(), halted: string | null = null, spent = 0; // spent: reported cost in this run only
@@ -378,7 +377,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (head === baseSha) return null;
     const why = `${config.base} moved outside ${NAME} (expected ${baseSha.slice(0, 12)})`;
     if (!head || !baseSha) return why;
-    const features = load(root).features;
+    const features = loadState(root).features;
     const names = new Set(features.map((f) => f.branch).filter(Boolean));
     for (const b of git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], root).out.split('\n'))
       if (b.startsWith(config.branchPrefix)) names.add(b);
@@ -432,7 +431,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     log(root, f.id, 'recovered', `child pid ${f.pid} still running after timeoutMin (${config.timeoutMin} min); not killed`);
     return false;
   };
-  const recover = async (): Promise<string[]> => !load(root).features.some((f) => IN_FLIGHT.includes(f.status) && !inflight.has(f.id)) ? [] : mutate(root, 'features', (d) => {
+  const recover = async (): Promise<string[]> => !loadState(root).features.some((f) => IN_FLIGHT.includes(f.status) && !inflight.has(f.id)) ? [] : mutate(root, 'features', (d) => {
     const r = recoverInFlight(d.features, { skip: new Set(inflight.keys()), alive: orphanAlive, merged: isMerged, overdue: (f) => childAlive(f) });
     for (const id of r.todo) log(root, id, 'recovered', 'left in flight by a dead foreman; back to todo');
     for (const id of r.stuck) log(root, id, 'stuck', d.features.find((f) => f.id === id)!.lastFeedback);
@@ -478,7 +477,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // and its claims, and goes on to test and evaluation. Returns the note for the evaluator, or null when the feature went
     // back to todo (the builder then finishes the merge with the same brief, and its resolution is checked) or the run stopped.
     const resolveNow = async (): Promise<string | null> => {
-      const cur = load(root).features.find((x) => x.id === id)!, rec = cur.conflict!, pending = pendingBrief.get(id);
+      const cur = loadState(root).features.find((x) => x.id === id)!, rec = cur.conflict!, pending = pendingBrief.get(id);
       tag = runTag(readdirSync(runDir), attempt);
       await set(id, { status: 'building' });
       log(root, id, 'resolving', rec.files.join(', '));
@@ -529,7 +528,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (f.deps?.length) {
       const r = await serial(async () => {
         if (tampered()) { await set(id, { status: 'todo' }); return 'halted'; }
-        const deps = load(root).features;
+        const deps = loadState(root).features;
         for (const dep of f.deps) {
           const d = deps.find((x) => x.id === dep), sha = d?.sha || baseSha;
           if (d?.status !== 'merged' || git(['rev-parse', '--verify', '--quiet', `${sha}^{commit}`], root).code !== 0 ||
@@ -549,7 +548,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       });
       if (r !== 'current' && r !== 'clean' && r !== 'conflicted' && r !== 'pending') return;
       if (r === 'conflicted' || r === 'pending') {
-        f.lastFeedback = load(root).features.find((x) => x.id === id)?.lastFeedback;
+        f.lastFeedback = loadState(root).features.find((x) => x.id === id)?.lastFeedback;
         if (r === 'pending') f.lastFeedback = (f.lastFeedback || '') + '\n\nThe foreman assigns you the pending dependency merge already in this worktree. Resolve it preserving both sides and commit the merge; do not abort it.';
         prepareDeferred = !!config.prepare;
         if (prepareDeferred) f.lastFeedback = (f.lastFeedback || '') + `\n\nSetup \`${config.prepare}\` is deferred until this merge is resolved. ` +
@@ -657,7 +656,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   // The keep-lines check of a conflicted refresh the builder resolved and committed (conflictBrief or resolver on): `lost` is
   // feedback when lines one side added are gone; `note` tells the evaluator what else to check after a good resolution.
   async function checkResolution(id: string, branch: string, wt: string): Promise<{ lost?: string; note: string }> {
-    const rec = load(root).features.find((x) => x.id === id)?.conflict;
+    const rec = loadState(root).features.find((x) => x.id === id)?.conflict;
     if (!rec || !(config.conflictBrief || config.resolver)) return { note: '' }; // both turned off: a pending record is ignored
     const tip = git(['rev-parse', branch], wt).out, has = (c: string) => git(['merge-base', '--is-ancestor', c, tip], wt).code === 0;
     if (!has(rec.ours) || !has(rec.theirs)) { log(root, id, 'keep-check', `skipped: ${branch} does not contain the conflicted merge`); await set(id, { conflict: undefined }); return { note: '' }; }
@@ -689,7 +688,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   // the keep-lines check; inline (a resolver is set and a pipeline is waiting): the feature stays in flight, 'conflicted'.
   function refresh(f: Feature, branch: string, fail: Fail, beforeTest = false, inline = false, beforeBuild = false): Promise<void | 'conflicted'> | 'clean' {
     const id = f.id, wt = resolve(root, config.worktreesDir, id), base = config.base;
-    const cur = load(root).features.find((x) => x.id === id), n = cur?.refreshes || 0;
+    const cur = loadState(root).features.find((x) => x.id === id), n = cur?.refreshes || 0;
     // A refresh must not drop the failure the builder still has to fix (e.g. a gate failure): keep it, minus any older
     // refresh note, and append this refresh's note after it.
     const prior = (cur?.lastFeedback || '').split(REFRESH_SEP)[0];
@@ -714,7 +713,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       : `the foreman merged ${base} into your branch (conflict-free); re-run the tests and fix anything the new base broke`;
     const rec = conflicted && both ? { ours, theirs: baseSha, files: list } : undefined;
     if (rec) {
-      const b = conflictBrief({ wt, base, branch, ours, theirs: baseSha, files: list, feature: f, features: load(root).features });
+      const b = conflictBrief({ wt, base, branch, ours, theirs: baseSha, files: list, feature: f, features: loadState(root).features });
       pendingBrief.set(id, b);
       fb += ` Keep every line either side added; list any line you must drop or change in a commit message as \`dropped: <file>: <line>\` (a check compares).\n\n${b.text}`;
     }
@@ -796,7 +795,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   }
 
     for (;;) {
-      const seen = stamp(P); // before load() and readControl(), so a change made during this tick still wakes --watch
+      const seen = stamp(P); // before loadState() and readControl(), so a change made during this tick still wakes --watch
       const ctlSeen = stamp({ control: P.control });
       // control.json (a person's pause / lanes), re-read every tick. It only limits new launches: nothing in flight is
       // interrupted, and parked merges below still merge while paused.
@@ -827,7 +826,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const orphans = await recover();
       // In flight now: this foreman's own launches plus live children of a previous foreman (orphans), against either limit.
       const busyCount = () => inflight.size + orphans.length;
-      const { features, tasks } = load(root);
+      const { features, tasks } = loadState(root);
       const parked = features.filter(isParked);
       if (parked.length && !stopping && !tampered() && !checkoutProblem()) { // then reload: dependents may be ready now
         for (const f of parked) await serial(() => retryMerge(f));
@@ -937,7 +936,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       }
       await waitForChange(P, seen, () => stopping);
     }
-    const { features } = load(root);
+    const { features } = loadState(root);
     const counts: Record<string, number> = {};
     for (const f of features) counts[f.status] = (counts[f.status] || 0) + 1;
     out(`summary: ${Object.entries(counts).map(([s, n]) => `${n} ${s}`).join(', ') || 'no features'}`);
