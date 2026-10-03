@@ -147,7 +147,9 @@ Each tick:
    (the child is not killed, and relaunching would put two processes in one worktree); otherwise goes back
    to `todo` (worktree kept and reused).
 2. Under `merge: "auto"`, if any feature is `parked` and the main checkout is now clean and on `base`, merge
-   each one's recorded `sha` if its branch still points to it (else back to `todo`), then reload.
+   each one's recorded `sha` if its branch still points to it (else back to `todo`), then reload. With
+   `refreshBeforeTest: true`, a SHA that lacks current base is instead queued as `todo`, retaining its evaluated
+   SHA so the next launch can reuse the clean build and repeat refresh/test/evaluation before merging.
    **Launch limit:** `control.json` is re-read every tick; the limit is 0 while `paused`, else `control.maxParallel`, else
    `config.maxParallel` (at least 1). The in-flight count it is checked against is this foreman's own launches plus live
    children of a previous foreman (step 1's orphans), for either limit, so the count matches what the dashboard and CLI
@@ -217,7 +219,12 @@ Each tick:
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
      becomes `ready` with `parked: true` and a log event explains why; "clean" = no tracked changes outside `.fact-os/`),
      `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to
-     start leaves the feature `ready` without costing an attempt); on conflict, `git merge --abort`, then a
+     start leaves the feature `ready` without costing an attempt). With `refreshBeforeTest: true`, immediately
+     before merging, inside the serialized checkout operation, current base must be an ancestor of the evaluated
+     SHA. Otherwise log `revalidate` and repeat refresh/test/fresh evaluation without another builder after a
+     clean refresh. Earlier evaluation files/prompts are retained under distinct run tags. Conflicts use the
+     existing resolution path; a refresh alone spends no attempt, while a failing aggregate gate does.
+     On conflict, `git merge --abort`, then a
      **base refresh**: the foreman runs `git merge --no-edit <recorded base sha>` in the feature's worktree
      (which must be clean, else attempt++). Clean → `todo` with feedback "the foreman merged <base> into your
      branch (conflict-free); re-run the tests and fix anything the new base broke". Conflicted → the merge is
@@ -458,7 +465,9 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    evaluation minutes; build and evaluation cost from the run files by completion time (resolver runs count as build); the
    evaluator's top rejection reasons. A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's
    version (`resolves`; a merge after it counts in `merged` and `resolvedMerged`; its gate and evaluation are not counted
-   again). The foreman logs a `prompt` event per run (`<role> model= effort= lessons=<sha8> briefs=<sha8>`, with the model and
+   again). A clean `revalidate` also continues the launch: initial stage counts/timings stay counted once,
+   repeated validation costs still count, and the eventual merge is recorded without a conflict bounce or
+   resolver count. The foreman logs a `prompt` event per run (`<role> model= effort= lessons=<sha8> briefs=<sha8>`, with the model and
    effort actually passed, then ` notes=<sha8>` when the prompt carries per-model notes (item 8: a notes change starts a new prompt
    version), ` profile=<name>` under a non-opus profile and ` risk=high effortBase=<effort>` when the builder got effortHigh), saves the
    prompt as `runs/<id>/<tag>-(build|eval|resolve).prompt.md`, and tags run files `<attempt>` or `<attempt>.<k>` so a later pass

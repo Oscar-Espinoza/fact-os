@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { procStart } from '../lib/foreman.ts';
+import { agentStats } from '../lib/observe.ts';
 import type { Config, Feature, FeaturesFile, Verdict } from '../lib/types.ts';
 import { reap } from './reap.ts';
 
@@ -56,6 +57,75 @@ function setup(t: TestContext, { features, config = {}, scenario = {}, verdicts 
   };
 }
 const until = async (cond: () => unknown, ms = 10000) => { for (const end = Date.now() + ms; !cond() && Date.now() < end;) await sleep(50); return cond(); };
+
+// Both initial gates finish before either evaluator returns; each branch tests the same base.
+function parallelGate(s: ReturnType<typeof setup>, check: string): void {
+  const markers = join(s.repo, '.fact-os', 'gate-markers'), file = join(s.repo, '.fact-os/config.json');
+  const config = JSON.parse(readFileSync(file, 'utf8'));
+  config.test = `mkdir -p "${markers}"; touch "${markers}/$FACTOS_FEATURE"; ` +
+    `while [ ! -f "${markers}/a" ] || [ ! -f "${markers}/b" ]; do sleep 0.01; done; ${check}`;
+  writeFileSync(file, JSON.stringify(config));
+  s.env.FAKE_DELAY_MS = '200';
+}
+
+test('refreshBeforeTest: incompatible parallel features are retested against the latest base before merge', (t) => {
+  const s = setup(t, { features: [F('a'), F('b')], config: { maxParallel: 2, maxAttempts: 1, refreshBeforeTest: true, timeoutMin: 0.1 } });
+  parallelGate(s, '[ ! -f a.txt ] || [ ! -f b.txt ]');
+  const r = s.cli('run');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  const merged = ['a', 'b'].find((id) => s.feature(id).status === 'merged')!;
+  const rejected = merged === 'a' ? 'b' : 'a';
+  assert.ok(merged, 'one compatible branch landed');
+  assert.deepEqual([s.feature(rejected).status, s.feature(rejected).attempts], ['stuck', 1]);
+  assert.equal(s.calls('build', rejected).length, 1, 'clean refresh reuses the build');
+  assert.equal(s.calls('eval', rejected).length, 1, 'the failing aggregate gate prevents another evaluation');
+  assert.equal(existsSync(join(s.repo, rejected + '.txt')), false, 'the incompatible combination never reaches main');
+  const config = JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8'));
+  assert.equal(spawnSync('sh', ['-c', config.test], { cwd: s.repo, env: s.env }).status, 0, 'main still passes the same gate');
+});
+
+test('refreshBeforeTest: compatible parallel features get fresh evaluation without overwriting the first run', (t) => {
+  const s = setup(t, { features: [F('a'), F('b')], config: { maxParallel: 2, maxAttempts: 1, refreshBeforeTest: true, timeoutMin: 0.1 },
+    scenario: { a: 'slow' } });
+  parallelGate(s, 'true');
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const revalidated = ['a', 'b'].find((id) => s.calls('eval', id).length === 2)!;
+  for (const id of ['a', 'b']) {
+    assert.equal(s.feature(id).status, 'merged');
+    assert.equal(s.feature(id).attempts, 0);
+    assert.equal(s.calls('build', id).length, 1);
+  }
+  assert.ok(existsSync(join(s.repo, '.fact-os/runs', revalidated, '1-eval.json')));
+  assert.ok(existsSync(join(s.repo, '.fact-os/runs', revalidated, '1.2-eval.json')));
+  const other = revalidated === 'a' ? 'b' : 'a';
+  assert.equal(s.git('merge-base', '--is-ancestor', s.feature(other).sha!, s.feature(revalidated).sha!), '');
+});
+
+test('refreshBeforeTest: stale parked features are revalidated without another builder before merging', (t) => {
+  const s = setup(t, { features: [F('a'), F('b')], config: { maxParallel: 2, maxAttempts: 1, refreshBeforeTest: true, timeoutMin: 0.1 } });
+  parallelGate(s, '[ ! -f a.txt ] || [ ! -f b.txt ]');
+  writeFileSync(join(s.repo, 'README.md'), 'local edit\n');
+  assert.equal(s.cli('run').status, 0);
+  for (const id of ['a', 'b']) assert.equal(s.feature(id).status, 'ready');
+  s.git('checkout', '-q', 'README.md');
+  const r = s.cli('run');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.deepEqual(['a', 'b'].map((id) => s.feature(id).status).sort(), ['merged', 'stuck']);
+  for (const id of ['a', 'b']) assert.equal(s.calls('build', id).length, 1, 'parked builds are reused');
+});
+
+test('refreshBeforeTest: passing evaluator lessons are committed after merge without causing another evaluation', (t) => {
+  const s = setup(t, { features: [F('a')], config: { refreshBeforeTest: true }, verdicts: { a: [
+    { pass: true, findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked' }], cheating: [], lesson: 'Keep aggregate validation current.' },
+    { pass: true, findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked again' }], cheating: [], lesson: 'Another distinct lesson.' },
+  ] } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.calls('eval', 'a').length, 1);
+  assert.match(readFileSync(join(s.repo, 'CLAUDE.md'), 'utf8'), /Keep aggregate validation current/);
+  assert.match(s.git('log', '-1', '--format=%s'), /lesson from a/);
+});
 
 test('a builder that leaves no commit, or uncommitted changes, is failed with "commit your work" (exit 2)', (t) => {
   const s = setup(t, { features: [F('noop'), F('dirty')], config: { maxAttempts: 1 }, scenario: { noop: 'noop', dirty: 'dirty' } });

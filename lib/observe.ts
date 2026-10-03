@@ -167,6 +167,8 @@ export const versionKey = (detail: string): string => {
 // evaluator pass, and did it merge or bounce on a merge conflict. Costs come from the run files, by completion time.
 // A resolver run (`resolving`) continues the pass that hit the conflict, in that launch's version: counted in `resolves`,
 // and a merge after it in `merged` and `resolvedMerged`; its gate and evaluation are not counted again.
+// Clean revalidation also continues the launch, without a bounce or resolver count. Stage
+// counts and timings describe the initial validation; subsequent run costs still count.
 export function agentStats(events: LogEvent[], runs: RunCost[], since: number): Era[] {
   const t = (e: { ts: string }) => Date.parse(e.ts);
   // Each launch's version is its own pass's builder fingerprint (the first builder `prompt` of that feature after the launch),
@@ -193,7 +195,7 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
   const eraOf = (ms: number) => { let i = 0; while (i + 1 < starts.length && t(starts[i + 1]!) <= ms) i++; return i; };
   const eras: (Era & { b: number[]; g: number[]; v: number[]; rej: string[]; bf: string[] })[] = starts.map((s) => ({ since: s.ts, change: s.change, launches: 0, setup: 0, built: 0, gated: 0,
     evaluated: 0, passed: 0, bounced: 0, merged: 0, resolves: 0, resolvedMerged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
-  const open = new Map<string, { era: number; stage: 'build' | 'test' | 'eval' | 'resolve'; at: number }>(), lastEra = new Map<string, number>();
+  const open = new Map<string, { era: number; stage: 'build' | 'test' | 'eval' | 'resolve' | 'revalidate'; at: number }>(), lastEra = new Map<string, number>();
   const min = (a: number, b: number) => (b - a) / 60e3;
   for (const e of events) {
     if (!e.feature) continue;
@@ -202,8 +204,15 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
     if (e.event === 'resolving' && lastEra.has(e.feature)) { const era = lastEra.get(e.feature)!; eras[era]!.resolves++; open.set(e.feature, { era, stage: 'resolve', at: ms }); continue; }
     if (!cur) continue;
     const E = eras[cur.era]!;
-    if (cur.stage === 'resolve') { // only how it ends counts
-      if (e.event === 'merged') { E.merged++; E.resolvedMerged++; }
+    if (e.event === 'revalidate' && cur.stage === 'eval') {
+      E.evaluated++; E.passed++; E.v.push(min(cur.at, ms));
+      Object.assign(cur, { stage: 'revalidate', at: ms });
+      continue;
+    }
+    if (cur.stage === 'resolve' || cur.stage === 'revalidate') { // only how continuation ends counts
+      if (e.event === 'refreshed' && e.detail === 'before test, conflict-free') continue;
+      if (e.event === 'merged') { E.merged++; if (cur.stage === 'resolve') E.resolvedMerged++; }
+      if (cur.stage === 'revalidate' && e.event === 'refreshed') E.bounced++;
       if (['merged', 'ready', 'failed', 'stuck', 'interrupted', 'resolve-failed', 'refreshed', 'merge-skipped'].includes(e.event)) open.delete(e.feature);
       continue;
     }

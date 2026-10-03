@@ -129,7 +129,10 @@ generated paths by name only).
   in `refreshes`, and after `maxRefreshes` (5) the feature is `stuck` ("too many base refreshes"). With `refreshBeforeTest: true` the
   same refresh runs before the test whenever `base` has commits the branch lacks: a clean merge goes straight on to
   test, evaluate (diff still `base...sha`) and merge that merge commit, without counting as a refresh; a conflict
-  goes back to `todo` exactly as above.
+  goes back to `todo` exactly as above. Immediately before an automatic merge, the foreman checks again that the
+  evaluated commit contains current `base`. If another feature merged during its test or evaluation, it refreshes,
+  tests and evaluates again, reusing the build after a clean refresh and keeping the earlier run files. A stale
+  parked feature goes back through that same validation queue before merging.
 - Tamper checks: if `config.json` changes on disk during a run, or `base` moves other than by fact-os's
   own merges and lesson commits so that it now reaches a commit of a feature branch (`branchPrefix*` or a
   feature's `branch`), or carries a (non-empty) blob that is also in one, the foreman logs an `alert`,

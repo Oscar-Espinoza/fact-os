@@ -506,11 +506,15 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       if (pr.code !== 0) return fail(`prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`);
     }
 
-    // Stopped after the build last time and the branch is exactly where it was: go straight to the test.
-    const built = builtWhenStopped(readLogEvents(P.log), id);
+    // Reuse a parked evaluation that needs current-base validation, or an interrupted build,
+    // only when the clean worktree still points to exactly that commit.
+    const reevaluate = config.refreshBeforeTest ? f.sha : undefined;
+    const built = reevaluate || builtWhenStopped(readLogEvents(P.log), id);
     const skipBuild = !!built && git(['rev-parse', branch], wt).out === built && !git(['status', '--porcelain'], wt).out &&
       git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code !== 0;
-    if (skipBuild) log(root, id, 'build-skipped', `the foreman stopped after it built ${built!.slice(0, 12)}`);
+    if (skipBuild) log(root, id, 'build-skipped', reevaluate
+      ? `revalidating the previously evaluated ${built!.slice(0, 12)} against current base`
+      : `the foreman stopped after it built ${built!.slice(0, 12)}`);
     else {
     const bn = notesFor('builder');
     const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn));
@@ -530,7 +534,8 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     if (rc.lost) return fail(rc.lost);
     const inline = !!config.resolver;
     let resolved = rc.note; // after a resolution in this pass: what the evaluator must also check
-    for (;;) { // one round per inline resolution; maxRefreshes bounds it
+    for (;;) { // fresh validation after an inline resolution or a clean base advance
+      if (await stopped()) return;
       // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
       if (config.refreshBeforeTest) {
         const r = await serial<'halted' | 'current' | 'clean' | 'conflicted' | void>(() => tampered() ? 'halted'
@@ -562,10 +567,24 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       if (await stopped()) return;
       const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };
       const lesson = v.lesson;
-      if (lesson) await serial(() => compound(id, lesson));
-      if (!v.pass) return fail(feedbackFromVerdict(v));
-      if (config.merge === 'manual') { log(root, id, 'ready', branch); out(`ready ${id} (${branch})`); return set(id, { status: 'ready', sha, lastFeedback: undefined }); }
-      if (await serial(() => merge(f, branch, sha, fail, inline)) !== 'conflicted') return;
+      if (!v.pass) {
+        if (lesson) await serial(() => compound(id, lesson));
+        return fail(feedbackFromVerdict(v));
+      }
+      if (config.merge === 'manual') {
+        if (lesson) await serial(() => compound(id, lesson));
+        log(root, id, 'ready', branch); out(`ready ${id} (${branch})`);
+        return set(id, { status: 'ready', sha, lastFeedback: undefined });
+      }
+      const merged = await serial(() => merge(f, branch, sha, fail, inline));
+      if (merged === 'revalidate') {
+        tag = runTag(readdirSync(runDir), attempt); // keep the prior evaluation and prompt
+        continue;
+      }
+      if (merged !== 'conflicted') {
+        if (lesson) await serial(() => compound(id, lesson));
+        return;
+      }
       const note = await resolveNow(); // bounced: resolve now, then test and evaluate again
       if (note == null) return;
       resolved = note;
@@ -648,15 +667,21 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
   };
   const isParked = (f: Feature) => config.merge === 'auto' && f.status === 'ready' && f.parked && f.sha;
   // A feature parked by merge-skipped: merge its evaluated sha if the branch still points to it, else rebuild it.
-  function retryMerge(f: Feature): Promise<void | 'conflicted'> {
+  async function retryMerge(f: Feature): Promise<void | 'conflicted'> {
     const branch = f.branch || config.branchPrefix + f.id;
-    if (git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).out === f.sha) return merge(f, branch, f.sha, failer(f.id));
+    if (git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).out === f.sha) {
+      const result = await merge(f, branch, f.sha!, failer(f.id));
+      if (result !== 'revalidate') return result;
+      // Preserve the evaluated SHA through the queue so the next launch can skip the
+      // builder. Launch clears it from disk; a real subsequent failure rebuilds normally.
+      return set(f.id, { status: 'todo', parked: undefined });
+    }
     log(root, f.id, 'unparked', `${branch} moved since it was evaluated; back to todo`);
     out(`retry ${f.id}: ${branch} moved since it was evaluated`);
     return set(f.id, { status: 'todo', parked: undefined, sha: undefined });
   }
 
-  async function merge(f: Feature, branch: string, sha: string, fail: Fail, inline = false): Promise<void | 'conflicted'> {
+  async function merge(f: Feature, branch: string, sha: string, fail: Fail, inline = false): Promise<void | 'conflicted' | 'revalidate'> {
     const id = f.id;
     if (tampered()) { log(root, id, 'merge-skipped', `${halted}; back to todo`); return set(id, { status: 'todo', parked: undefined }); }
     const why = checkoutProblem();
@@ -666,6 +691,11 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       return set(id, { status: 'ready', sha, parked: true });
     }
     if (git(['rev-parse', branch], root).out !== sha) return fail(`${branch} moved during evaluation; only the evaluated commit is merged`);
+    if (config.refreshBeforeTest && git(['merge-base', '--is-ancestor', baseSha, sha], root).code !== 0) {
+      log(root, id, 'revalidate', `${config.base} advanced after evaluation; refresh, test and evaluate again`);
+      out(`revalidate ${id}: ${config.base} advanced after evaluation`);
+      return 'revalidate';
+    }
     const msg = `${NAME}: merge ${id}: ${f.title}`, hook = config.mergeHook;
     const m = git(['merge', '--no-ff', ...(hook ? ['--no-commit'] : ['--no-edit', '-m', msg]), sha], root);
     if (m.code !== 0) {

@@ -313,6 +313,32 @@ test('agentStats follows each pass through build, gate and evaluator, keeps setu
   assert.equal(two!.costEval, 1);
 });
 
+test('agentStats: clean revalidation preserves the pass and merge without a conflict bounce or duplicate stage counts', () => {
+  const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
+  const e = (min: number, event: string, detail = '') => ({ ts: at(min), feature: 'a', event, detail });
+  const events = [
+    e(0, 'launch'), e(5, 'testing', 'old-sha'), e(35, 'evaluating'),
+    e(40, 'revalidate', 'main advanced after evaluation'), e(41, 'refreshed', 'before test, conflict-free'),
+    e(42, 'testing', 'fresh-sha'), e(72, 'evaluating'),
+    e(77, 'revalidate', 'main advanced again'), e(78, 'refreshed', 'before test, conflict-free'),
+    e(79, 'testing', 'freshest-sha'), e(109, 'evaluating'), e(114, 'merged', 'ship/a'),
+  ];
+  const [era] = agentStats(events, [], T0 - 60e3);
+  assert.deepEqual([era!.launches, era!.built, era!.gated, era!.evaluated, era!.passed, era!.merged], [1, 1, 1, 1, 1, 1]);
+  assert.deepEqual([era!.bounced, era!.resolves, era!.resolvedMerged], [0, 0, 0]);
+  assert.deepEqual([era!.buildMin, era!.gateMin, era!.evalMin], [5, 30, 5], 'initial stage timings exclude later revalidation');
+  const [failed] = agentStats([...events.slice(0, 6), e(43, 'stuck', 'test command `gate` exited 1')], [], T0 - 60e3);
+  assert.deepEqual([failed!.merged, failed!.bounced], [0, 0], 'a failed fresh gate is not a merge or a conflict');
+  const [resolved] = agentStats([
+    ...events.slice(0, 3), e(40, 'refreshed', 'conflicts in: reg.ts'), e(41, 'resolving', 'reg.ts'),
+    e(42, 'resolved', 'resolved-sha'), e(43, 'testing', 'resolved-sha'), e(73, 'evaluating'),
+    e(78, 'revalidate', 'main advanced during resolver evaluation'), e(79, 'refreshed', 'before test, conflict-free'),
+    e(80, 'testing', 'fresh-resolved-sha'), e(110, 'evaluating'), e(115, 'merged', 'ship/a'),
+  ], [], T0 - 60e3);
+  assert.deepEqual([resolved!.merged, resolved!.resolvedMerged, resolved!.bounced, resolved!.resolves], [1, 1, 1, 1],
+    'clean revalidation also preserves an earlier resolver continuation');
+});
+
 test('agentStats: a resolver run continues the pass that hit the conflict; its merge counts once, its gate and evaluation are not counted again', () => {
   const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
   const e = (min: number, feature: string, event: string, detail = '') => ({ ts: at(min), feature, event, detail });
