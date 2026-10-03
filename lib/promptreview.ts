@@ -11,7 +11,7 @@ import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { paths, log, envVar, mutate, NAME } from './state.ts';
 import { git, exec, claudeArgs, parseClaudeOutput } from './foreman.ts';
-import { noteBullets, mergeNotes, fitNotes, overCap, renderNotes, parseNotes, notesFile, notesArchive, notesDir } from './notes.ts';
+import { NOTE_MAX, clipNote, noteBullets, mergeNotes, fitNotes, overCap, renderNotes, parseNotes, notesFile, notesArchive, notesDir } from './notes.ts';
 import { PROMPT_CAUSES, type Cause, type Config, type HumanTask, type LogEvent, type PromptCause, type PromptReviewConfig, type Role, type RoleConfig } from './types.ts';
 
 const DAY = 24 * 3600e3;
@@ -163,7 +163,7 @@ export function reviewPrompt(i: ReviewInput): string {
     'Choose exactly ONE primary cause:', ...PROMPT_CAUSES.map((c) => `- ${c}: ${CAUSE_HELP[c]}`), '',
     'Be skeptical in both directions: do not blame the prompt for what it said clearly, and do not blame the model for what the prompt left out.',
     `For the three prompt-* causes, "suggestion" is the change to this model's prompt that would have prevented the failure: one or two plain sentences, ` +
-    `addressed to ${i.model} as ${i.role}, an instruction to add or rewrite with the concrete paths, commands or names that matter. "target" says where it belongs: ` +
+    `addressed to ${i.model} as ${i.role}, at most ${NOTE_MAX} characters, an instruction to add or rewrite with the concrete paths, commands or names that matter. "target" says where it belongs: ` +
     '"template" (the fixed instructions of the role\'s prompt, which every feature gets), "briefs" (the project\'s brief files) or "lessons" (the lessons file). ' +
     'For the other causes the suggestion may be an empty string.', '',
     'Answer with ONLY a JSON object: {"cause": string, "evidence": string[], "confidence": "low" | "medium" | "high", "suggestion": string, "target": "template" | "briefs" | "lessons"}. ' +
@@ -182,7 +182,7 @@ export function parseReview(text: string): ParsedReview | { error: string } {
   if (!(PROMPT_CAUSES as readonly string[]).includes(cause)) return { error: `unknown cause ${JSON.stringify(v.cause)}` };
   if (!Array.isArray(v.evidence)) return { error: '"evidence" must be an array of quotes' };
   if (v.confidence !== 'low' && v.confidence !== 'medium' && v.confidence !== 'high') return { error: `unknown confidence ${JSON.stringify(v.confidence)}` };
-  const suggestion = typeof v.suggestion === 'string' ? v.suggestion.replace(/\s+/g, ' ').trim().slice(0, 600) : '';
+  const suggestion = typeof v.suggestion === 'string' ? clipNote(v.suggestion) : '';
   const target = v.target === 'template' || v.target === 'briefs' || v.target === 'lessons' ? v.target : null;
   if (isPromptCause(cause) && (!suggestion || !target)) return { error: `a ${cause} answer needs a suggestion and a target (template, briefs or lessons)` };
   return { cause, evidence: v.evidence.map(String).map((s) => s.replace(/\s+/g, ' ').trim().slice(0, 300)).filter(Boolean).slice(0, 4), confidence: v.confidence, suggestion, target };

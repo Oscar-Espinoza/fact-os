@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { passKind, passesOf, nextResult, selectPasses, parseFingerprint, promptFile, parseReview, eligible, promptRates, trend, promptSummary, renderPromptSection, reviewPrompt, reviewBudget, reviewTimeoutMin,
   type Pass, type PromptReview } from '../lib/promptreview.ts';
-import { mergeNotes, fitNotes, parseNotes, noteBullet, notesBlock, notesHash, notesFile, readNotes, overCap } from '../lib/notes.ts';
+import { mergeNotes, fitNotes, parseNotes, noteBullet, notesBlock, notesHash, notesFile, readNotes, overCap, NOTE_MAX } from '../lib/notes.ts';
 import { promptFingerprint, builderPrompt, parseVerdict, feedbackFromVerdict } from '../lib/foreman.ts';
 import { agentStats, versionKey, classify } from '../lib/observe.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
@@ -164,6 +164,19 @@ test('notes: merging dedupes, the cap drops the oldest, the curator\'s answer is
   assert.equal(noteBullet('  Run the\n typecheck.  '), '- Run the typecheck.');
   assert.equal(noteBullet('- already a bullet'), '- already a bullet');
   assert.equal(noteBullet('   '), '');
+  // Real reviewer suggestions run 500-600 characters; cutting them mid-sentence lost their key instruction.
+  const real = 'When you wire one behavior into several production paths, add a real-DB regression for each path that fails if that ' +
+    'path\'s call is removed, and do a mutation run for each one. For payment-to-stock settlement the paths are the API manual route, ' +
+    'the capture inside cancel-payments.ts, the worker webhook processWebhookDeps attempts port in apps/worker/src/compose-connectors.ts, ' +
+    'and the reconcile handler in apps/worker/src/handlers.ts. Wiring a path without a test that protects it fails the evaluator\'s check.';
+  assert.equal(noteBullet(real), `- ${real}`, 'a suggestion within the cap is kept whole');
+  const long = `${real} ${'Another sentence that keeps going with more detail. '.repeat(8)}`;
+  const cut = noteBullet(long);
+  assert.ok(cut.length - 2 <= NOTE_MAX, 'over the cap it is shortened');
+  assert.match(cut, /[.!?]$/, 'and ends at a sentence boundary, never mid-word');
+  assert.ok(long.startsWith(cut.slice(2)), 'keeping the leading sentences intact');
+  const unbroken = `Use ${'x'.repeat(NOTE_MAX + 50)} here`;
+  assert.ok(noteBullet(unbroken).endsWith('…') && noteBullet(unbroken).length - 2 <= NOTE_MAX, 'text with no sentence end is cut with an ellipsis');
   const first = mergeNotes([], ['Run the typecheck.', 'Read CONTRACTS.md first.']);
   assert.deepEqual(first, ['- Run the typecheck.', '- Read CONTRACTS.md first.']);
   assert.deepEqual(mergeNotes(first, ['run the TYPECHECK', 'Keep edits additive.', '']), [...first, '- Keep edits additive.'], 'near-duplicates and empties are dropped');

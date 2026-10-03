@@ -29,10 +29,20 @@ export const noteBullets = (text: string): string[] => text.split('\n').filter((
 const bytes = (bullets: string[]): number => Buffer.byteLength(bullets.join('\n') + '\n');
 const sameNote = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-// A suggestion as one bullet: one line, plain, at most 400 characters.
+// A suggestion as one bullet: one line, plain, at most NOTE_MAX characters. A longer one keeps its leading whole sentences:
+// a mid-sentence cut used to drop the concrete instruction at the end (the paths, the commit-message format).
+export const NOTE_MAX = 600;
+export function clipNote(s: string): string {
+  const t = s.replace(/\s+/g, ' ').trim();
+  if (t.length <= NOTE_MAX) return t;
+  const head = t.slice(0, NOTE_MAX), end = Math.max(...['. ', '! ', '? '].map((p) => head.lastIndexOf(p)));
+  if (end > 0) return head.slice(0, end + 1);
+  const word = head.lastIndexOf(' ', NOTE_MAX - 1);
+  return `${word > 0 ? head.slice(0, word) : head.slice(0, NOTE_MAX - 1)}…`;
+}
 export function noteBullet(s: string): string {
-  const t = s.replace(/\s+/g, ' ').trim().replace(/^[-*•]\s*/, '');
-  return t ? `- ${t.length > 400 ? t.slice(0, 399) + '…' : t}` : '';
+  const t = clipNote(s.replace(/\s+/g, ' ').trim().replace(/^[-*•]\s*/, ''));
+  return t ? `- ${t}` : '';
 }
 
 // The existing bullets followed by the incoming ones that are not already there (compared ignoring case and punctuation).

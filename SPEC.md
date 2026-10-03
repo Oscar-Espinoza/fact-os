@@ -737,7 +737,8 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    - **Notes.** A `prompt-*` review whose target is `briefs` or `lessons` is *eligible* when its confidence is high or
      another review has the same cause, model and role (a recurrence). Each model and role's eligible, not yet used
      suggestions are merged (duplicates dropped, ignoring case and punctuation) into `<state dir>/prompt-notes/<model>-<role>.md`:
-     bullets, at most `notesMaxBytes` (3000). When the merge outgrows the cap the **curator** role's agent rewrites the notes
+     bullets, at most `notesMaxBytes` (3000). Each bullet is one line of at most 600 characters (the reviewer is asked for
+     that); a longer suggestion keeps its leading whole sentences, never a mid-sentence cut. When the merge outgrows the cap the **curator** role's agent rewrites the notes
      shorter (answer between `<notes>` tags, bullets only, within the cap, as lessons are curated); if it cannot, the oldest
      bullets go. What is replaced or dropped is appended to `<model>-<role>.archive.md`. Logged `observer-notes`. The foreman reads
      the file at every launch and appends `## Notes for <model> as <role>` (and the bullets) to the end of that role's prompt
