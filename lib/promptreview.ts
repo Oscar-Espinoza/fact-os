@@ -78,6 +78,7 @@ export function passesOf(events: Pick<LogEvent, 'ts' | 'feature' | 'event' | 'de
       if (!cur) continue;
       if (e.event === 'prompt') { const f = parseFingerprint(e.detail); if (f) cur.prompts.push({ ...f, ts: e.ts, detail: e.detail }); continue; }
       if (e.event === 'evaluating') { evaluated = true; continue; }
+      if (e.event === 'refreshed' && e.detail.startsWith('before build, ')) continue; // same builder pass continues
       if (!ENDS.includes(e.event)) continue;
       if (e.event === 'refreshed' && (e.detail === 'before test, conflict-free' || evs[i + 1]?.event === 'resolving')) continue;
       if (e.event === 'merged' || e.event === 'ready') close(e.ts, e.event, e.detail, 'ok');

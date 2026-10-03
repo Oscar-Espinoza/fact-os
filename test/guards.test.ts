@@ -7,8 +7,10 @@ import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { procStart } from '../lib/foreman.ts';
+import { startDash, conflictTimeline, type ProjectState } from '../lib/dash.ts';
 import { agentStats } from '../lib/observe.ts';
-import type { Config, Feature, FeaturesFile, Verdict } from '../lib/types.ts';
+import { passesOf } from '../lib/promptreview.ts';
+import type { Config, Feature, FeaturesFile, LogEvent, Verdict } from '../lib/types.ts';
 import { reap } from './reap.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
@@ -493,6 +495,135 @@ test('merge "manual": merging a ready branch by hand while run --watch waits on 
   assert.equal(await run.exit, 0, run.out());
   assert.doesNotMatch(s.log(), /"alert"/);
   assert.equal(s.feature('k').status, 'ready');
+});
+
+test('manual dependencies: CLI and dashboard block unmerged work, then the dependent starts with dependency code', async (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { deps: ['a'] }), F('c')], config: { merge: 'manual', maxParallel: 1,
+    prepare: 'if [ "$FACTOS_FEATURE" = b ]; then test -f a.txt; fi' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('b').status, s.feature('c').status], ['ready', 'todo', 'ready']);
+  assert.equal(s.calls('build', 'b').length, 0);
+  assert.doesNotMatch(s.cli('status').stdout.split('\n').find((l) => /^b\s/.test(l))!, /\bnext\b/);
+  const dash = await startDash({ root: s.repo, port: 0 }); t.after(() => dash.server.close());
+  const state = async () => ((await (await fetch(dash.url + '/api/state')).json()) as { projects: ProjectState[] }).projects.find((p) => p.path === s.repo)!;
+  const ack = () => fetch(dash.url + '/api/feature/merged', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: s.repo, id: 'a' }) });
+  assert.deepEqual((await state()).ready, []);
+  const features = readFileSync(join(s.repo, '.fact-os/features.json'), 'utf8'), log = s.log();
+  assert.equal((await ack()).status, 409); assert.equal(readFileSync(join(s.repo, '.fact-os/features.json'), 'utf8'), features); assert.equal(s.log(), log);
+  s.git('merge', '--ff-only', 'ship/a'); assert.equal((await ack()).status, 200);
+  assert.deepEqual((await state()).ready, ['b']); assert.match(s.cli('status').stdout.split('\n').find((l) => /^b\s/.test(l))!, /\bnext\b/);
+  const next = s.cli('run'); assert.equal(next.status, 0, next.stdout + next.stderr);
+  assert.equal(s.feature('b').status, 'ready'); assert.equal(s.calls('build', 'b').length, 1);
+  assert.equal(readFileSync(join(wtOf(s, 'b'), 'a.txt'), 'utf8'), readFileSync(join(s.repo, 'a.txt'), 'utf8'));
+});
+
+test('manual dependencies: watch stays alive until a hand merge is acknowledged', async (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { deps: ['a'] })], config: { merge: 'manual', maxParallel: 1 } });
+  const running = s.start('--watch');
+  assert.ok(await until(() => s.feature('a').status === 'ready'), running.out()); await sleep(250);
+  assert.equal(running.cp.exitCode, null, running.out()); assert.equal(s.calls('build', 'b').length, 0);
+  assert.match(running.out(), /waiting for manual merges/);
+  s.git('merge', '-q', '--no-ff', '-m', 'manual merge a', 'ship/a');
+  const dash = await startDash({ root: s.repo, port: 0 }); t.after(() => dash.server.close());
+  const ack = await fetch(dash.url + '/api/feature/merged', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: s.repo, id: 'a' }) });
+  assert.equal(ack.status, 200); assert.equal(await running.exit, 0, running.out());
+  assert.equal(s.feature('b').status, 'ready'); assert.equal(s.calls('build', 'b').length, 1); assert.doesNotMatch(s.log(), /"alert"/);
+});
+
+test('merged dependencies reach a reused dependent branch with existing work before prepare and builder', (t) => {
+  const s = setup(t, { features: [F('a', { status: 'merged' }), F('b', { deps: ['a'] })], config: { merge: 'manual',
+    prepare: 'test -f a.txt && test -f earlier.txt', refreshBeforeTest: false } });
+  s.git('checkout', '-qb', 'ship/b'); writeFileSync(join(s.repo, 'earlier.txt'), 'existing work\n'); s.git('add', 'earlier.txt'); s.git('commit', '-qm', 'earlier b');
+  s.git('checkout', '-q', 'main'); s.git('checkout', '-qb', 'ship/a'); writeFileSync(join(s.repo, 'a.txt'), 'dependency\n'); s.git('add', 'a.txt'); s.git('commit', '-qm', 'a');
+  const sha = s.git('rev-parse', 'HEAD'); s.git('checkout', '-q', 'main'); s.git('merge', '-q', '--no-ff', '-m', 'merge a', sha);
+  writeFileSync(join(s.repo, '.fact-os/features.json'), JSON.stringify({ features: [F('a', { status: 'merged', sha }), F('b', { deps: ['a'] })] }));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('b').status, 'ready'); assert.equal(s.calls('build', 'b').length, 1); assert.equal(s.feature('b').attempts, 0);
+  assert.equal(s.git('merge-base', '--is-ancestor', sha, 'ship/b'), '');
+  const events = s.log().trim().split('\n').map((l) => JSON.parse(l) as LogEvent);
+  assert.deepEqual(passesOf(events, () => 'own').filter((p) => p.feature === 'b').map((p) => p.outcome), ['ok']);
+  assert.equal(agentStats(events, [], 0).reduce((n, e) => n + e.passed, 0), 1);
+});
+
+function staleDependency(s: Setup, { conflict = false, legacy = false }: { conflict?: boolean; legacy?: boolean } = {}) {
+  if (conflict) { writeFileSync(join(s.repo, 'shared.txt'), 'base\n'); s.git('add', 'shared.txt'); s.git('commit', '-qm', 'shared base'); }
+  s.git('checkout', '-qb', 'ship/b'); writeFileSync(join(s.repo, 'earlier.txt'), 'existing b work\n'); s.git('add', 'earlier.txt');
+  if (conflict) { writeFileSync(join(s.repo, 'shared.txt'), 'b behavior\n'); s.git('add', 'shared.txt'); }
+  s.git('commit', '-qm', 'earlier b'); s.git('checkout', '-q', 'main'); s.git('checkout', '-qb', 'ship/a');
+  writeFileSync(join(s.repo, 'a.txt'), 'dependency\n'); s.git('add', 'a.txt');
+  if (conflict) { writeFileSync(join(s.repo, 'shared.txt'), 'a behavior\n'); s.git('add', 'shared.txt'); }
+  s.git('commit', '-qm', 'a'); const sha = s.git('rev-parse', 'HEAD'); s.git('checkout', '-q', 'main');
+  s.git('merge', '-q', '--no-ff', '-m', 'manual merge a', sha);
+  writeFileSync(join(s.repo, '.fact-os/features.json'), JSON.stringify({ features: [F('a', { status: 'merged', ...(legacy ? {} : { sha }) }),
+    F('b', { deps: ['a'], lastFeedback: 'Preserve this earlier failure feedback.' })] })); return sha;
+}
+
+test('a dependency import conflict stays with its builder and preserves pass statistics and earlier feedback', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', conflictBrief: true, refreshBeforeTest: false, resolver: { model: 'fake' },
+    prepare: '! git rev-parse --quiet --verify MERGE_HEAD && test -f a.txt' }, scenario: { b: 'resolve' } });
+  const sha = staleDependency(s, { conflict: true }); const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('b').status, 'ready'); assert.equal(s.feature('b').attempts, 0); assert.equal(s.feature('b').refreshes, 1);
+  assert.equal(s.calls('build', 'b').length, 1); assert.equal(s.calls('resolve', 'b').length, 0, 'this builder owns its dependency import');
+  assert.match(s.calls('build', 'b')[0].prompt, /Preserve this earlier failure feedback/); assert.match(s.calls('build', 'b')[0].prompt, /foreman started merging.*conflicts in/);
+  assert.equal(s.git('merge-base', '--is-ancestor', sha, 'ship/b'), '');
+  assert.match(readFileSync(join(wtOf(s, 'b'), 'shared.txt'), 'utf8'), /b behavior[\s\S]*a behavior/);
+  const events = s.log().trim().split('\n').map((l) => JSON.parse(l) as LogEvent);
+  assert.deepEqual(passesOf(events, () => 'own').filter((p) => p.feature === 'b').map((p) => p.outcome), ['ok']);
+  const stats = agentStats(events, [], 0); assert.equal(stats.reduce((n, e) => n + e.passed, 0), 1); assert.equal(stats.reduce((n, e) => n + e.built, 0), 1);
+  assert.deepEqual(conflictTimeline(events, Date.now()).map((r) => [r.files, r.resolvedBy, r.outcome]), [[['shared.txt'], 'builder', 'resolved']]);
+});
+
+test('legacy merged dependencies without a recorded SHA import current base into a reused branch', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', refreshBeforeTest: false, prepare: 'test -f a.txt' } });
+  const sha = staleDependency(s, { legacy: true }); const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('b').status, 'ready'); assert.equal(s.git('merge-base', '--is-ancestor', sha, 'ship/b'), '');
+});
+
+for (const mode of ['union', 'missing'] as const) test(`pending dependency merge validates both parents (${mode})`, (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1, refreshBeforeTest: false }, scenario: { b: 'resolve' } });
+  const a = staleDependency(s, { conflict: true }), original = s.git('rev-parse', 'main^1');
+  s.git('checkout', '-qb', 'ship/d', original); writeFileSync(join(s.repo, 'd.txt'), 'other dependency\n'); s.git('add', 'd.txt'); s.git('commit', '-qm', 'd'); const d = s.git('rev-parse', 'HEAD');
+  if (mode === 'union') { s.git('checkout', '-q', 'ship/b'); s.git('merge', '-q', '--no-ff', '-m', 'include d in b', d); }
+  s.git('checkout', '-q', 'main'); s.git('merge', '-q', '--no-ff', '-m', 'merge d', d);
+  s.git('worktree', 'add', '-q', wtOf(s, 'b'), 'ship/b');
+  assert.equal(spawnSync('git', ['merge', '--no-ff', '--no-edit', a], { cwd: wtOf(s, 'b') }).status, 1, 'fixture starts a real conflict');
+  writeFileSync(join(s.repo, '.fact-os/features.json'), JSON.stringify({ features: [F('a', { status: 'merged', sha: a }), F('d', { status: 'merged', sha: d }), F('b', { deps: ['a', 'd'] })] }));
+  const r = s.cli('run'); assert.equal(r.status, mode === 'union' ? 0 : 2, r.stdout + r.stderr);
+  if (mode === 'union') { assert.equal(s.feature('b').status, 'ready'); assert.equal(s.calls('build', 'b').length, 1); for (const sha of [a, d]) assert.equal(s.git('merge-base', '--is-ancestor', sha, 'ship/b'), ''); }
+  else { assert.equal(s.calls('build', 'b').length, 0); assert.match(s.feature('b').lastFeedback!, /pending merge does not contain/); }
+});
+
+for (const mode of ['fails', 'dirty', 'drops ancestry']) test(`deferred dependency preparation ${mode} safely before gates`, (t) => {
+  const prepare = mode === 'fails' ? 'exit 7' : mode === 'dirty' ? 'echo changed > shared.txt' : 'git reset --hard HEAD^1';
+  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1, prepare, refreshBeforeTest: false }, scenario: { b: 'resolve' } });
+  staleDependency(s, { conflict: true }); const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(s.feature('b').status, 'stuck'); assert.equal(s.calls('build', 'b').length, 1);
+  assert.equal(s.calls('eval', 'b').length, 0); assert.doesNotMatch(s.log(), /"event":"testing"/);
+  assert.match(s.feature('b').lastFeedback!, mode === 'fails' ? /prepare .* exited 7/ : mode === 'dirty' ? /uncommitted changes/ : /declared merged dependencies/);
+});
+
+test('dependency import conflicts honor maxRefreshes before spending a builder call', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', maxRefreshes: 0 } }); staleDependency(s, { conflict: true });
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr); assert.equal(s.feature('b').status, 'stuck');
+  assert.match(s.feature('b').lastFeedback!, /too many base refreshes/); assert.equal(s.calls('build', 'b').length, 0); assert.equal(s.feature('b').attempts, 0);
+});
+
+test('a builder cannot abort a dependency import and pass with missing dependency ancestry', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1, refreshBeforeTest: false } }); staleDependency(s, { conflict: true });
+  const fake = join(s.repo, '.fact-os/abort-dependency.sh');
+  writeFileSync(fake, '#!/bin/sh\ncat >/dev/null\ngit merge --abort\necho built > b.txt\ngit add b.txt\ngit commit -qm "abort dependency and build"\nprintf \'%s\' \'{"type":"result","is_error":false,"result":"done","total_cost_usd":0}\'\n', { mode: 0o755 });
+  s.env.FACTOS_CLAUDE = fake; const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(s.feature('b').status, 'stuck'); assert.match(s.feature('b').lastFeedback!, /declared merged dependencies/);
+  assert.equal(existsSync(join(s.repo, '.fact-os/runs/b/1-eval.json')), false);
+});
+
+test('a falsely merged dependency SHA absent from base never launches the dependent builder', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1 } }); const sha = staleDependency(s);
+  s.git('reset', '--hard', 'HEAD^');
+  assert.notEqual(spawnSync('git', ['merge-base', '--is-ancestor', sha, 'main'], { cwd: s.repo }).status, 0);
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr); assert.equal(s.calls('build', 'b').length, 0);
+  assert.match(s.feature('b').lastFeedback!, /dependency a is not a merged commit on main/);
 });
 
 test('a synthetic commit on base carrying an unmerged feature branch\'s blobs is an alert (commit-tree, git -C <root> commit)', (t) => {

@@ -200,6 +200,7 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
   const min = (a: number, b: number) => (b - a) / 60e3;
   for (const e of events) {
     if (!e.feature) continue;
+    if (e.event === 'refreshed' && e.detail.startsWith('before build, ')) continue; // dependency import belongs to this builder
     const ms = t(e), cur = open.get(e.feature);
     if (e.event === 'launch') { if (ms >= since) { const era = eraOfLaunch.get(e)!; eras[era]!.launches++; open.set(e.feature, { era, stage: 'build', at: ms }); lastEra.set(e.feature, era); } else { open.delete(e.feature); lastEra.delete(e.feature); } continue; }
     if (e.event === 'resolving' && lastEra.has(e.feature)) { const era = lastEra.get(e.feature)!; eras[era]!.resolves++; open.set(e.feature, { era, stage: 'resolve', at: ms }); continue; }

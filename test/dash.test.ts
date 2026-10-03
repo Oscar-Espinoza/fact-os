@@ -1,9 +1,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import type { Server } from 'node:http';
 import { startDash, conflictTimeline, type ProjectState, type OpenTask, type Run, type ControlState } from '../lib/dash.ts';
 import type { Feature, HumanTask, MergeMode } from '../lib/types.ts';
@@ -23,6 +24,13 @@ function project(dir: string, { merge = 'auto', features = [], tasks = [], gitFi
 // control without the profile tables (their own test checks them)
 const core = (c: ControlState | undefined) => { const { roles, profiles, observerAgent, ...rest } = c!; return rest; };
 const humanOf = (p: string): HumanTask[] => JSON.parse(readFileSync(join(root, p, '.fact-os/human.json'), 'utf8')).tasks;
+const git = (dir: string, ...args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+function evaluatedBranch(dir: string, id: string): string {
+  git(dir, 'init', '-q', '-b', 'main'); git(dir, 'config', 'user.name', 'Test'); git(dir, 'config', 'user.email', 'test@example.com');
+  git(dir, 'commit', '-q', '--allow-empty', '-m', 'init'); git(dir, 'checkout', '-qb', `ship/${id}`);
+  writeFileSync(join(dir, `${id}.txt`), 'evaluated work\n'); git(dir, 'add', `${id}.txt`); git(dir, 'commit', '-qm', id);
+  const sha = git(dir, 'rev-parse', 'HEAD'); git(dir, 'checkout', '-q', 'main'); return sha;
+}
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(dash.url + path, { method: 'POST',
   headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
 
@@ -103,9 +111,34 @@ test('"I did my part" marks the task done and unblocks its feature', async () =>
 
 test('"Mark done" only applies to ready features in manual-merge projects', async () => {
   assert.equal((await post('/api/feature/merged', { project: join(root, 'shop'), id: 'pay' })).status, 409);
-  assert.equal((await post('/api/feature/merged', { project: join(root, 'group/blog'), id: 'post' })).status, 200);
+  const blog = join(root, 'group/blog'), file = join(blog, '.fact-os/features.json'), sha = evaluatedBranch(blog, 'post');
+  const state = JSON.parse(readFileSync(file, 'utf8')); state.features[0].sha = sha; writeFileSync(file, JSON.stringify(state));
+  git(blog, 'merge', '-q', '--no-ff', '-m', 'merge evaluated post', sha);
+  assert.equal((await post('/api/feature/merged', { project: blog, id: 'post' })).status, 200);
   const fs = JSON.parse(readFileSync(join(root, 'group/blog/.fact-os/features.json'), 'utf8')).features;
   assert.equal(fs[0].status, 'merged');
+});
+
+test('manual merge acknowledgment verifies the evaluated commit, accepts ff/no-ff and preserves state on refusal', async (t) => {
+  for (const mode of ['missing', 'invalid', 'missing object', 'blob', 'not merged', 'moved branch', 'no-ff', 'ff']) {
+    const dir = join(root, `ack-${mode.replaceAll(' ', '-')}`); project(dir, { merge: 'manual', features: [F('a', { status: 'ready' }), F('b', { deps: ['a'] })] });
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const sha = evaluatedBranch(dir, 'a'), file = join(dir, '.fact-os/features.json');
+    const recorded = mode === 'missing' ? undefined : mode === 'invalid' ? 'main' : mode === 'missing object' ? '0'.repeat(40)
+      : mode === 'blob' ? git(dir, 'rev-parse', `${sha}:a.txt`) : sha;
+    writeFileSync(file, JSON.stringify({ features: [F('a', { status: 'ready', sha: recorded }), F('b', { deps: ['a'] })] }));
+    if (mode === 'no-ff' || mode === 'ff' || mode === 'moved branch') git(dir, 'merge', '-q', ...(mode === 'ff' ? ['--ff-only'] : ['--no-ff', '-m', 'manual merge']), sha);
+    if (mode === 'moved branch') { git(dir, 'checkout', '-q', 'ship/a'); git(dir, 'commit', '-q', '--allow-empty', '-m', 'unevaluated later commit'); git(dir, 'checkout', '-q', 'main'); }
+    const before = readFileSync(file, 'utf8'), r = await post('/api/feature/merged', { project: dir, id: 'a' });
+    if (['no-ff', 'ff', 'moved branch'].includes(mode)) {
+      assert.equal(r.status, 200, mode); assert.equal(JSON.parse(readFileSync(file, 'utf8')).features[0].status, 'merged');
+      const state = await (await fetch(dash.url + '/api/state')).json() as DashState;
+      assert.deepEqual(state.projects.find((p) => p.path === dir)!.ready, ['b']);
+    } else {
+      assert.equal(r.status, 409, mode); assert.match((await r.json() as { error: string }).error, /evaluated commit/);
+      assert.equal(readFileSync(file, 'utf8'), before, mode); assert.equal(existsSync(join(dir, '.fact-os/log.jsonl')), false, mode);
+    }
+  }
 });
 
 test('a request with a foreign Host header is rejected (DNS rebinding)', async () => {
@@ -273,6 +306,14 @@ test('state carries the merge conflict timeline from the log: who resolved each 
     if (hasLog == null) rmSync(join(dir, 'log.jsonl')); else writeFileSync(join(dir, 'log.jsonl'), hasLog);
     rmSync(join(dir, 'observer.json'));
   }
+});
+
+test('conflictTimeline follows a dependency import conflict resolved by the same builder pass', () => {
+  const t0 = Date.now() - 10000, ev = (n: number, event: string, detail = '') => ({ ts: new Date(t0 + n * 1000).toISOString(), feature: 'b', event, detail });
+  const rows = conflictTimeline([ev(0, 'launch'), ev(1, 'refreshed', 'before build, conflicts in: src/a.ts, src/b.ts'),
+    ev(2, 'prompt', 'builder model=opus effort=medium lessons=- briefs=-'), ev(3, 'keep-check', 'ok: src/a.ts, src/b.ts'), ev(4, 'testing'), ev(5, 'evaluating'), ev(6, 'ready')], Date.now());
+  assert.deepEqual(rows.map((r) => [r.files, r.resolvedBy, r.outcome]), [[['src/a.ts', 'src/b.ts'], 'builder', 'resolved']]);
+  assert.deepEqual(conflictTimeline([ev(1, 'refreshed', 'before build, conflict-free')], Date.now()), []);
 });
 
 test('conflictTimeline: a resolver failure hands the conflict to the builder, and the note is kept', () => {

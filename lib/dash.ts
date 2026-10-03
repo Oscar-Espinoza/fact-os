@@ -4,7 +4,9 @@ import type { AddressInfo } from 'node:net';
 import { readdirSync, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, effectiveLimit, validLanes, MAX_LANES } from './state.ts';
+import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, withCheckoutLock, effectiveLimit, validLanes, MAX_LANES } from './state.ts';
+import { git } from './foreman.ts';
+import { conflictFiles } from './merge.ts';
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
 import { observerPaths, observerConfig, recurringTests, hotFiles, type ObserverState, type Era } from './observe.ts';
@@ -195,13 +197,14 @@ export function conflictTimeline(events: LogEvent[], now: number, titles: Record
   for (const e of events) {
     const f = e.feature;
     if (!f) continue;
-    const conflicted = e.event === 'refreshed' && e.detail.startsWith('conflicts in: '), giveUp = e.event === 'stuck' && e.detail.startsWith('too many base refreshes');
+    const files = e.event === 'refreshed' ? conflictFiles(e.detail) : [];
+    const conflicted = files.length > 0, giveUp = e.event === 'stuck' && e.detail.startsWith('too many base refreshes');
     if (open.has(f) && (conflicted || e.event === 'merged' || giveUp)) {
       if (giveUp) note(open.get(f)!.row, 'gave up after too many conflicts');
       close(f, conflicted ? 'conflicted again' : giveUp ? 'failed' : 'merged', e.ts);
     }
     if (conflicted) {
-      const row: Conflict = { feature: f, ...(titles[f] ? { title: titles[f] } : {}), ts: e.ts, files: e.detail.slice(14).split(',').map((x) => x.trim()).filter(Boolean), resolvedBy: null, outcome: 'still open', ms: 0 };
+      const row: Conflict = { feature: f, ...(titles[f] ? { title: titles[f] } : {}), ts: e.ts, files, resolvedBy: null, outcome: 'still open', ms: 0 };
       open.set(f, { row, done: false });
       if (Date.parse(e.ts) >= since) rows.push(row);
       continue;
@@ -213,6 +216,7 @@ export function conflictTimeline(events: LogEvent[], now: number, titles: Record
     else if (e.event === 'resolved') { r.resolvedBy = 'resolver'; delete r.resolving; o.done = true; }
     else if (e.event === 'resolve-failed') { r.resolvedBy = 'builder'; delete r.resolving; note(r, e.detail); }
     else if (e.event === 'launch') { r.resolvedBy ??= 'builder'; delete r.resolving; o.done = true; delete r.stuckCause; delete r.outcomeTs; }
+    else if (e.event === 'testing' && r.resolvedBy === null) { r.resolvedBy = 'builder'; o.done = true; }
     else if (e.event === 'keep-check') { if (e.detail.startsWith('ok')) o.done = true; else note(r, e.detail); }
     else if (e.event === 'stuck') { r.outcomeTs = e.ts; r.stuckCause = e.detail.split('\n')[0]!.slice(0, 120); }
     else if (e.event === 'retrying' || e.event === 'resumed') { delete r.stuckCause; delete r.outcomeTs; }
@@ -399,16 +403,25 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
         if (code === 200 && what !== 'step') log(project, null, `human-${what}`, id);
         return send(code, code === 200 ? { ok: true } : { error: code === 404 ? `unknown human task ${id}` : code === 409 ? `human task ${id} is already done` : 'no such step' });
       }
-      if (load(project).config.merge !== 'manual') return send(409, { error: 'this project merges automatically' });
-      const code = await mutate(project, 'features', (d) => {
-        const f = d.features.find((x) => x.id === id);
-        if (!f) return 404;
-        if (f.status !== 'ready') return 409;
-        Object.assign(f, { status: 'merged', updatedAt: new Date().toISOString() });
-        return 200;
+      const result = await withCheckoutLock(project, async () => {
+        const { config, features } = load(project), f = features.find((x) => x.id === id);
+        if (config.merge !== 'manual') return { code: 409, error: 'this project merges automatically' };
+        if (!f) return { code: 404, error: `unknown feature ${id}` };
+        if (f.status !== 'ready') return { code: 409, error: `${id} is not ready` };
+        if (!f.sha || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(f.sha) ||
+          git(['rev-parse', '--verify', '--quiet', `${f.sha}^{commit}`], project).code !== 0 ||
+          git(['merge-base', '--is-ancestor', f.sha, `refs/heads/${config.base}`], project).code !== 0) {
+          return { code: 409, error: `merge the recorded evaluated commit into ${config.base} before marking ${id} merged; a recorded commit SHA is required` };
+        }
+        const code = await mutate(project, 'features', (d) => {
+          const current = d.features.find((x) => x.id === id);
+          if (!current || current.status !== 'ready' || current.sha !== f.sha) return 409;
+          Object.assign(current, { status: 'merged', updatedAt: new Date().toISOString() }); return 200;
+        });
+        if (code === 200) log(project, id, 'merged', 'evaluated commit verified on base; marked merged from the dashboard');
+        return { code, error: `${id} changed while acknowledging its merge` };
       });
-      if (code === 200) log(project, id, 'merged', 'marked merged from the dashboard');
-      return send(code, code === 200 ? { ok: true } : { error: code === 404 ? `unknown feature ${id}` : `${id} is not ready` });
+      return send(result.code, result.code === 200 ? { ok: true } : { error: result.error });
     } catch (e) {
       send(500, { error: errMsg(e) });
     }

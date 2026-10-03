@@ -8,7 +8,10 @@ description: Start fact-os's foreman on this repo in the background and report s
 1. Run `fact-os doctor`. If it reports problems, fix the state files (or ask the user) and re-run it.
    Do not start the foreman while doctor fails.
 2. Make sure the main checkout is on the configured `base` branch with no uncommitted tracked changes;
-   otherwise passing features stop at `ready` instead of merging. Tell the user if that is the case.
+   otherwise automatic merges stop at `ready`. In `merge: "manual"`, every passing feature stops at
+   `ready`: merge its recorded evaluated commit into base, then acknowledge with the dashboard's
+   "Mark merged". Dependents wait for this verified acknowledgment; it does not perform the Git merge.
+   Tell the user which workflow the project uses.
 3. Start the foreman in the background (it keeps running while features wait on the user):
    `mkdir -p .fact-os/runs && nohup fact-os run --watch > .fact-os/runs/foreman.out 2>&1 &`
    Only one foreman runs per repo; if one is already running, do not start another.

@@ -12,10 +12,12 @@ test('ready only when every dep is merged (bug: checking direct deps exist inste
   assert.deepEqual(analyze(fs, [], 'auto').ready, ['b']);
 });
 
-test('manual merge treats "ready" deps as satisfied; auto merge does not', () => {
-  const fs = [F('a', { status: 'ready' }), F('b', { deps: ['a'] })];
-  assert.deepEqual(analyze(fs, [], 'manual').ready, ['b']);
-  assert.deepEqual(analyze(fs, [], 'auto').ready, []);
+test('both merge modes wait for merged dependencies while independent manual features can run', () => {
+  const fs = [F('a', { status: 'ready' }), F('b', { deps: ['a'] }), F('c')];
+  for (const mode of ['auto', 'manual'] as const) {
+    assert.deepEqual(analyze(fs, [], mode).ready, ['c']);
+    fs[0]!.status = 'merged'; assert.deepEqual(analyze(fs, [], mode).ready, ['b', 'c']); fs[0]!.status = 'ready';
+  }
 });
 
 test('only todo features are ready (bug: relaunching building/stuck/merged features)', () => {

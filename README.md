@@ -94,10 +94,15 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   `doctor` and the dashboard flag it, and any control command rewrites it. An unknown `profile` makes the file invalid too.
   `bun scripts/replay-conflicts.ts <repo>` replays a project's real merge conflicts against the merge process, read-only.
 
-**Readiness:** a `todo` feature is ready when every dep is `merged` (or `ready` under manual merge) and
+**Readiness:** a `todo` feature is ready when every dep is `merged` in either merge mode and
 every open human task that unblocks it is `mockable` (it is then built `onMock`). An open non-mockable task
 makes it *waiting-on-human*. Ready features run by priority, then number of transitive dependents, then id.
 Features in cycles, with unknown deps or duplicate ids are reported and never run.
+In manual mode, merge the recorded evaluated commit into `base`, then use the dashboard's
+"Mark merged"; acknowledgment verifies ancestry. Unmerged `ready` features hold their dependents,
+and `run --watch` waits for acknowledgment. Independent manual features can still build and finish
+at `ready`. Reused dependent branches import missing dependency commits before setup/build; conflicts
+go to their builder. Squash/cherry-pick merges need separate reconciliation and cannot be acknowledged.
 
 **Evaluator verdict:** `{pass, findings: [{check, ok, evidence}], cheating: [], blocking: [], notes: [], lesson}`.
 Parsing requires a JSON object, boolean `pass` and nonempty `findings`. Every finding must

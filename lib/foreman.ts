@@ -213,7 +213,7 @@ export function builderPrompt(root: string, config: Config, f: Feature, branch: 
     '- Do not weaken or delete tests to make them pass.', '- Do not stub behavior the acceptance checks require.',
     '- You may run parallel subagents when that clearly helps. Give each one a disjoint set of files, so that no two ever',
     '  edit the same file. Only you commit on this branch: subagents never commit. Nobody, including you, merges, rebases,',
-    '  pulls, resets or switches branches, except to complete a merge the foreman started in this worktree (resolve,',
+    '  pulls, resets or switches branches, except to complete a merge the foreman started or explicitly assigned in this worktree (resolve,',
     '  git add, git commit); the foreman alone merges into ' + config.base + '.',
     `- The test command \`${config.test}\` must pass.`,
     lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config), notes].join('\n');
@@ -346,7 +346,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   const P = paths(root);
   const out = opts.out || ((s: string) => console.log(s));
   const children = new Set<ChildProcess>(), inflight = new Map<string, Promise<unknown>>();
-  let stopping = false, launched = 0, onceDone = false, chain: Promise<unknown> = Promise.resolve(), lastWaiting = '', lastOrphans = '', lastParked = '';
+  let stopping = false, launched = 0, onceDone = false, chain: Promise<unknown> = Promise.resolve(), lastWaiting = '', lastManualWaiting = '', lastOrphans = '', lastParked = '';
   // control.json: the control applied last tick (null before the first read), the last valid one read, the invalid content
   // last reported, and the ready features last logged as held by its limit.
   let lastControl: Control | null = null, lastGood: Control | null = null, lastBad: string | null = null, lastHeld = '';
@@ -523,12 +523,49 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         log(root, id, 'restored', `${config.restoreFrom!.replaceAll('{id}', id)} (${saved.slice(0, 8)})`);
       } else git(['merge', '--ff-only', '--quiet', config.base], wt);
     }
-    // Optional per-worktree setup (dependencies, task databases), run before every build; must be idempotent.
-    if (config.prepare) {
-      const pr = await exec('sh', ['-c', `exec 2>&1\n${config.prepare}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
-      if (await stopped()) return;
-      if (pr.code !== 0) return fail(`prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`);
+    // Reused/restored branches can carry their own work from before a dependency
+    // merged. Import that work before setup/build, independently of refreshBeforeTest.
+    const required: string[] = [];
+    let prepareDeferred = false;
+    if (f.deps?.length) {
+      const r = await serial(async () => {
+        if (tampered()) { await set(id, { status: 'todo' }); return 'halted'; }
+        const deps = load(root).features;
+        for (const dep of f.deps) {
+          const d = deps.find((x) => x.id === dep), sha = d?.sha || baseSha;
+          if (d?.status !== 'merged' || git(['rev-parse', '--verify', '--quiet', `${sha}^{commit}`], root).code !== 0 ||
+            git(['merge-base', '--is-ancestor', sha, baseSha], root).code !== 0) {
+            await fail(`worktree: dependency ${dep} is not a merged commit on ${config.base}`); return 'halted';
+          }
+          required.push(sha);
+        }
+        if (required.every((sha) => git(['merge-base', '--is-ancestor', sha, branch], wt).code === 0)) return 'current';
+        const pending = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt);
+        if (pending.code === 0) {
+          if (required.every((sha) => git(['merge-base', '--is-ancestor', sha, branch], wt).code === 0 ||
+            git(['merge-base', '--is-ancestor', sha, pending.out], wt).code === 0)) return 'pending';
+          await fail('worktree: the pending merge does not contain the declared dependencies'); return 'halted';
+        }
+        return refresh(id, branch, fail, true, false, true);
+      });
+      if (r !== 'current' && r !== 'clean' && r !== 'conflicted' && r !== 'pending') return;
+      if (r === 'conflicted' || r === 'pending') {
+        f.lastFeedback = load(root).features.find((x) => x.id === id)?.lastFeedback;
+        if (r === 'pending') f.lastFeedback = (f.lastFeedback || '') + '\n\nThe foreman assigns you the pending dependency merge already in this worktree. Resolve it preserving both sides and commit the merge; do not abort it.';
+        prepareDeferred = !!config.prepare;
+        if (prepareDeferred) f.lastFeedback = (f.lastFeedback || '') + `\n\nSetup \`${config.prepare}\` is deferred until this merge is resolved. ` +
+          'Resolve the conflicts first, run that setup command if needed for your build, and commit all resulting work. The foreman reruns setup before testing.';
+      }
     }
+    // Optional per-worktree setup (dependencies, task databases), run before every build; must be idempotent.
+    const prepare = async (): Promise<boolean> => {
+      if (!config.prepare) return true;
+      const pr = await exec('sh', ['-c', `exec 2>&1\n${config.prepare}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
+      if (await stopped()) return false;
+      if (pr.code !== 0) { await fail(`prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`); return false; }
+      return true;
+    };
+    if (!prepareDeferred && !await prepare()) return;
 
     // Reuse a parked evaluation that needs current-base validation, or an interrupted build,
     // only when the clean worktree still points to exactly that commit.
@@ -547,12 +584,15 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (await stopped()) return;
     if (!b.ok) return fail(`builder failed: ${b.error}`);
     }
+    if (prepareDeferred && !await prepare()) return;
     // Any commit beyond base counts as the builder's, including the merge commit that completes a base refresh.
     const status = git(['status', '--porcelain'], wt).out.split('\n').filter(Boolean);
     const listed = status.slice(0, 40).join('\n') + (status.length > 40 ? `\n… ${status.length - 40} more` : '');
     const merging = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 ? `the merge of ${config.base} the foreman started is not committed; ` : '';
     if (merging || status.length || git(['rev-list', '--count', `${config.base}..${branch}`], wt).out === '0')
       return fail(`commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`);
+    if (required.some((sha) => git(['merge-base', '--is-ancestor', sha, branch], wt).code !== 0))
+      return fail('commit your work: the branch no longer contains its declared merged dependencies');
     // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
     const rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
     if (rc.lost) return fail(rc.lost);
@@ -648,7 +688,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   // resolve and commit. No attempt is spent. beforeTest: a clean merge returns 'clean' and the pipeline goes on.
   // With conflictBrief or a resolver, the conflict feedback carries the both-sides brief and the conflict is recorded for
   // the keep-lines check; inline (a resolver is set and a pipeline is waiting): the feature stays in flight, 'conflicted'.
-  function refresh(id: string, branch: string, fail: Fail, beforeTest = false, inline = false): Promise<void | 'conflicted'> | 'clean' {
+  function refresh(id: string, branch: string, fail: Fail, beforeTest = false, inline = false, beforeBuild = false): Promise<void | 'conflicted'> | 'clean' {
     const wt = resolve(root, config.worktreesDir, id), base = config.base;
     const cur = load(root).features.find((x) => x.id === id), n = cur?.refreshes || 0;
     // A refresh must not drop the failure the builder still has to fix (e.g. a gate failure): keep it, minus any older
@@ -667,7 +707,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const m = git([...(both ? ['-c', 'merge.conflictStyle=diff3'] : []), 'merge', '--no-edit', '-m', `${NAME}: merge ${base} into ${branch}`, baseSha], wt);
     const conflicted = m.code !== 0 && git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0;
     if (m.code && !conflicted) return fail(`merge conflict with ${base}; merging ${base} into your branch did not start: ${m.err}`);
-    if (beforeTest && !conflicted) { log(root, id, 'refreshed', 'before test, conflict-free'); out(`refresh ${id}: merged ${base} into ${branch} before test`); return 'clean'; }
+    if (beforeTest && !conflicted) { log(root, id, 'refreshed', `before ${beforeBuild ? 'build' : 'test'}, conflict-free`); out(`refresh ${id}: merged ${base} into ${branch} before ${beforeBuild ? 'build' : 'test'}`); return 'clean'; }
     if (n >= config.maxRefreshes) { git(['merge', '--abort'], wt); return tooMany(); }
     const list = git(['diff', '--name-only', '--diff-filter=U'], wt).out.split('\n').filter(Boolean), files = list.join(', ');
     let fb = conflicted
@@ -679,9 +719,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       pendingBrief.set(id, b);
       fb += ` Keep every line either side added; list any line you must drop or change in a commit message as \`dropped: <file>: <line>\` (a check compares).\n\n${b.text}`;
     }
-    log(root, id, 'refreshed', conflicted ? `conflicts in: ${files}` : 'conflict-free');
+    log(root, id, 'refreshed', (beforeBuild ? 'before build, ' : '') + (conflicted ? `conflicts in: ${files}` : 'conflict-free'));
     out(`refresh ${id}: merged ${base} into ${branch}${conflicted ? `, conflicts in: ${files}` : ''}`);
     const patch = { refreshes: n + 1, lastFeedback: keepPrior + fb, parked: undefined, ...(rec ? { conflict: rec } : {}) };
+    if (beforeBuild) return set(id, patch).then(() => 'conflicted' as const); // this builder owns the started merge
     if (rec && inline) return set(id, patch).then(() => 'conflicted' as const); // the pipeline's resolver takes it from here
     return set(id, { status: 'todo', ...patch });
   }
@@ -794,6 +835,9 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         continue;
       }
       const a = analyze(features, tasks, config.merge);
+      const manualWaiting = config.merge === 'manual' ? features.filter((f) => f.status === 'todo' && !a.bad.has(f.id) &&
+        (f.deps || []).some((d) => features.find((x) => x.id === d)?.status === 'ready')).map((f) => f.id) : [];
+      if (!manualWaiting.length) lastManualWaiting = '';
       const overBudget = config.budgetUsdTotal != null && spent >= config.budgetUsdTotal; // null = unlimited
       const capped = () => opts.maxFeatures != null && launched >= opts.maxFeatures;
       if (!stopping && !overBudget && !onceDone && !tampered()) {
@@ -874,7 +918,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       }
       // --watch also waits while features are paused, or ready ones are held by a pause / lanes 0 (control.json), so resuming
       // (CLI or dashboard) launches them.
-      if (!(opts.watch && (a.waiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
+      if (!(opts.watch && (a.waiting.length || manualWaiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
+      if (manualWaiting.length && manualWaiting.join() !== lastManualWaiting) {
+        lastManualWaiting = manualWaiting.join();
+        log(root, null, 'waiting-merge', manualWaiting.join(', ')); out(`waiting for manual merges before: ${manualWaiting.join(', ')}`);
+      }
       if (a.waiting.join() !== lastWaiting) {
         lastWaiting = a.waiting.join();
         log(root, null, 'waiting', a.waiting.join(', '));

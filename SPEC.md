@@ -157,12 +157,22 @@ and `doctor` print how many not-merged features would escalate. Opus never escal
 
 ## Readiness rule (pure function, heavily tested)
 
-A feature is **ready** when: status is `todo`; every dep is `merged` (or `ready` when `merge` is
-"manual"); and for every open human task that lists it in `unblocks`, that task is `mockable`
+A feature is **ready** when: status is `todo`; every dep is `merged`, in either merge mode;
+and for every open human task that lists it in `unblocks`, that task is `mockable`
 (then the feature is built with `onMock: true`). A feature blocked by an open non-mockable human task
 is **waiting-on-human**. Ready features are ordered by priority, then by how many other features
 transitively depend on them (more first), then id. Dependency cycles and unknown dep ids are reported
 by `fact-os doctor` / at load and those features are never ready.
+Manual `ready` means evaluated but unmerged, so it never satisfies a dependency. Merge the recorded
+evaluated SHA into configured base, then acknowledge with the dashboard's "Mark merged". This action
+requires a recorded full commit SHA reachable from `refs/heads/<base>`; ordinary fast-forward and
+non-fast-forward merges qualify, squash/cherry-pick equivalents do not. The current feature-branch
+tip may have moved; acknowledgment verifies only the recorded evaluated commit. Missing, invalid,
+absent or unmerged SHAs refuse before changing state or logging a merge. A watching foreman waits
+while todo dependents require ready manual features; acknowledgment wakes it. Without `--watch`,
+blocked dependents remain todo and the run exits 2; independent manual features still finish ready.
+Actual Git movement alone does not acknowledge a feature. Hand-written merged metadata is trusted
+for legacy dependencies without a SHA; the factory cannot prove their identity from that record.
 
 ## Foreman loop — `fact-os run [--watch] [--once] [--max-features N]`
 
@@ -207,6 +217,18 @@ Each tick:
    claim never waits on anything that is not running; a skip is logged once per reason as `claim-wait` ("<file> is claimed
    by <id>"), and the builder of a launched feature is told which hot files others in flight hold.
 3. Per feature (concurrently):
+   - **Dependency import.** After branch creation/restoration, before `prepare` or building, verify every
+     declared merged dependency's recorded SHA is a commit reachable from current base. A legacy merged
+     dependency without SHA requires current base instead. If those commits are absent from a reused
+     feature branch, merge base into it regardless of `refreshBeforeTest`. Clean imports continue without
+     spending an attempt; conflicts stay with this builder, retaining earlier feedback and the existing
+     optional brief/keep-lines checks, bounded by `maxRefreshes`. Preparation is deferred for such conflicts:
+     the builder is told to resolve, run setup if needed, and commit its work; foreman reruns idempotent
+     `prepare` afterward, then requires a clean committed tree and dependency ancestry before gates.
+     A pending merge must contain the required commits across its two parents; after building/setup,
+     require dependency ancestry again before testing/evaluation, so aborting the
+     merge cannot bypass this check. `refreshed` details starting `before build, ` continue the same pass
+     in observer statistics and prompt review. This ancestry contract cannot prove unchanged semantics.
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
      previous evaluator feedback, lessons file, briefFiles, and the rule "commit your work; do not

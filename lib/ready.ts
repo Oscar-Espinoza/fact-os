@@ -51,13 +51,15 @@ export function taskReach(task: HumanTask, features: Feature[]): number {
   return features.filter((f) => direct.has(f.id) || [...reach.get(f.id)!].some((d) => direct.has(d))).length;
 }
 
-export function analyze(features: Feature[], tasks: HumanTask[], mergeMode: MergeMode = 'auto'): Analysis {
+// Keep the mode argument compatible with existing callers; both modes require
+// merged dependencies because worktrees start from base, not unmerged branches.
+export function analyze(features: Feature[], tasks: HumanTask[], _mergeMode: MergeMode = 'auto'): Analysis {
   const { byId, reach } = reachability(features);
   const count = new Map<string, number>();
   for (const f of features) count.set(f.id, (count.get(f.id) || 0) + 1);
   const bad = new Set(features.filter((f) => typeof f.id !== 'string' || !SLUG.test(f.id) || count.get(f.id)! > 1 || reach.get(f.id)!.has(f.id) ||
     [...reach.get(f.id)!].some((d) => !byId.has(d))).map((f) => f.id));
-  const done = new Set<string | undefined>(mergeMode === 'manual' ? ['merged', 'ready'] : ['merged']);
+  const done = new Set<string | undefined>(['merged']);
   const open = tasks.filter((t) => t.status === 'open');
   const ready: Feature[] = [], waiting: string[] = [], mock = new Set<string>();
   for (const f of features) {
