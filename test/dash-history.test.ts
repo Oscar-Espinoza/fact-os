@@ -1,0 +1,138 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, utimesSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createContext, runInContext } from 'node:vm';
+import { startDash, type Run } from '../lib/dash.ts';
+import type { Feature, LogEvent } from '../lib/types.ts';
+
+const feature = (status: Feature['status'], attempts: number): Feature => ({ id: 'a', title: 'A', description: '', acceptance: ['check'],
+  surface: 'any', deps: [], priority: 1, status, attempts, updatedAt: new Date().toISOString() });
+const verdict = (evidence = 'verified') => ({ pass: true, findings: [{ check: 'check', ok: true, evidence }] });
+const fixture = async (t: { after: (fn: () => void) => void }, f = feature('merged', 1)) => {
+  const root = mkdtempSync(join(tmpdir(), 'fact-os-dash-history-')), dir = join(root, '.fact-os'), runs = join(dir, 'runs/a');
+  mkdirSync(runs, { recursive: true }); mkdirSync(join(root, '.git'));
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ maxAttempts: 3 }));
+  writeFileSync(join(dir, 'features.json'), JSON.stringify({ features: [f] })); writeFileSync(join(dir, 'human.json'), '{"tasks":[]}');
+  const dash = await startDash({ root, port: 0 });
+  t.after(() => { dash.server.close(); rmSync(root, { recursive: true, force: true }); });
+  const put = (name: string, result: unknown, at: number, extra = {}) => {
+    const file = join(runs, name); writeFileSync(file, JSON.stringify({ result: typeof result === 'string' ? result : JSON.stringify(result), total_cost_usd: 0.2, duration_ms: 1000, ...extra }));
+    utimesSync(file, at / 1000, at / 1000);
+  };
+  const history = () => fetch(dash.url + '/api/feature?project=' + encodeURIComponent(root) + '&id=a').then((r) => r.json()) as Promise<{ runs: Run[]; log: LogEvent[]; activity: unknown[] }>;
+  return { root, dir, dash, put, history };
+};
+
+test('served history preserves full tags, resolver outputs, evidence and chronological retry order', async (t) => {
+  const s = await fixture(t), time = Date.now() - 10000;
+  for (const [tag, role] of [['1', 'build'], ['1', 'eval'], ['1.2', 'resolve'], ['1.2', 'eval'], ['1.10', 'eval'], ['2', 'eval']])
+    s.put(`${tag}-${role}.json`, role === 'eval' ? verdict(`evidence ${tag}`) : `${role} text`, time);
+  s.put('1.11-eval.json', verdict('new retry'), time + 1000);
+  const h = await s.history();
+  assert.deepEqual(h.runs.map((r) => `${(r as Run & { tag: string }).tag}-${r.role}`), ['1-build', '1-eval', '1.2-resolve', '1.2-eval', '1.10-eval', '2-eval', '1.11-eval']);
+  assert.deepEqual(h.runs.at(-1)!.findings, [{ check: 'check', ok: true, evidence: 'new retry' }]);
+});
+
+test('served evaluation validity uses foreman parsers and retains rejection text', async (t) => {
+  const s = await fixture(t), bad = { pass: true, findings: [] };
+  const cases = [bad, { ...verdict(), findings: [{ check: 'check', ok: false, evidence: 'defect' }] }, { ...verdict(), blocking: ['unsafe'] },
+    { ...verdict(), notes: 'invalid' }, ['wrapped', verdict()], 'plain invalid text', verdict(), `Here is the verdict:\n\`\`\`json\n${JSON.stringify(verdict('fenced'))}\n\`\`\``];
+  cases.forEach((v, i) => s.put(`${i + 1}-eval.json`, v, Date.now() + i));
+  s.put('9-eval.json', '', Date.now() + 9, { structured_output: verdict('structured') });
+  s.put('10-eval.json', verdict(), Date.now() + 10, { is_error: true });
+  const h = await s.history();
+  assert.deepEqual(h.runs.map((r) => r.pass), [false, false, false, false, false, false, true, true, true, false]);
+  assert.match((h.runs[0] as Run & { error: string }).error, /findings/);
+  assert.equal((h.runs[0] as Run & { text: string }).text, JSON.stringify(bad));
+  assert.equal((h.runs[8]!.findings![0] as { evidence: string }).evidence, 'structured');
+});
+
+// Execute the actual served scripts and registered render/click handlers. Nodes store
+// markup without implementing layout; assertions exercise user-visible contracts.
+const browser = async (url: string) => {
+  const nodes = new Map<string, any>(), events = new Map<string, Function>();
+  const node = (id: string): any => {
+    if (!nodes.has(id)) nodes.set(id, { innerHTML: '', textContent: '', value: '', dataset: {}, clientWidth: 1672,
+      style: { getPropertyValue: () => '1', setProperty() {} }, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      setAttribute() {}, addEventListener(name: string, fn: Function) { this[name] = fn; }, querySelectorAll: (selector: string) => selector === '[data-fid]' ? [...nodes.entries()].filter(([id]) => id.startsWith('fx-slot')).flatMap(([, slot]) => {
+        const id = /data-fid="([^"]+)"/.exec(slot.innerHTML)?.[1], kind = /data-kind="([^"]+)"/.exec(slot.innerHTML)?.[1];
+        return id ? [{ dataset: { fid: id, kind }, querySelector: (s: string) => node('bay-' + id + s), parentNode: slot }] : [];
+      }) : [], parentNode: { classList: { toggle() {} } } });
+    return nodes.get(id);
+  };
+  let paints = 0;
+  const sandbox: any = { document: { getElementById: node, body: { dataset: { name: 'fact-os' } }, addEventListener() {}, querySelectorAll: () => [] },
+    location: { hash: '#f/a' }, localStorage: { getItem: () => null, setItem() {} }, setInterval() {}, setTimeout, clearTimeout,
+    scrollTo() {}, addEventListener: (name: string, fn: Function) => events.set(name, fn),
+    fetch: async (path: string) => { const r = await fetch(url + path); if (path.startsWith('/api/feature')) paints++; return r; } };
+  sandbox.window = sandbox;
+  const ctx = createContext(sandbox);
+  for (const script of ['core', 'factory', 'board', 'detail']) runInContext(await (await fetch(`${url}/dash/${script}.js`)).text(), ctx);
+  sandbox.F.boot();
+  for (let i = 0; i < 100 && (!paints || !node('d-sum').innerHTML); i++) await new Promise((r) => setTimeout(r, 5));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(node('foreman-t').textContent === 'Dashboard offline', false, 'render must not throw');
+  return { F: sandbox.F, node, route: (view: string) => { sandbox.location.hash = '#' + view; events.get('hashchange')!(); },
+    log: (n: number) => node('detail').click({ target: { closest: () => ({ dataset: { log: String(n) } }) } }) };
+};
+
+test('served detail, board and factory agree on first and second running attempts and second success', async (t) => {
+  const s = await fixture(t, feature('building', 0)), b = await browser(s.dash.url);
+  assert.match(b.node('d-sum').innerHTML, /Attempt 1 is running/);
+  const f = b.F.P.features[0]; f.attempts = 1; b.F.render();
+  assert.match(b.node('d-sum').innerHTML, /Attempt 2 is running/);
+  b.route('board'); assert.match(b.node('b-active').innerHTML, /try 2\/3/);
+  b.route('factory'); assert.equal(b.node('bay-a[data-tries]').textContent, 'try 2/3');
+  f.status = 'merged'; b.route('f/a');
+  assert.match(b.node('d-sum').innerHTML, /On try 2/);
+  assert.match(b.node('d-attempts').innerHTML, /Try 2/);
+});
+
+test('served detail shows distinct refreshed outputs, current evidence and rejected raw verdicts', async (t) => {
+  const s = await fixture(t), at = Date.now() - 1000;
+  s.put('2-build.json', 'original build', at);
+  s.put('2-eval.json', { pass: false, findings: [{ check: 'old', ok: false, evidence: 'old failure' }] }, at + 1);
+  s.put('2.2-resolve.json', 'resolver output', at + 2);
+  s.put('2.2-eval.json', { pass: true, findings: [] }, at + 3);
+  s.put('2.10-eval.json', { pass: true, findings: [{ check: 'one', ok: true, evidence: '<current evidence>' }, { check: 'two', ok: true, evidence: 'verified' }] }, at + 4);
+  const b = await browser(s.dash.url); b.log(2);
+  const html = b.node('d-attempts').innerHTML;
+  assert.match(html, /Run 2\.2/); assert.match(html, /Run 2\.10/); assert.match(html, /resolver output/);
+  assert.match(html, /&#60;current evidence&#62;/); assert.match(html, /verdict.findings/);
+  assert.match(html, /&#34;findings&#34;:\[\]/); assert.match(b.node('d-benches').innerHTML, /2 of 2 checks passed/);
+});
+
+test('fresh human retry does not attach an earlier failure to the new attempt', async (t) => {
+  const s = await fixture(t, feature('building', 0)), time = Date.now() - 1000;
+  s.put('1-build.json', 'old build', time); s.put('1-eval.json', { pass: false, findings: [{ check: 'old', ok: false, evidence: 'old defect' }] }, time + 1);
+  writeFileSync(join(s.dir, 'log.jsonl'), [{ ts: new Date(time + 2).toISOString(), feature: 'a', event: 'stuck', detail: 'FAILED old: old defect' },
+    { ts: new Date(time + 3).toISOString(), feature: 'a', event: 'retrying', detail: 'by a person' }, { ts: new Date(time + 4).toISOString(), feature: 'a', event: 'launch', detail: '' }].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const b = await browser(s.dash.url);
+  assert.doesNotMatch(b.node('d-prob').innerHTML, /Try 1 failed/);
+  assert.match(b.node('d-prob').innerHTML, /old defect/, 'historical evidence remains available');
+});
+
+test('current builder failure after a retry takes precedence over an older rejected evaluation', async (t) => {
+  const s = await fixture(t, feature('stuck', 1)), time = Date.now() - 1000;
+  s.put('1-eval.json', { pass: false, findings: [{ check: 'old', ok: false, evidence: 'old defect' }] }, time);
+  s.put('1.2-build.json', 'new builder failed', time + 4);
+  writeFileSync(join(s.dir, 'log.jsonl'), [{ ts: new Date(time + 1).toISOString(), feature: 'a', event: 'stuck', detail: 'FAILED old: old defect' },
+    { ts: new Date(time + 2).toISOString(), feature: 'a', event: 'retrying', detail: 'by a person' },
+    { ts: new Date(time + 3).toISOString(), feature: 'a', event: 'launch', detail: '' },
+    { ts: new Date(time + 5).toISOString(), feature: 'a', event: 'stuck', detail: 'builder failed: new failure' }].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const b = await browser(s.dash.url);
+  assert.match(b.node('d-attempts').innerHTML, /Failed while building/);
+  assert.doesNotMatch(b.node('d-attempts').innerHTML, /Failed evaluation/);
+  assert.doesNotMatch(b.node('d-benches').innerHTML, /old defect/);
+  b.log(1); assert.match(b.node('d-attempts').innerHTML, /old defect/, 'distinct historical outputs remain inspectable');
+});
+
+test('legacy merged state does not make a rejected saved verdict appear to pass inspection', async (t) => {
+  const s = await fixture(t, feature('merged', 0)); s.put('1-eval.json', { pass: true, findings: [] }, Date.now());
+  const b = await browser(s.dash.url);
+  assert.match(b.node('d-benches').innerHTML, /Verdict rejected/);
+  assert.match(b.node('d-benches').innerHTML, /verdict.findings/);
+  assert.equal(b.F.P.features[0].status, 'merged', 'projection does not rewrite pipeline state');
+});

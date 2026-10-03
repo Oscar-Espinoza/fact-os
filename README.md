@@ -114,6 +114,11 @@ and `run --watch` waits for acknowledgment. Independent manual features can stil
 at `ready`. Reused dependent branches import missing dependency commits before setup/build; conflicts
 go to their builder. Squash/cherry-pick merges need separate reconciliation and cannot be acknowledged.
 
+The dashboard shows the current attempt as failures + 1 while running or ready/merged.
+Recorded runs retain full tags, resolver output and finding evidence; expanded logs keep
+original agent text and validation errors. Saved verdict validity uses the foreman parser
+and is separate from the feature’s recorded pipeline status.
+
 **Evaluator verdict:** `{pass, findings: [{check, ok, evidence}], cheating: [], blocking: [], notes: [], lesson}`.
 Parsing requires a JSON object, boolean `pass` and nonempty `findings`. Every finding must
 have nonempty string `check`/`evidence` and boolean `ok`; malformed entries reject the whole

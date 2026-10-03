@@ -501,7 +501,25 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   `/api/state` projects also carry `repoUrl?` (`https://github.com/<owner>/<repo>` from `.git/config`'s origin) and
   `stats {mergedAt: ISO[] /* merged events, last 48h */, costToday, costYesterday}` (`total_cost_usd` of
   `runs/*/*.json` by mtime, local day). `GET /api/feature` returns `{log, activity, runs}`; `runs` are the last 20
-  `{n, role: build|eval, at, ms, cost, turns, model, pass?, findings?, summary}` from `runs/<id>/`.
+  `{n, tag, role: build|eval|resolve, at, ms, cost, turns, model, pass?, findings?, error?, text, summary}`
+  from `runs/<id>/`, ordered by completion mtime with numeric attempt/suffix and build/resolve/eval
+  tie-breaking. `n` is the integer attempt prefix; `tag` preserves the full artifact identity (e.g.
+  `1.2`, `1.10`) across refreshes, revalidation, interruption and human/observer retries. The
+  browser shares one attempt calculation: failures + 1 for building/testing/evaluating/ready/merged;
+  otherwise recorded failures.
+  Detail selects the latest retained output per role/attempt, while
+  expanded recorded-run logs show every retained tag, resolver output, finding evidence and original
+  provider text (summary capped at 400 characters; text is complete). Duration/cost rows sum retained
+  artifacts with that attempt number, including refreshes and earlier cycles after counter resets.
+  Failure labels prefer the current recorded failure event over an older evaluation; historical
+  failures remain visible but are not attached to a fresh retry with zero counted failures.
+  `pass` is normalized provider/verdict validity using the same parsers as the foreman, including
+  structured output, schema rejection and contradicted pass:true. `error` explains rejection and
+  findings carry `{check, ok, evidence}`. This does not rewrite feature status: merged/ready legacy
+  state can coexist with a saved verdict rejected by the current parser, explicitly shown in
+  Inspection. Raw artifacts do not reliably record process exit/timeout outcomes, so content
+  validity is not proof of pipeline success. Log truncation or manually changed mtimes/counters can
+  limit historical associations; exact reconstruction needs recorded event/run identities.
   `POST /api/human/wait {project, id, who}` (who: 1-200 chars, else 400; 409 if done) sets `waitingOn`/`waitingSince`;
   `/api/human/unwait` clears them; `reopen` and `done` clear them too.
   `/api/state` projects carry `control {paused, maxParallel, effective /* the launch limit now; null when invalid */, configMax,

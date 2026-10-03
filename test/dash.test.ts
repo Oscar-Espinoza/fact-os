@@ -45,7 +45,7 @@ before(async () => {
   mkdirSync(runs, { recursive: true });
   writeFileSync(join(runs, '1-build.json'), JSON.stringify({ duration_ms: 1200, total_cost_usd: 0.5, num_turns: 7, modelUsage: { 'claude-x': {} }, result: 'x'.repeat(500) }));
   writeFileSync(join(runs, '1-eval.json'), JSON.stringify({ duration_ms: 300, total_cost_usd: 0.25, num_turns: 2, modelUsage: { 'claude-y': {} },
-    result: JSON.stringify({ pass: false, findings: [{ check: 'a', ok: true }, { check: 'b', ok: false, note: 'nope' }] }) }));
+    result: JSON.stringify({ pass: false, findings: [{ check: 'a', ok: true, evidence: 'verified' }, { check: 'b', ok: false, evidence: 'nope' }] }) }));
   writeFileSync(join(runs, '2-eval.json'), JSON.stringify({ result: 'plain text verdict' }));
   project(join(root, 'shop-worktrees/pay'), { gitFile: true }); // a worktree checkout, not a project
   dash = await startDash({ root, port: 0 });
@@ -225,9 +225,9 @@ test('feature history includes parsed runs, builds before evals', async () => {
   assert.equal(b.summary.length, 400);
   assert.deepEqual([b.ms, b.cost, b.turns, b.model, b.pass], [1200, 0.5, 7, 'claude-x', undefined]);
   assert.equal(e.pass, false);
-  assert.deepEqual(e.findings, [{ check: 'a', ok: true }, { check: 'b', ok: false, note: 'nope' }]);
+  assert.deepEqual(e.findings, [{ check: 'a', ok: true, evidence: 'verified' }, { check: 'b', ok: false, evidence: 'nope' }]);
   assert.equal(e.summary, '');
-  assert.deepEqual([p.pass, p.findings, p.ms, p.model, p.summary], [undefined, undefined, null, null, 'plain text verdict']);
+  assert.deepEqual([p.pass, p.findings, p.ms, p.model, p.summary], [false, [], null, null, 'plain text verdict']);
   const none = await (await fetch(dash.url + '/api/feature?project=' + encodeURIComponent(join(root, 'shop')) + '&id=..%2F..')).json() as { runs: Run[] };
   assert.deepEqual(none.runs, []);
 });

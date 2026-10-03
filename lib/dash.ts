@@ -5,7 +5,7 @@ import { readdirSync, existsSync, statSync, readFileSync, realpathSync } from 'n
 import { join, basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, withCheckoutLock, effectiveLimit, validLanes, MAX_LANES } from './state.ts';
-import { git } from './foreman.ts';
+import { git, parseClaudeOutput, parseVerdict, feedbackFromVerdict } from './foreman.ts';
 import { conflictFiles } from './merge.ts';
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
@@ -13,7 +13,7 @@ import { observerPaths, observerConfig, recurringTests, hotFiles, type ObserverS
 import { promptSummary, type PromptSummary } from './promptreview.ts';
 import { readNotes } from './notes.ts';
 import { profileNames, profileLabel, roleTable, validProfile, type RoleRow } from './profiles.ts';
-import { IN_FLIGHT, type ActivityEvent, type Config, type Control, type Diagnosis, type Feature, type HumanTask, type LogEvent, type MergeMode, type RoleConfig } from './types.ts';
+import { IN_FLIGHT, type ActivityEvent, type Config, type Control, type Diagnosis, type Feature, type Finding, type HumanTask, type LogEvent, type MergeMode, type RoleConfig } from './types.ts';
 
 // Median durations (ms) of each pipeline stage, for the dashboard's estimated progress; null = no history yet.
 export interface Estimates { build: number | null; test: number | null; eval: number | null }
@@ -52,8 +52,8 @@ export interface Conflict {
 }
 export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
 export interface Run {
-  n: number; role: 'build' | 'eval'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
-  pass?: boolean; findings?: { check: string; ok: boolean; note?: string }[]; summary: string;
+  n: number; tag: string; role: 'build' | 'eval' | 'resolve'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
+  pass?: boolean; findings?: Finding[]; error?: string; text: string; summary: string;
 }
 export type OpenTask = HumanTask & { project: string; projectName: string; reach: number };
 
@@ -276,34 +276,36 @@ function projectState(dir: string): ProjectState {
   }
 }
 
-// One feature's runs (last 20), parsed from runs/<id>/<n>-(build|eval).json; build before eval within a try.
+// Last 20 completed artifacts, with full tags (also unique across attempt resets).
+// `pass` validates provider/verdict content; raw files do not record every exit/timeout outcome.
 function featureRuns(dir: string, id: string): Run[] {
   if (!/^[\w.-]+$/.test(id) || id.startsWith('..')) return [];
   const rd = join(paths(dir).runs, id), out: Run[] = [];
   let names: string[] = [];
   try { names = readdirSync(rd); } catch { return []; }
   for (const name of names) {
-    const m = /^(\d+)(?:\.\d+)?-(build|eval)\.json$/.exec(name);
+    const m = /^(\d+(?:\.\d+)?)-(build|eval|resolve)\.json$/.exec(name);
     if (!m) continue;
     try {
-      const file = join(rd, name), j = readJson(file, {}) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; result?: unknown };
+      const file = join(rd, name), raw = readFileSync(file, 'utf8'), j = tryJson(raw) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; stdout?: unknown } | undefined;
+      if (!j || typeof j !== 'object' || Array.isArray(j)) continue;
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-      const role = m[2] as Run['role'], text = typeof j.result === 'string' ? j.result : '';
-      const run: Run = { n: Number(m[1]), role, at: new Date(statSync(file).mtimeMs).toISOString(), ms: num(j.duration_ms), cost: num(j.total_cost_usd),
-        turns: num(j.num_turns), model: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage)[0] ?? null : null, summary: text.slice(0, 400) };
+      const role = m[2] as Run['role'], provider = parseClaudeOutput(raw), text = provider.text || (typeof j.stdout === 'string' ? j.stdout : '');
+      const run: Run = { n: Number(m[1]!.split('.')[0]), tag: m[1]!, role, at: new Date(statSync(file).mtimeMs).toISOString(), ms: num(j.duration_ms), cost: num(j.total_cost_usd),
+        turns: num(j.num_turns), model: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage)[0] ?? null : null, text, summary: text.slice(0, 400) };
       if (role === 'eval') {
-        const v = tryJson(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')) as { pass?: unknown; findings?: unknown } | undefined;
-        if (v && typeof v === 'object') {
-          if (typeof v.pass === 'boolean') run.pass = v.pass;
-          if (Array.isArray(v.findings)) run.findings = v.findings.filter((f): f is { check: string; ok: boolean; note?: string } => !!f && typeof f.check === 'string' && typeof f.ok === 'boolean')
-            .map((f) => ({ check: f.check, ok: f.ok, ...(typeof f.note === 'string' ? { note: f.note } : {}) }));
-          if (run.pass !== undefined || run.findings) run.summary = '';
-        }
+        const v = parseVerdict(provider.text);
+        run.pass = provider.ok && v.pass;
+        run.findings = provider.ok ? v.findings : [];
+        if (!run.pass) run.error = provider.ok ? feedbackFromVerdict(v) : `evaluator failed: ${provider.error}`;
+        if (!v.error && provider.ok) run.summary = '';
       }
       out.push(run);
     } catch {}
   }
-  return out.sort((a, b) => a.n - b.n || (a.role === b.role ? 0 : a.role === 'build' ? -1 : 1)).slice(-20);
+  const order = { build: 0, resolve: 1, eval: 2 };
+  const passIndex = (r: Run) => Number(r.tag.split('.')[1] ?? 1);
+  return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.n - b.n || passIndex(a) - passIndex(b) || order[a.role] - order[b.role]).slice(-20);
 }
 
 // One feature's history for the detail panel.
