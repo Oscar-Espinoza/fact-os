@@ -46,6 +46,10 @@ fresh evaluator with the diff `base...<sha>` (`--text --no-ext-diff --no-textcon
 read at launch and the test output → merges that sha with `git merge --no-ff` (auto; refused if the branch
 moved meanwhile) or stops at `ready` (manual) → appends the evaluator's lesson to `lessonsFile`. Failures increment `attempts` and
 feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
+Acceptance checks are copied under the state lock when a feature enters `building`, so pending
+edits apply at launch. Builders, resolvers and inline reevaluations keep that launch's checks.
+Each new launch, including retries, reads current checks; editable feature JSON is trusted across
+launches regardless of who edited it. Saved prompts retain the checks used for earlier passes.
 
 ## Files (`.fact-os/` in the main checkout)
 

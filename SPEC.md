@@ -204,6 +204,16 @@ Each tick:
    reaches new launches. A change (and a non-opus profile at start) is logged as `control`, e.g. "running, lanes default,
    profile opus → running, lanes default, profile fable-sonnet". A foreman restarted after a switch may evaluate (or resume
    after the build) a branch that was built under the old profile: the profile is per pass, not recorded per branch.
+   **Acceptance at launch:** copy the current acceptance array under the state lock in the same
+   mutation that claims `todo` → `building`, using the pre-transition feature SHA for build reuse.
+   A feature paused/deleted before that claim does not launch. The copied checks remain fixed for
+   builder, resolver, own-feature conflict brief and fresh inline evaluation/revalidation in that
+   launch. Every new launch (automatic retry, queued refresh, human retry/resume or recovery)
+   reads current checks again, including when unchanged code skips building. Feature JSON has no
+   edit provenance: edits by users and agents are equally trusted at the next launch. Saved prompts
+   retain prior checks, and prior feedback remains historical context. This is no authorization
+   guarantee across launches; other merged features' checks in conflict briefs remain current
+   metadata, and evaluator coverage is still a prompt requirement rather than a parser guarantee.
    Launch ready features, in readiness order, until the launch limit is in flight (a ceiling, not a target). A feature
    whose conflict group (`group`, else per `groupBy`; none when both are unset) already has a feature in flight
    (`building|testing|evaluating`, including a previous foreman's live orphan) is skipped for the next-best ready

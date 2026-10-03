@@ -368,7 +368,6 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   // Evaluate against what was on disk at launch; stop if config.json or base change behind fact-os's back.
   const config = loadConfig(root), configText = readIf(P.config);
   if (config.groupBy != null && !/^idPrefix:\d+$/.test(config.groupBy)) out(`warning: groupBy ${JSON.stringify(config.groupBy)} is not "idPrefix:<n>"; ignored`);
-  const acceptance = new Map(load(root).features.map((f) => [f.id, f.acceptance]));
   const baseHead = () => git(['rev-parse', '--verify', '--quiet', `refs/heads/${config.base}`], root).out;
   let baseSha = baseHead(), halted: string | null = null, spent = 0; // spent: reported cost in this run only
   // Base moved outside fact-os: an alert if it now reaches a commit of a feature branch, or carries a blob of
@@ -546,7 +545,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
             git(['merge-base', '--is-ancestor', sha, pending.out], wt).code === 0)) return 'pending';
           await fail('worktree: the pending merge does not contain the declared dependencies'); return 'halted';
         }
-        return refresh(id, branch, fail, true, false, true);
+        return refresh(f, branch, fail, true, false, true);
       });
       if (r !== 'current' && r !== 'clean' && r !== 'conflicted' && r !== 'pending') return;
       if (r === 'conflicted' || r === 'pending') {
@@ -603,7 +602,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
       if (config.refreshBeforeTest) {
         const r = await serial<'halted' | 'current' | 'clean' | 'conflicted' | void>(() => tampered() ? 'halted'
-          : git(['merge-base', '--is-ancestor', baseSha, branch], wt).code === 0 ? 'current' : refresh(id, branch, fail, true, inline));
+          : git(['merge-base', '--is-ancestor', baseSha, branch], wt).code === 0 ? 'current' : refresh(f, branch, fail, true, inline));
         if (r === 'halted') { log(root, id, 'refresh-skipped', `${halted}; back to todo`); return set(id, { status: 'todo' }); }
         if (r === 'conflicted') { const note = await resolveNow(); if (note == null) return; resolved = note; continue; }
         if (r !== 'current' && r !== 'clean') return; // conflicted (back to todo), stuck, or failed
@@ -688,8 +687,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   // resolve and commit. No attempt is spent. beforeTest: a clean merge returns 'clean' and the pipeline goes on.
   // With conflictBrief or a resolver, the conflict feedback carries the both-sides brief and the conflict is recorded for
   // the keep-lines check; inline (a resolver is set and a pipeline is waiting): the feature stays in flight, 'conflicted'.
-  function refresh(id: string, branch: string, fail: Fail, beforeTest = false, inline = false, beforeBuild = false): Promise<void | 'conflicted'> | 'clean' {
-    const wt = resolve(root, config.worktreesDir, id), base = config.base;
+  function refresh(f: Feature, branch: string, fail: Fail, beforeTest = false, inline = false, beforeBuild = false): Promise<void | 'conflicted'> | 'clean' {
+    const id = f.id, wt = resolve(root, config.worktreesDir, id), base = config.base;
     const cur = load(root).features.find((x) => x.id === id), n = cur?.refreshes || 0;
     // A refresh must not drop the failure the builder still has to fix (e.g. a gate failure): keep it, minus any older
     // refresh note, and append this refresh's note after it.
@@ -715,7 +714,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       : `the foreman merged ${base} into your branch (conflict-free); re-run the tests and fix anything the new base broke`;
     const rec = conflicted && both ? { ours, theirs: baseSha, files: list } : undefined;
     if (rec) {
-      const b = conflictBrief({ wt, base, branch, ours, theirs: baseSha, files: list, feature: cur!, features: load(root).features });
+      const b = conflictBrief({ wt, base, branch, ours, theirs: baseSha, files: list, feature: f, features: load(root).features });
       pendingBrief.set(id, b);
       fb += ` Keep every line either side added; list any line you must drop or change in a commit message as \`dropped: <file>: <line>\` (a check compares).\n\n${b.text}`;
     }
@@ -772,7 +771,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         return set(id, { status: 'ready', sha, parked: undefined });
       }
       git(['merge', '--abort'], root);
-      return refresh(id, branch, fail, false, inline) as Promise<void | 'conflicted'>; // 'clean' only comes back with beforeTest
+      return refresh(f, branch, fail, false, inline) as Promise<void | 'conflicted'>; // 'clean' only comes back with beforeTest
     }
     if (hook) { // e.g. assigns migration numbers; what it stages becomes part of the merge commit
       const h = await exec('sh', ['-c', `exec 2>&1\n${hook}`], { cwd: root, env: { ...process.env, ...featureEnv({ FEATURE: id, BRANCH: branch }) }, children, timeoutMin: config.timeoutMin });
@@ -865,16 +864,24 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
             }
             claimWait.delete(id);
             hotHeld = claims.held.flatMap(([by, files]) => files.filter(claims!.hot).map((x) => `${x} (${by})`));
-            claims.held.push([id, mine]);
           }
+          // Claim and capture together: a pending edit may have completed since this tick's load.
+          // Keep the pre-transition SHA for build reuse; clear disk SHA for a fresh pass.
+          const f = await mutate(root, 'features', (d) => {
+            const current = d.features.find((x) => x.id === id);
+            if (!current || current.status !== 'todo') return null;
+            const snapshot = { ...current, acceptance: [...(current.acceptance || [])] };
+            Object.assign(current, { status: 'building', onMock: a.mock.has(id), sha: undefined, 
+              pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
+            return snapshot;
+          });
+          if (!f) continue;
           busy.add(g);
           launched++;
+          if (claims) claims.held.push([id, filesOf(f)]);
           const mockTasks = tasks.filter((t) => t.status === 'open' && t.mockable && (t.unblocks || []).includes(id));
-          await set(id, { status: 'building', onMock: a.mock.has(id), sha: undefined, pid: undefined, pidStart: undefined, foremanPid: undefined });
           log(root, id, 'launch', a.mock.has(id) ? 'onMock' : '');
           out(`building ${id}${a.mock.has(id) ? ' (on mock)' : ''}`);
-          if (!acceptance.has(id)) acceptance.set(id, features.find((x) => x.id === id)!.acceptance);
-          const f = { ...features.find((x) => x.id === id)!, acceptance: acceptance.get(id)! };
           inflight.set(id, pipeline(f, config, mockTasks, hotHeld, control.profile ?? null)
             .catch((e: unknown) => { log(root, id, 'error', (e as Error | undefined)?.stack || String(e)); return set(id, { status: 'todo' }); })
             .finally(() => inflight.delete(id)));

@@ -12,6 +12,7 @@ import { agentStats } from '../lib/observe.ts';
 import { passesOf } from '../lib/promptreview.ts';
 import type { Config, Feature, FeaturesFile, LogEvent, Verdict } from '../lib/types.ts';
 import { reap } from './reap.ts';
+import { mutate, writeControl } from '../lib/state.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.ts', import.meta.url));
@@ -88,11 +89,16 @@ test('refreshBeforeTest: incompatible parallel features are retested against the
 
 test('refreshBeforeTest: compatible parallel features get fresh evaluation without overwriting the first run', (t) => {
   const s = setup(t, { features: [F('a'), F('b')], config: { maxParallel: 2, maxAttempts: 1, refreshBeforeTest: true, timeoutMin: 0.1 },
-    scenario: { a: 'slow' } });
+    scenario: { a: 'acceptance,slow' } });
   parallelGate(s, 'true');
   const r = s.cli('run');
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const revalidated = ['a', 'b'].find((id) => s.calls('eval', id).length === 2)!;
+  assert.equal(revalidated, 'a', 'the slower evaluation needs aggregate revalidation');
+  for (const call of s.calls('eval', 'a')) {
+    assert.match(call.prompt, /- a\.txt exists/);
+    assert.doesNotMatch(call.prompt, /nothing to check/);
+  }
   for (const id of ['a', 'b']) {
     assert.equal(s.feature(id).status, 'merged');
     assert.equal(s.feature(id).attempts, 0);
@@ -373,13 +379,92 @@ test('config.json changed during the run: alert and exit 2 before merging', (t) 
   assert.match(s.log(), /"alert".*config\.json/);
 });
 
-test('acceptance checks are the ones from launch, even if features.json is edited mid-run', (t) => {
+test('acceptance: mid-pass edits keep the launched checks; automatic retry reads current checks', (t) => {
   const fail1 = { pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'no' }], cheating: [], lesson: null };
   const s = setup(t, { features: [F('a')], scenario: { a: 'acceptance' }, verdicts: { a: [fail1] } });
-  s.cli('run');
-  const prompts = [...s.calls('build', 'a'), ...s.calls('eval', 'a')].map((c) => c.prompt);
-  assert.equal(prompts.length, 4);
-  for (const p of prompts) { assert.match(p, /- a\.txt exists/); assert.doesNotMatch(p, /nothing to check/); }
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(s.feature('a').attempts, 1);
+  for (const mode of ['build', 'eval']) {
+    const calls = s.calls(mode, 'a');
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].prompt, /- a\.txt exists/);
+    assert.doesNotMatch(calls[0].prompt, /nothing to check/);
+    assert.match(calls[1].prompt, /- nothing to check/);
+  }
+});
+
+test('acceptance: editing a waiting feature before launch reaches builder and evaluator', async (t) => {
+  const s = setup(t, { features: [F('a')] });
+  writeFileSync(join(s.repo, '.fact-os/human.json'), JSON.stringify({ tasks: [
+    { id: 'h', title: 'Get keys', steps: ['ask'], unblocks: ['a'], mockable: false, status: 'open' }] }));
+  const run = s.start('--watch');
+  assert.ok(await until(() => /"waiting"/.test(s.log())), run.out());
+  await mutate(s.repo, 'features', (d) => { d.features[0].acceptance = ['updated before launch']; });
+  assert.equal(s.cli('done', 'h').status, 0);
+  assert.equal(await run.exit, 0, run.out());
+  for (const mode of ['build', 'eval']) {
+    assert.equal(s.calls(mode, 'a').length, 1);
+    assert.match(s.calls(mode, 'a')[0].prompt, /- updated before launch/);
+    assert.doesNotMatch(s.calls(mode, 'a')[0].prompt, /- a\.txt exists/);
+  }
+});
+
+test('acceptance: a human retry in the same watching foreman captures edited checks', async (t) => {
+  const failure = { pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'first attempt fails' }], cheating: [] };
+  const s = setup(t, { features: [F('a'), F('b')], config: { maxAttempts: 1 }, verdicts: { a: [failure] } });
+  writeFileSync(join(s.repo, '.fact-os/human.json'), JSON.stringify({ tasks: [
+    { id: 'h', title: 'Get keys', steps: ['ask'], unblocks: ['b'], mockable: false, status: 'open' }] }));
+  const run = s.start('--watch');
+  assert.ok(await until(() => s.feature('a').status === 'stuck' && /"waiting"/.test(s.log())), run.out());
+  await mutate(s.repo, 'features', (d) => { d.features.find((f) => f.id === 'a')!.acceptance = ['human retry checks']; });
+  assert.equal(s.cli('retry', 'a').status, 0);
+  assert.ok(await until(() => s.feature('a').status === 'merged'), run.out());
+  assert.equal(s.cli('done', 'h').status, 0);
+  assert.equal(await run.exit, 0, run.out());
+  for (const mode of ['build', 'eval']) {
+    const calls = s.calls(mode, 'a');
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].prompt, /- a\.txt exists/);
+    assert.match(calls[1].prompt, /- human retry checks/);
+  }
+});
+
+for (const pause of [false, true]) test(`acceptance: locked launch reads a post-scheduling ${pause ? 'pause' : 'edit'}`, async (t) => {
+  const s = setup(t, { features: [F('a')] });
+  const fixture = fileURLToPath(new URL('./fixtures/acceptance-launch.ts', import.meta.url));
+  const cp = spawn(process.execPath, [fixture, s.repo], { cwd: s.repo, env: s.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; cp.stdout.on('data', (d) => { out += d; }); cp.stderr.on('data', (d) => { out += d; });
+  const exit = new Promise<number | null>((r) => cp.once('exit', (code) => r(code)));
+  t.after(() => cp.exitCode === null && cp.kill('SIGKILL'));
+  assert.ok(await until(() => existsSync(join(s.repo, '.fact-os/launch-wait'))), out);
+  await mutate(s.repo, 'features', (d) => {
+    d.features[0].acceptance = ['edited after scheduling'];
+    if (pause) d.features[0].status = 'paused';
+  });
+  writeFileSync(join(s.repo, '.fact-os/launch-release'), 'edited');
+  assert.equal(await exit, pause ? 2 : 0, out);
+  if (pause) {
+    assert.equal(s.feature('a').status, 'paused');
+    assert.equal(s.calls('build', 'a').length, 0);
+    assert.doesNotMatch(s.log(), /"event":"launch"/);
+  } else for (const mode of ['build', 'eval']) {
+    assert.equal(s.calls(mode, 'a').length, 1);
+    assert.match(s.calls(mode, 'a')[0].prompt, /- edited after scheduling/);
+    assert.doesNotMatch(s.calls(mode, 'a')[0].prompt, /- a\.txt exists/);
+  }
+});
+
+test('acceptance: inline conflict resolution retains launch checks in its own-feature brief', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, refreshBeforeTest: true,
+    resolver: { model: 'fake', effort: 'medium', permissionMode: 'acceptEdits' } }, scenario: { a: 'acceptance,base-conflict' } });
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.calls('resolve', 'a').length, 1);
+  for (const mode of ['build', 'resolve', 'eval']) {
+    assert.match(s.calls(mode, 'a')[0].prompt, /- a\.txt exists/);
+    assert.doesNotMatch(s.calls(mode, 'a')[0].prompt, /nothing to check/);
+  }
+  assert.equal(s.calls('build', 'a').length, 1);
 });
 
 test('budgetUsdTotal counts only this run\'s spend and stops launching; null means unlimited', (t) => {
