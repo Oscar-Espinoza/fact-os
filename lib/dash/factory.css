@@ -32,7 +32,7 @@
 .fx-lamp{position:absolute;top:30px;width:150px;height:120px;background:radial-gradient(ellipse at 50% 0%,rgba(255,214,140,.22),rgba(255,214,140,0) 70%);mix-blend-mode:screen;pointer-events:none;animation:fx-lamp 6s infinite}
 .fx-sign{position:absolute;left:668px;top:50px;width:336px;text-align:center;font-size:14px;font-weight:500;letter-spacing:1.6px;color:#8cc4ff;white-space:pre}
 .fx-slot{position:absolute;top:122px;width:184px;height:298px}
-.fx-slot.off{opacity:.42;filter:saturate(.6)}
+.fx-slot.off{filter:brightness(.6) saturate(.6)}
 .fx-bay{position:absolute;inset:0;display:block;background-repeat:no-repeat;image-rendering:pixelated;color:#e7edf5}
 a.fx-bay:hover{filter:brightness(1.07)}
 .fx-bay.bay-build1,.spr.bay-build1{background-image:url(/assets/bay-build1.png)}
