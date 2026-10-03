@@ -187,7 +187,7 @@ function foreman(dir: string): ProjectState['foreman'] {
 // Every merge conflict that started in the last 24 h, newest first, each followed to its outcome from the feature's own events:
 // `refreshed` "conflicts in: …" opens it; `resolved` = the resolver finished it (`resolving` = it is working on it), `resolve-failed` or the
 // next `launch` with no resolver result = the builder (its `keep-check` ok = kept, anything else = lines lost, noted). Outcome: the first
-// later `merged` = merged; another conflict = conflicted again (it opens its own row); `stuck` "too many base refreshes" = failed (the
+// later `merged` = merged; another conflict = conflicted again (it opens its own row); a refresh-limit `stuck` = failed (the
 // foreman gave up); any other `stuck` is not final (a retry picks it up again): until a `launch`/`retrying` clears it, a resolved row
 // reads "resolved then stuck" (ms up to the stuck). Else "resolved" once resolved, else "still open" (ms runs to now).
 export function conflictTimeline(events: LogEvent[], now: number, titles: Record<string, string> = {}): Conflict[] {
@@ -198,7 +198,7 @@ export function conflictTimeline(events: LogEvent[], now: number, titles: Record
     const f = e.feature;
     if (!f) continue;
     const files = e.event === 'refreshed' ? conflictFiles(e.detail) : [];
-    const conflicted = files.length > 0, giveUp = e.event === 'stuck' && e.detail.startsWith('too many base refreshes');
+    const conflicted = files.length > 0, giveUp = e.event === 'stuck' && /^merge conflict with \S+: too many base refreshes \(\d+\)$/.test(e.detail);
     if (open.has(f) && (conflicted || e.event === 'merged' || giveUp)) {
       if (giveUp) note(open.get(f)!.row, 'gave up after too many conflicts');
       close(f, conflicted ? 'conflicted again' : giveUp ? 'failed' : 'merged', e.ts);
@@ -219,7 +219,7 @@ export function conflictTimeline(events: LogEvent[], now: number, titles: Record
     else if (e.event === 'testing' && r.resolvedBy === null) { r.resolvedBy = 'builder'; o.done = true; }
     else if (e.event === 'keep-check') { if (e.detail.startsWith('ok')) o.done = true; else note(r, e.detail); }
     else if (e.event === 'stuck') { r.outcomeTs = e.ts; r.stuckCause = e.detail.split('\n')[0]!.slice(0, 120); }
-    else if (e.event === 'retrying' || e.event === 'resumed') { delete r.stuckCause; delete r.outcomeTs; }
+    else if (e.event === 'retrying' || e.event === 'resumed' || e.event === 'observer-retry') { delete r.stuckCause; delete r.outcomeTs; }
   }
   for (const { row, done } of open.values()) {
     row.outcome = !done ? 'still open' : row.stuckCause ? 'resolved then stuck' : 'resolved';

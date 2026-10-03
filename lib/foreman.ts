@@ -81,6 +81,7 @@ export function applyFailure(f: Feature, feedback: string, maxAttempts: number):
   delete f.sha; // counted failures rebuild; only unspent revalidation retains accepted build reuse
   delete f.pendingLesson;
   f.attempts = (f.attempts || 0) + 1;
+  f.stop = { attempt: f.attempts, counted: true };
   f.lastFeedback = feedback;
   f.status = f.attempts >= maxAttempts ? 'stuck' : 'todo';
   f.updatedAt = now();
@@ -97,7 +98,8 @@ export function recoverInFlight(features: Feature[], { skip = new Set<string>(),
     if (!IN_FLIGHT.includes(f.status) || skip.has(f.id)) continue;
     const k = alive(f) ? 'alive' : merged(f) ? 'merged' : overdue(f) ? 'stuck' : 'todo';
     r[k].push(f.id);
-    if (k === 'stuck') f.lastFeedback = `previous child still running (pid ${f.pid})`;
+    if (k === 'stuck') { f.lastFeedback = `previous child still running (pid ${f.pid})`; f.stop = { attempt: (f.attempts || 0) + 1, counted: false }; }
+    else if (k !== 'alive') delete f.stop;
     if (k !== 'alive') { f.status = k; f.updatedAt = now(); }
   }
   return r;
@@ -436,13 +438,13 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   const recover = async (): Promise<string[]> => !loadState(root).features.some((f) => IN_FLIGHT.includes(f.status) && !inflight.has(f.id)) ? [] : mutate(root, 'features', (d) => {
     const r = recoverInFlight(d.features, { skip: new Set(inflight.keys()), alive: orphanAlive, merged: isMerged, overdue: (f) => childAlive(f) });
     for (const id of r.todo) log(root, id, 'recovered', 'left in flight by a dead foreman; back to todo');
-    for (const id of r.stuck) log(root, id, 'stuck', d.features.find((f) => f.id === id)!.lastFeedback);
+    for (const id of r.stuck) { const f = d.features.find((f) => f.id === id)!; log(root, id, 'stuck', f.lastFeedback, undefined, { stop: f.stop }); }
     for (const id of r.merged) log(root, id, 'recovered', `already merged into ${config.base}`);
     return r.alive;
   });
 
   type Fail = (fb: string) => Promise<void>;
-  const failer = (id: string): Fail => (fb) => edit(id, (x) => { applyFailure(x, fb, config.maxAttempts); log(root, id, x.status === 'stuck' ? 'stuck' : 'failed', fb); out(`${x.status === 'stuck' ? 'stuck' : 'retry'} ${id}: ${fb.split('\n')[0]}`); });
+  const failer = (id: string): Fail => (fb) => edit(id, (x) => { applyFailure(x, fb, config.maxAttempts); log(root, id, x.status === 'stuck' ? 'stuck' : 'failed', fb, undefined, { stop: x.stop }); out(`${x.status === 'stuck' ? 'stuck' : 'retry'} ${id}: ${fb.split('\n')[0]}`); });
 
   // `profile`: the model profile applied when this pass launched. Every claude run of the pass (builder, resolver, evaluator)
   // uses it, never the live control.json value, so a switch mid-pass never changes a feature's models halfway.
@@ -717,8 +719,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const keepPrior = prior && !prior.startsWith('the foreman') ? `${prior}${REFRESH_SEP}` : '';
     const tooMany = () => {
       const fb = `merge conflict with ${base}: too many base refreshes (${n})`;
-      log(root, id, 'stuck', fb); out(`stuck ${id}: ${fb}`);
-      return set(id, { status: 'stuck', lastFeedback: fb, pendingLesson: undefined });
+      return edit(id, (x) => {
+        Object.assign(x, { status: 'stuck', lastFeedback: fb, pendingLesson: undefined, updatedAt: now(),
+          stop: { attempt: (x.attempts || 0) + 1, counted: false } });
+        log(root, id, 'stuck', fb, undefined, { stop: x.stop }); out(`stuck ${id}: ${fb}`);
+      });
     };
     if (n >= config.maxRefreshes && !beforeTest) return tooMany();
     const st = git(['status', '--porcelain'], wt);
@@ -917,7 +922,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
             if (!current || current.status !== 'todo') return null;
             const snapshot = { ...current, acceptance: [...(current.acceptance || [])] };
             Object.assign(current, { status: 'building', onMock: a.mock.has(id), sha: undefined, pendingLesson: undefined,
-              pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
+              stop: undefined, pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
             return snapshot;
           });
           if (!f) continue;

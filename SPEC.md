@@ -118,6 +118,7 @@ Feature {
   pausedAt?: ISO string           // set while paused; only a person pauses (CLI or dashboard), never the foreman
   onMock?: boolean                // built while a human task it needs is open
   attempts: number, refreshes?: number /* base refreshes after merge conflicts */, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
+  stop?: {attempt: number, counted: boolean} // latest failure/stop identity, not another failure counter
   sha?: string                    // evaluated commit, persisted before auto merge; may survive parking/interruption
   pendingLesson?: {sha, text}      // foreman-owned passing auto advice; delivered only after its commit merges
   parked?: boolean                // ready only because the main checkout was dirty or off base (merge-skipped)
@@ -538,13 +539,37 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   tie-breaking. `n` is the integer attempt prefix; `tag` preserves the full artifact identity (e.g.
   `1.2`, `1.10`) across refreshes, revalidation, interruption and human/observer retries. The
   browser shares one attempt calculation: failures + 1 for building/testing/evaluating/ready/merged;
-  otherwise recorded failures.
+  a stopped feature uses its validated `stop.attempt` (counted: failures; uncounted: failures + 1),
+  otherwise recorded failures. Stop metadata is consumed only for stuck/paused/todo state and
+  must agree with the counter. For legacy stuck state, only the exact existing refresh-limit
+  and overdue-child feedback formats imply an uncounted stop; arbitrary text is not classified.
+  Detail associates counted events by their explicit attempt number after a reset boundary.
+  Complete legacy failure history can use ordered counter matching; incomplete or ambiguous
+  history keeps failures unnumbered and missing cards say their record is unavailable.
+  An unmarked legacy resume is an unknown boundary, not proof of continued numbering.
+  Uncounted stops have a separate stopped card/reason, not a failed evaluation/build label;
+  their test/inspection panels direct the user to retained results instead of inventing a
+  result or claiming no try reached the stage. Board/factory use the same attempt helper,
+  and stuck feeds/KPIs do not universally claim the retry limit was reached.
+  The conflict timeline recognizes the foreman's exact refresh-limit reason and
+  closes that conflict as failed at the stop time. Other stops remain retryable;
+  human and observer retries clear the timeline's stuck annotation before launch.
   Detail selects the latest retained output per role/attempt, while
   expanded recorded-run logs show every retained tag, resolver output, finding evidence and original
   provider text (summary capped at 400 characters; text is complete). Duration/cost rows sum retained
   artifacts with that attempt number, including refreshes and earlier cycles after counter resets.
   Failure labels prefer the current recorded failure event over an older evaluation; historical
   failures remain visible but are not attached to a fresh retry with zero counted failures.
+  `failed`/`stuck` events can include `stop: {attempt, counted}`. Foreman counted failures
+  record the post-increment attempt; refresh exhaustion and overdue-child recovery record
+  failures + 1 without changing `attempts`. Both feature and event identity derive inside
+  their existing state mutation. Human retry and observer send-back log `attemptsReset: true`;
+  resume logs true when the exhausted counter resets, false when remaining failures stay.
+  The feature's current stop clears at locked launch, successful resume/retry, observer reset,
+  or recovery to todo/merged; pause and a still-alive orphan preserve it. A try here is an
+  orchestration attempt: dependency import can stop before a builder/provider runs. No new
+  recovery policy or failed-attempt charge is introduced, and lesson-append log proofs remain
+  compatible. State/log append remain separate writes, not an atomic multi-file journal.
   `pass` is normalized provider/verdict validity using the same parsers as the foreman, including
   structured output, schema rejection and contradicted pass:true. `error` explains rejection and
   findings carry `{check, ok, evidence}`. This does not rewrite feature status: merged/ready legacy

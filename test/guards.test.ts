@@ -61,6 +61,33 @@ function setup(t: TestContext, { features, config = {}, scenario = {}, verdicts 
 }
 const until = async (cond: () => unknown, ms = 10000) => { for (const end = Date.now() + ms; !cond() && Date.now() < end;) await sleep(50); return cond(); };
 
+test('R16: fresh launch clears old stop metadata before the fake builder starts', (t) => {
+  const s = setup(t, { features: [{ ...F('a'), stop: { attempt: 1, counted: true } }], config: { maxAttempts: 1 } });
+  const wrapper = join(s.repo, '.fact-os', 'stop-provider.sh'), features = join(s.repo, '.fact-os', 'features.json');
+  writeFileSync(wrapper, `#!/bin/sh\nif grep -q '"stop"' '${features}'; then exit 9; fi\nexec '${FAKE}' "$@"\n`, { mode: 0o755 });
+  s.env.FACTOS_CLAUDE = wrapper;
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').stop], ['merged', 0, undefined]);
+});
+
+test('R16: refresh exhaustion after one counted failure logs an uncounted second try', (t) => {
+  const s = setup(t, { features: [F('a', { branch: 'ship/a', refreshes: 5, attempts: 1 })] });
+  conflict(s, 'a', { branch: 'from a\n', main: 'from main\n' });
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').attempts, s.feature('a').stop], [1, { attempt: 2, counted: false }]);
+  const stop = s.log().trim().split('\n').map((line) => JSON.parse(line) as LogEvent).find((e) => e.event === 'stuck')!;
+  assert.deepEqual(stop.stop, { attempt: 2, counted: false });
+  assert.equal(s.calls('build', 'a').length, 1);
+});
+
+test('R16: counted builder failure persists matching feature and event metadata', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 }, scenario: { a: 'noop' } });
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').attempts, s.feature('a').stop], [1, { attempt: 1, counted: true }]);
+  const stop = s.log().trim().split('\n').map((line) => JSON.parse(line) as LogEvent).find((e) => e.event === 'stuck')!;
+  assert.deepEqual(stop.stop, { attempt: 1, counted: true });
+});
+
 // Both initial gates finish before either evaluator returns; each branch tests the same base.
 function parallelGate(s: ReturnType<typeof setup>, check: string): void {
   const markers = join(s.repo, '.fact-os', 'gate-markers'), file = join(s.repo, '.fact-os/config.json');
@@ -472,6 +499,8 @@ test('after 5 base refreshes a conflicting feature is stuck with "too many base 
   conflict(s, 'a', { branch: 'from a\n', main: 'from main\n' });
   assert.equal(s.cli('run').status, 2);
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['stuck', 0, 5]);
+  assert.deepEqual(s.feature('a').stop, { attempt: 1, counted: false });
+  assert.deepEqual((JSON.parse(s.log().trim().split('\n').at(-1)!) as LogEvent).stop, { attempt: 1, counted: false });
   assert.match(s.feature('a').lastFeedback!, /too many base refreshes/);
   const wt = wtOf(s, 'a');
   assert.equal(spawnSync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: wt }).status, 1, 'no merge started in the worktree');
@@ -763,6 +792,8 @@ test('waiting for a previous foreman\'s live child is capped by timeoutMin; the 
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(s.log(), /"a","event":"recovered".*timeoutMin/);
   assert.deepEqual([s.feature('a').status, s.feature('a').lastFeedback], ['stuck', `previous child still running (pid ${sleeper.pid})`]);
+  assert.deepEqual(s.feature('a').stop, { attempt: 1, counted: false });
+  assert.deepEqual((JSON.parse(s.log().trim().split('\n').at(-1)!) as LogEvent).stop, { attempt: 1, counted: false });
   assert.equal(s.calls('build', 'a').length, 0, 'no second process in the same worktree');
   assert.equal(alive(sleeper.pid!), true, 'a process Shipyard did not start is not killed');
 });
@@ -901,6 +932,9 @@ test('dependency import conflicts honor maxRefreshes before spending a builder c
   const s = setup(t, { features: [], config: { merge: 'manual', maxRefreshes: 0 } }); staleDependency(s, { conflict: true });
   const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr); assert.equal(s.feature('b').status, 'stuck');
   assert.match(s.feature('b').lastFeedback!, /too many base refreshes/); assert.equal(s.calls('build', 'b').length, 0); assert.equal(s.feature('b').attempts, 0);
+  assert.deepEqual(s.feature('b').stop, { attempt: 1, counted: false });
+  const stopped = s.log().trim().split('\n').map((line) => JSON.parse(line) as LogEvent).findLast((event) => event.feature === 'b' && event.event === 'stuck');
+  assert.deepEqual(stopped?.stop, { attempt: 1, counted: false });
 });
 
 test('a builder cannot abort a dependency import and pass with missing dependency ancestry', (t) => {

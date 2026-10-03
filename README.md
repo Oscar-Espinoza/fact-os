@@ -124,6 +124,10 @@ Apply errors are reported and do not bypass the interval on the next poll; a fai
 checkpoint prevents launch. A stop before launch consumes no interval.
 
 The dashboard shows the current attempt as failures + 1 while running or ready/merged.
+Refresh exhaustion and overdue-child stops record their try without increasing the failure
+counter, and appear as stopped without using a retry. Earlier counted failures keep their
+own labels. Retry/resume events identify counter resets; incomplete legacy history stays
+unassociated rather than assigning an old verdict to a current try.
 Recorded runs retain full tags, resolver output and finding evidence; expanded logs keep
 original agent text and validation errors. Saved verdict validity uses the foreman parser
 and is separate from the feature’s recorded pipeline status.

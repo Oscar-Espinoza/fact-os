@@ -136,3 +136,115 @@ test('legacy merged state does not make a rejected saved verdict appear to pass 
   assert.match(b.node('d-benches').innerHTML, /verdict.findings/);
   assert.equal(b.F.P.features[0].status, 'merged', 'projection does not rewrite pipeline state');
 });
+
+for (const reason of ['merge conflict with main: too many base refreshes (5)', 'previous child still running (pid 8)'])
+  test(`R16: served first-try uncounted stop: ${reason}`, async (t) => {
+    const stopped = { ...feature('stuck', 0), lastFeedback: reason, stop: { attempt: 1, counted: false } };
+    const s = await fixture(t, stopped), time = Date.now() - 1000;
+    writeFileSync(join(s.dir, 'log.jsonl'), [{ ts: new Date(time).toISOString(), feature: 'a', event: 'launch', detail: '' },
+      { ts: new Date(time + 1).toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: stopped.stop }].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const b = await browser(s.dash.url);
+    assert.equal(b.F.attemptNumber(b.F.P.features[0]), 1);
+    assert.match(b.node('d-sum').innerHTML, /Stuck on try 1/);
+    assert.match(b.node('d-attempts').innerHTML, /Try 1[\s\S]*Stopped/);
+    assert.doesNotMatch(b.node('d-attempts').innerHTML, /stuck after 1 failed try/);
+    assert.match(b.node('d-prob').innerHTML, /Try 1 stopped/);
+    assert.doesNotMatch(b.node('d-benches').innerHTML, /No try got this far/);
+    b.route('board'); assert.match(b.node('b-list').innerHTML, /1\/3 tries/);
+    b.route('factory'); assert.equal(b.node('bay-a[data-tries]').textContent, 'try 1/3');
+    assert.doesNotMatch(b.node('fx-events').innerHTML, /stuck after 3 tries/);
+    assert.doesNotMatch(b.node('fx-kpis').innerHTML, /hit the retry limit/);
+    assert.equal(b.F.P.features[0].attempts, 0);
+    assert.deepEqual((await s.history()).log.at(-1), JSON.parse(readFileSync(join(s.dir, 'log.jsonl'), 'utf8').trim().split('\n').at(-1)!));
+  });
+
+test('R16: later uncounted stop preserves the earlier counted failure card', async (t) => {
+  const reason = 'merge conflict with main: too many base refreshes (5)';
+  const s = await fixture(t, { ...feature('stuck', 1), lastFeedback: reason, stop: { attempt: 2, counted: false } }), time = Date.now() - 1000;
+  s.put('1-eval.json', { pass: false, findings: [{ check: 'payment', ok: false, evidence: 'old payment defect' }] }, time + 1);
+  s.put('2-eval.json', verdict('latest passed check'), time + 4);
+  writeFileSync(join(s.dir, 'log.jsonl'), [
+    { ts: new Date(time).toISOString(), feature: 'a', event: 'launch', detail: '' },
+    { ts: new Date(time + 2).toISOString(), feature: 'a', event: 'failed', detail: 'FAILED payment: old payment defect', stop: { attempt: 1, counted: true } },
+    { ts: new Date(time + 3).toISOString(), feature: 'a', event: 'launch', detail: '' },
+    { ts: new Date(time + 5).toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: { attempt: 2, counted: false } },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const b = await browser(s.dash.url);
+  const html = b.node('d-attempts').innerHTML;
+  assert.match(html, /Try 1[\s\S]*Failed evaluation[\s\S]*Try 2[\s\S]*Stopped/);
+  assert.doesNotMatch(html, /Failed at merge/);
+  assert.match(b.node('d-prob').innerHTML, /Try 1 failed inspection/);
+  assert.match(b.node('d-prob').innerHTML, /Try 2 stopped/);
+  b.log(1); assert.match(b.node('d-attempts').innerHTML, /old payment defect/);
+  b.log(2); assert.match(b.node('d-attempts').innerHTML, /Why it stopped/);
+  assert.equal(b.F.P.features[0].attempts, 1);
+});
+
+test('R16: legacy known stops have a limited fallback and incomplete failures stay unnumbered', async (t) => {
+  const reason = 'previous child still running (pid 8)';
+  const s = await fixture(t, { ...feature('stuck', 2), lastFeedback: reason }), time = Date.now() - 1000;
+  s.put('1-eval.json', { pass: false, findings: [{ check: 'old', ok: false, evidence: 'old artifact' }] }, time);
+  writeFileSync(join(s.dir, 'log.jsonl'), [
+    { ts: new Date(time + 1).toISOString(), feature: 'a', event: 'failed', detail: 'FAILED retained: failure with unknown try' },
+    { ts: new Date(time + 2).toISOString(), feature: 'a', event: 'stuck', detail: reason },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const b = await browser(s.dash.url);
+  assert.equal(b.F.attemptNumber(b.F.P.features[0]), 3);
+  assert.match(b.node('d-attempts').innerHTML, /Try 3[\s\S]*Stopped/);
+  assert.doesNotMatch(b.node('d-prob').innerHTML, /Try [12] failed inspection/);
+  assert.match(b.node('d-prob').innerHTML, /failure with unknown try/);
+  assert.doesNotMatch(b.node('d-attempts').innerHTML, /Failed evaluation/);
+});
+
+test('R16: human retry clears the current stop while retaining historical stopped evidence', async (t) => {
+  const reason = 'merge conflict with main: too many base refreshes (5)';
+  const s = await fixture(t, { ...feature('stuck', 0), lastFeedback: reason, stop: { attempt: 1, counted: false } });
+  writeFileSync(join(s.dir, 'log.jsonl'), JSON.stringify({ ts: new Date().toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: { attempt: 1, counted: false } }) + '\n');
+  const r = await fetch(s.dash.url + '/api/feature/retry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: s.root, id: 'a' }) });
+  assert.equal(r.status, 200);
+  const f = JSON.parse(readFileSync(join(s.dir, 'features.json'), 'utf8')).features[0];
+  assert.deepEqual([f.status, f.attempts, f.stop], ['todo', 0, undefined]);
+  assert.equal((await s.history()).log.at(-1)!.attemptsReset, true);
+  const b = await browser(s.dash.url);
+  assert.doesNotMatch(b.node('d-prob').innerHTML, /Try 1 stopped/);
+  assert.match(b.node('d-prob').innerHTML, /too many base refreshes/);
+});
+
+test('R16: legacy counted refresh failure remains a failure rather than an uncounted stop', async (t) => {
+  const reason = 'merge conflict with main; the foreman could not merge main into your branch because the worktree is not clean';
+  const s = await fixture(t, { ...feature('stuck', 1), lastFeedback: reason });
+  writeFileSync(join(s.dir, 'log.jsonl'), JSON.stringify({ ts: new Date().toISOString(), feature: 'a', event: 'stuck', detail: reason }) + '\n');
+  const b = await browser(s.dash.url);
+  assert.equal(b.F.attemptNumber(b.F.P.features[0]), 1);
+  assert.match(b.node('d-attempts').innerHTML, /Failed at merge/);
+  assert.doesNotMatch(b.node('d-attempts').innerHTML, />Stopped</);
+});
+
+for (const reset of [true, false]) test(`R16: resumed event preserves only supported counted associations (reset=${reset})`, async (t) => {
+  const reason = 'previous child still running (pid 8)';
+  const s = await fixture(t, { ...feature('stuck', 1), lastFeedback: reason, stop: { attempt: 2, counted: false } }), time = Date.now() - 1000;
+  writeFileSync(join(s.dir, 'log.jsonl'), [
+    { ts: new Date(time).toISOString(), feature: 'a', event: 'failed', detail: 'FAILED old: earlier failure', stop: { attempt: 1, counted: true } },
+    { ts: new Date(time + 1).toISOString(), feature: 'a', event: 'resumed', detail: 'by a person', attemptsReset: reset },
+    ...(reset ? [{ ts: new Date(time + 2).toISOString(), feature: 'a', event: 'failed', detail: 'builder failed: current failure', stop: { attempt: 1, counted: true } }] : []),
+    { ts: new Date(time + 3).toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: { attempt: 2, counted: false } },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const b = await browser(s.dash.url);
+  assert.match(b.node('d-attempts').innerHTML, reset ? /Failed while building/ : /Failed evaluation/);
+  assert.doesNotMatch(b.node('d-attempts').innerHTML, reset ? /Failed evaluation/ : /Failed while building/);
+  assert.match(b.node('d-attempts').innerHTML, /Try 2[\s\S]*Stopped/);
+});
+
+test('R16: a truncated history associates the retained explicit failure and leaves missing records unknown', async (t) => {
+  const reason = 'previous child still running (pid 8)';
+  const s = await fixture(t, { ...feature('stuck', 2), lastFeedback: reason, stop: { attempt: 3, counted: false } }), time = Date.now() - 1000;
+  writeFileSync(join(s.dir, 'log.jsonl'), [
+    ...Array.from({ length: 80 }, (_, i) => ({ ts: new Date(time + i).toISOString(), feature: 'a', event: 'prompt', detail: '' })),
+    { ts: new Date(time + 81).toISOString(), feature: 'a', event: 'failed', detail: 'FAILED retained: try two defect', stop: { attempt: 2, counted: true } },
+    { ts: new Date(time + 82).toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: { attempt: 3, counted: false } },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const b = await browser(s.dash.url);
+  assert.equal((await s.history()).log.length, 60);
+  assert.match(b.node('d-prob').innerHTML, /Try 2 failed inspection/);
+  assert.match(b.node('d-attempts').innerHTML, /Try 1[\s\S]*Failed \(record unavailable\)[\s\S]*Try 2[\s\S]*Failed evaluation[\s\S]*Try 3[\s\S]*Stopped/);
+});

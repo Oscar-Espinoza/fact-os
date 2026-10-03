@@ -81,6 +81,8 @@ export type PromptCause = typeof PROMPT_CAUSES[number];
 export type Cause = 'untouched' | 'infra' | 'own' | 'conflict-loop' | 'setup' | 'builder' | 'unknown';
 export interface Diagnosis { ts: string; feature: string; cause: Cause; tests: string[]; evidence: string; action: string }
 
+export interface AttemptStop { attempt: number; counted: boolean }
+
 export interface Feature {
   id: string;
   title: string;
@@ -94,6 +96,7 @@ export interface Feature {
   status: Status;
   onMock?: boolean;
   attempts: number;
+  stop?: AttemptStop;                 // latest counted failure or uncounted stop; cleared when work resumes
   refreshes?: number;
   lastFeedback?: string;
   costUsd?: number;
@@ -146,6 +149,8 @@ export interface Verdict { pass: boolean; findings: Finding[]; cheating: string[
 // log.jsonl
 export interface LogEvent {
   ts: string; feature: string | null; event: string; detail: string;
+  stop?: AttemptStop;                 // failed/stuck event's try and whether it consumed a failed attempt
+  attemptsReset?: boolean;           // resume/retry event: whether failed-attempt numbering restarted
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
   lessonAppend?: { file: string; before: string; after: string };
 }

@@ -7,7 +7,7 @@ import { request } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import type { Server } from 'node:http';
 import { startDash, conflictTimeline, type ProjectState, type OpenTask, type Run, type ControlState } from '../lib/dash.ts';
-import type { Feature, HumanTask, MergeMode } from '../lib/types.ts';
+import type { Feature, HumanTask, LogEvent, MergeMode } from '../lib/types.ts';
 
 let root: string, dash: { server: Server; url: string };
 type DashState = { projects: ProjectState[]; human: OpenTask[] };
@@ -289,7 +289,7 @@ test('state carries the merge conflict timeline from the log: who resolved each 
     ev(4, 'pay', 'testing'), ev(9, 'pay', 'evaluating'), ev(42, 'pay', 'merged'),
     ev(5, 'cart', 'refreshed', 'before test, conflict-free'), ev(6, 'cart', 'refreshed', 'conflicts in: src/c.ts'), ev(7, 'cart', 'launch'), ev(10, 'cart', 'keep-check', 'ok: src/c.ts'), ev(11, 'cart', 'testing'),
     ev(12, 'post', 'refreshed', 'conflicts in: p.ts'), ev(13, 'post', 'resolving', 'p.ts'), ev(14, 'post', 'resolve-failed', 'keep-check: 20 lines lost'), ev(15, 'post', 'launch'),
-    ev(16, 'post', 'keep-check', 'lost 3 lines'), ev(20, 'post', 'refreshed', 'conflicts in: p.ts'), ev(21, 'post', 'stuck', 'too many base refreshes (5)'),
+    ev(16, 'post', 'keep-check', 'lost 3 lines'), ev(20, 'post', 'refreshed', 'conflicts in: p.ts'), ev(21, 'post', 'stuck', 'merge conflict with main: too many base refreshes (5)'),
     ev(30, 'draft', 'refreshed', 'conflicts in: d.ts'),
   ].join('\n') + '\n');
   try {
@@ -306,6 +306,34 @@ test('state carries the merge conflict timeline from the log: who resolved each 
     if (hasLog == null) rmSync(join(dir, 'log.jsonl')); else writeFileSync(join(dir, 'log.jsonl'), hasLog);
     rmSync(join(dir, 'observer.json'));
   }
+});
+
+test('R16: conflictTimeline closes real refresh-limit stops and leaves other stops retryable', () => {
+  const now = Date.parse('2026-10-01T12:00:00Z');
+  const ev = (m: number, event: string, detail = '', stop?: LogEvent['stop']): LogEvent => ({ ts: new Date(now - 60 * 60e3 + m * 60e3).toISOString(), feature: 'x', event, detail, ...(stop ? { stop } : {}) });
+  const base = [ev(0, 'refreshed', 'conflicts in: p.ts'), ev(1, 'launch'), ev(2, 'refreshed', 'conflicts in: p.ts')];
+  for (const stop of [undefined, { attempt: 2, counted: false }]) {
+    const rows = conflictTimeline([...base, ev(3, 'stuck', 'merge conflict with trunk: too many base refreshes (5)', stop)], now);
+    assert.deepEqual(rows.map((r) => [r.outcome, r.ms]), [['failed', 60e3], ['conflicted again', 2 * 60e3]]);
+    assert.equal(rows[0]!.note, 'gave up after too many conflicts');
+    assert.equal(rows[0]!.outcomeTs, ev(3, 'stuck').ts);
+  }
+  for (const [detail, counted] of [['previous child still running (pid 123)', false], ['merge conflict with main; lost required lines', true]] as const) {
+    const [row] = conflictTimeline([...base, ev(3, 'launch'), ev(4, 'stuck', detail, { attempt: 2, counted })], now);
+    assert.equal(row!.outcome, 'resolved then stuck');
+    assert.equal(row!.note, undefined);
+    assert.equal(row!.ms, 2 * 60e3);
+  }
+});
+
+test('R16: observer send-back clears conflict stuck state before another launch', () => {
+  const now = Date.parse('2026-10-01T12:00:00Z');
+  const ev = (m: number, event: string, detail = ''): LogEvent => ({ ts: new Date(now - 60 * 60e3 + m * 60e3).toISOString(), feature: 'x', event, detail });
+  const base = [ev(0, 'refreshed', 'conflicts in: p.ts'), ev(1, 'resolving', 'p.ts'), ev(2, 'resolved', 'abc'),
+    ev(3, 'testing'), ev(4, 'stuck', 'test command `gate.sh` exited 1:\nECONNREFUSED')];
+  assert.equal(conflictTimeline(base, now)[0]!.outcome, 'resolved then stuck');
+  const [row] = conflictTimeline([...base, { ...ev(5, 'observer-retry', 'infra: ECONNREFUSED'), attemptsReset: true }], now);
+  assert.deepEqual([row!.outcome, row!.stuckCause, row!.outcomeTs, row!.ms], ['resolved', undefined, undefined, 60 * 60e3]);
 });
 
 test('conflictTimeline follows a dependency import conflict resolved by the same builder pass', () => {

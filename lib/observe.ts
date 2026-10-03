@@ -367,12 +367,13 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
       const f = data.features.find((x) => x.id === id);
       if (!f || f.status !== 'stuck') return false;
       Object.assign(f, { status: 'todo', attempts: 0, refreshes: 0, lastFeedback: retryNote(d, f.lastFeedback || ''), updatedAt: now() });
+      delete f.stop;
       return true;
     });
     if (!ok) { d.action = 'none: no longer stuck'; continue; }
     state.retried[id] = [...done, sig];
     d.action = 'sent back';
-    log(root, id, 'observer-retry', `${d.cause}: ${d.evidence}`);
+    log(root, id, 'observer-retry', `${d.cause}: ${d.evidence}`, undefined, { attemptsReset: true });
     out(`observer: sent back ${id} (${d.cause}: ${d.evidence})`);
   }
 

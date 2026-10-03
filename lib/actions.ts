@@ -17,9 +17,11 @@ export function apply(f: Feature, action: Action, maxAttempts: number): string |
     // A feature paused from stuck would be stuck again on its next failure; give it a fresh set of attempts.
     Object.assign(f, { status: 'todo', updatedAt: now(), ...(f.attempts >= maxAttempts ? { attempts: 0 } : {}) });
     delete f.pausedAt;
+    delete f.stop;
   } else {
     if (f.status !== 'stuck') return `only stuck features can be retried (is ${f.status})`;
     Object.assign(f, { status: 'todo', attempts: 0, refreshes: 0, updatedAt: now() }); // lastFeedback kept: the next build sees it
+    delete f.stop;
   }
   return null;
 }
@@ -27,10 +29,15 @@ export function apply(f: Feature, action: Action, maxAttempts: number): string |
 // Applies action to each id under the lock; result maps id → error (null when applied).
 export async function act(root: string, action: Action, ids: string[]): Promise<Record<string, string | null>> {
   const { maxAttempts } = loadConfig(root);
+  const resets = new Map<string, boolean>();
   const r = await mutate(root, 'features', (d) => Object.fromEntries(ids.map((id) => {
     const f = d.features.find((x) => x.id === id);
-    return [id, f ? apply(f, action, maxAttempts) : `unknown feature`];
+    if (!f) return [id, 'unknown feature'];
+    const before = f.attempts, err = apply(f, action, maxAttempts);
+    if (!err && action !== 'pause') resets.set(id, action === 'retry' || before >= maxAttempts);
+    return [id, err];
   })));
-  for (const [id, err] of Object.entries(r)) if (!err) log(root, id, PAST[action], 'by a person');
+  for (const [id, err] of Object.entries(r)) if (!err) log(root, id, PAST[action], 'by a person', undefined,
+    resets.has(id) ? { attemptsReset: resets.get(id)! } : undefined);
   return r;
 }
