@@ -144,7 +144,10 @@ export interface StateFiles { features: FeaturesFile; human: HumanFile }
 export type StateName = keyof StateFiles;
 
 export interface Finding { check: string; ok: boolean; evidence: string }
-export interface Verdict { pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string }
+export interface Verdict {
+  pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string;
+  diagnostic?: string; // bounded unvalidated original output, only on JSON/root/schema rejection
+}
 
 // log.jsonl
 export interface LogEvent {

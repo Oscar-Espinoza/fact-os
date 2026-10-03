@@ -8,7 +8,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { procStart } from '../lib/foreman.ts';
 import { startDash, conflictTimeline, type ProjectState } from '../lib/dash.ts';
-import { agentStats } from '../lib/observe.ts';
+import { agentStats, observeOnce } from '../lib/observe.ts';
 import { passesOf } from '../lib/promptreview.ts';
 import type { Config, Feature, FeaturesFile, LogEvent, Verdict } from '../lib/types.ts';
 import { reap } from './reap.ts';
@@ -347,6 +347,35 @@ for (const kind of ['manual', 'negative'] as const) test(`R14: ${kind} verdict l
   const r = s.cli('run'); assert.equal(r.status, kind === 'manual' ? 0 : 2, r.stdout + r.stderr);
   assert.equal(s.feature('a').status, kind === 'manual' ? 'ready' : 'stuck'); assert.equal(pendingOf(s), undefined);
   assert.match(readFileSync(join(s.repo, 'CLAUDE.md'), 'utf8'), /Immediate (manual|negative) lesson/);
+});
+
+for (const kind of ['negative', 'positive'] as const) test(`R15: ${kind} malformed verdict context reaches the next builder without emitting a lesson`, (t) => {
+  const s = setup(t, { features: [F('a')] });
+  const malformed = kind === 'negative'
+    ? { pass: false, findings: [], blocking: 'cancel.ts:182 bypasses tenant isolation', lesson: 'Invalid advice must not compound' }
+    : { pass: true, findings: [{ check: 'works', ok: true, evidence: 'checked' }], notes: 'cancel.ts:182 bypasses tenant isolation', lesson: 'Invalid advice must not compound' };
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [malformed, { pass: true, findings: [{ check: 'works', ok: true, evidence: 'checked' }] }] }));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 1]);
+  assert.equal(s.calls('build', 'a').length, 2);
+  const prompt = s.calls('build', 'a')[1]!.prompt;
+  assert.match(prompt, /Evaluator: verdict\.(findings|notes)/);
+  assert.match(prompt, /Unvalidated evaluator output \(diagnostic only\):/);
+  assert.match(prompt, /cancel.ts:182 bypasses tenant isolation/);
+  assert.equal(existsSync(join(s.repo, 'CLAUDE.md')), false);
+  assert.doesNotMatch(s.log(), /"event":"lesson"/);
+});
+
+test('R15: observer does not send a schema-stuck feature back for quoted infrastructure or test failures', async (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [], blocking: 'ECONNREFUSED\nFAIL src/quoted.test.ts', lesson: 'Invalid advice' }] }));
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(s.feature('a').lastFeedback!, /ECONNREFUSED/);
+  const state = await observeOnce(s.repo, { out: () => {} });
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  const diagnosis = state.diagnoses.find((d) => d.feature === 'a')!;
+  assert.deepEqual([diagnosis.cause, diagnosis.tests, diagnosis.action], ['own', [], 'left for a person']);
+  assert.doesNotMatch(s.log(), /"event":"observer-retry"|"event":"lesson"/);
 });
 
 test('malformed evaluator blocking rejects the merge and cannot write a lesson', (t) => {

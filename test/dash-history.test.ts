@@ -25,6 +25,22 @@ const fixture = async (t: { after: (fn: () => void) => void }, f = feature('merg
   return { root, dir, dash, put, history };
 };
 
+test('R15: dashboard rejection explains bounded raw diagnostics and retains full structured output', async (t) => {
+  const s = await fixture(t, feature('stuck', 1));
+  const raw = { pass: false, findings: [], blocking: 'START checkout.ts:10 ' + 'x'.repeat(10000) + ' END tenant.ts:27', lesson: 'Invalid advice' };
+  s.put('1-eval.json', '', Date.now(), { structured_output: raw });
+  const run = (await s.history()).runs[0]!;
+  assert.equal(run.pass, false); assert.deepEqual(run.findings, []);
+  assert.match(run.error!, /^Evaluator: verdict.findings/);
+  assert.match(run.error!, /Unvalidated evaluator output \(diagnostic only\):/);
+  assert.match(run.error!, /\[truncated\]/); assert.ok(run.error!.length < 2500);
+  assert.equal(run.text, JSON.stringify(raw), 'saved original output is not replaced by the excerpt');
+  const b = await browser(s.dash.url); b.log(1);
+  assert.match(b.node('d-attempts').innerHTML, /Unvalidated evaluator output/);
+  assert.match(b.node('d-attempts').innerHTML, /checkout.ts:10/);
+  assert.match(b.node('d-attempts').innerHTML, /Original agent output/);
+});
+
 test('served history preserves full tags, resolver outputs, evidence and chronological retry order', async (t) => {
   const s = await fixture(t), time = Date.now() - 10000;
   for (const [tag, role] of [['1', 'build'], ['1', 'eval'], ['1.2', 'resolve'], ['1.2', 'eval'], ['1.10', 'eval'], ['2', 'eval']])

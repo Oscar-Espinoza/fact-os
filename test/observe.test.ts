@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observe, observerPaths, lessonSection, parseCurated, bulletsOf, versionKey } from '../lib/observe.ts';
 import type { Diagnosis, Feature } from '../lib/types.ts';
+import { parseVerdict, feedbackFromVerdict } from '../lib/foreman.ts';
 
 const VITEST = `test command \`gate.sh\` exited 1:
 | packages/a/src/ok.test.ts | pass | 0.4 |
@@ -13,6 +14,22 @@ const VITEST = `test command \`gate.sh\` exited 1:
  FAIL  src/refresh.db.test.ts > crash windows > reclaimed after the lease
  ❯ src/refresh.db.test.ts:338:5
  ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @x/b test: \`node run-test.ts src/refresh.db.test.ts\``;
+
+test('R15: schema diagnostics cannot supply infrastructure, conflict or failing-test control evidence', () => {
+  for (const raw of ['ECONNREFUSED\nFAIL src/quoted.test.ts', 'too many base refreshes\nFAIL src/quoted.test.ts', 'custom outage\nFAIL src/quoted.test.ts']) {
+    const feedback = feedbackFromVerdict(parseVerdict(JSON.stringify({ pass: false, findings: [], blocking: raw })));
+    assert.ok(feedback.includes(raw.split('\n')[0]!));
+    assert.deepEqual(classify(feedback, [], [], ['custom outage']), { cause: 'own', evidence: 'the evaluator did not pass it' });
+    assert.deepEqual(failingTests(feedback), []);
+  }
+  // A plain-text invalid verdict can include real-looking failure lines too.
+  const feedback = feedbackFromVerdict(parseVerdict('ECONNREFUSED\nFAIL src/quoted.test.ts'));
+  assert.match(feedback, /ECONNREFUSED/);
+  assert.deepEqual(classify(feedback, [], []), { cause: 'own', evidence: 'the evaluator did not pass it' });
+  assert.deepEqual(failingTests(feedback), []);
+  assert.equal(classify('test command `g` exited 1:\nECONNREFUSED', [], []).cause, 'infra');
+  assert.equal(classify('Evaluator: evaluator failed: exit 1: ECONNREFUSED', [], []).cause, 'infra', 'provider failure remains eligible for infrastructure retry');
+});
 
 test('failingTests reads test files only from failure lines, not passing rows', () => {
   assert.deepEqual(failingTests(VITEST).sort(), ['packages/b/src/refresh.db.test.ts', 'src/refresh.db.test.ts']);

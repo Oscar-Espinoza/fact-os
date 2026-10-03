@@ -31,8 +31,12 @@ export function parseClaudeOutput(stdout: string): ClaudeResult {
 const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { return undefined; } };
 
 export function parseVerdict(text: unknown): Verdict {
-  const fail = (error: string): Verdict => ({ pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error });
   const s = String(text ?? '');
+  const fail = (error: string): Verdict => {
+    const raw = s.trim(), marker = '\n… [truncated] …\n', limit = 2000, head = Math.floor((limit - marker.length) / 2);
+    const diagnostic = raw.length > limit ? raw.slice(0, head) + marker + raw.slice(-(limit - marker.length - head)) : raw;
+    return { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error, ...(diagnostic ? { diagnostic } : {}) };
+  };
   // Once a candidate parses, its root is authoritative: never unwrap an object
   // from a parsed array or string just because that inner object would pass.
   const raw = [s, s.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1], s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]
@@ -74,6 +78,7 @@ export function feedbackFromVerdict(v: Partial<Verdict>): string {
   for (const f of v.findings || []) if (f.ok !== true) lines.push(`FAILED ${f.check}: ${f.evidence}`);
   for (const c of v.cheating || []) lines.push(`CHEATING: ${c}`);
   for (const b of v.blocking || []) lines.push(`BLOCKING: ${b}`);
+  if (v.diagnostic) lines.push(`\nUnvalidated evaluator output (diagnostic only):\n${v.diagnostic}`);
   return lines.join('\n') || 'Evaluator did not pass the feature.';
 }
 

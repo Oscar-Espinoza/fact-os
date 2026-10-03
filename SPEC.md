@@ -330,12 +330,23 @@ Each tick:
      wrappers remain supported; a parsed non-object root is refused instead of searching
      inside it for a passing object. Unknown extra fields are allowed. A malformed field
      rejects the whole verdict with a field/index error and no lesson; invalid finding
-     entries are never filtered away and list members are never coerced. Unparseable output, no findings, or `pass: true` with a
+     entries are never filtered away and list members are never coerced. On JSON/root/schema
+     rejection only, the internal verdict includes optional `diagnostic`: original evaluator
+     text with outer whitespace trimmed, capped at 2,000 JavaScript string characters.
+     Over-limit text retains both ends with `… [truncated] …` between them (marker included
+     in the cap); whitespace-only output has no excerpt. Feedback keeps the parser-owned
+     `Evaluator: <error>` header first, then `Unvalidated evaluator output (diagnostic only):`
+     and this excerpt. Fields from rejected output stay empty and lesson null; raw advice or
+     `pass:true` in the excerpt is never promoted. Valid verdicts, including valid failures
+     and contradictions, receive no diagnostic field. Provider-process failures keep their
+     existing feedback; they do not use this parser-only path. Raw provider artifacts
+     remain available in full. Unparseable output, no findings, or `pass: true` with a
      failed finding, cheating or a blocking entry counts as a fail. Valid `notes` never
      block; `lesson` is advice for future builders only. The prompt asks for acceptance
      coverage, but the parser does not enforce correspondence to the acceptance list.
      Prompt review attributes schema errors to the evaluator; a valid verdict rejecting
-     the feature's code continues to review the builder's prompt.
+     the feature's code continues to review the builder's prompt. The bounded excerpt
+     leaves the schema header inside prompt review's 4,000-character outcome limit.
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
      becomes `ready` with `parked: true` and a log event explains why; "clean" = no tracked changes outside `.fact-os/`),
      `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to
@@ -601,7 +612,12 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
 1. **Diagnoses** every `stuck` and `failed` event. Failing test files are the `*.test|spec.*` paths on failure lines
    of the feedback (`FAIL`, `×`, `✗`, `not ok`, `(fail)`), resolved to repo paths against the feature branch's tree
    (an exact path, or the single file ending in `/<name>`). What the feature changes is `base...<branch>`, or, once
-   the branch is gone, its merge commit `M^1...M^2` on base. Causes, first match wins: `infra` (feedback contains an
+   the branch is gone, its merge commit `M^1...M^2` on base. Parser JSON/schema rejection
+   headers (`Evaluator: evaluator output is not a JSON object` / `Evaluator: verdict.`)
+   establish `own` before scanning infrastructure/conflicts; their unvalidated raw context
+   supplies no failing-test names. These headers never establish a retryable cause.
+   Evaluator provider-process failures still allow genuine infrastructure patterns.
+   Other causes keep their existing precedence, first match wins: `infra` (feedback contains an
    infrastructure pattern: out of shared memory, ENOSPC, too many clients, ECONNREFUSED, a terminated or restarting
    database, cannot allocate memory, plus `observer.infraPatterns`); `conflict-loop` (too many base refreshes);
    `setup` (prepare or worktree); `builder` (builder or evaluator run, uncommitted work); for a failed test command,

@@ -14,6 +14,64 @@ const feat = (o: Partial<Feature>) => o as Feature;
 
 const verdict = (o = {}) => JSON.stringify({ pass: true, findings: [{ check: 'c1', ok: true, evidence: 'e' }], cheating: [], lesson: null, ...o });
 
+test('R15: malformed negative verdict keeps raw defect context without validating partial fields', () => {
+  const raw = verdict({ pass: false, findings: [], blocking: 'cancel.ts:182 bypasses tenant isolation', lesson: 'Invalid lesson advice' });
+  const v = parseVerdict(raw);
+  assert.deepEqual([v.pass, v.findings, v.cheating, v.blocking, v.notes, v.lesson], [false, [], [], [], [], null]);
+  assert.equal(v.diagnostic, raw);
+  const feedback = feedbackFromVerdict(v);
+  assert.match(feedback, /^Evaluator: verdict.findings must be a nonempty array\n/);
+  assert.match(feedback, /Unvalidated evaluator output \(diagnostic only\):/);
+  assert.match(feedback, /cancel.ts:182 bypasses tenant isolation/);
+  assert.doesNotMatch(feedback, /^BLOCKING:|^FAILED /m);
+});
+
+test('R15: malformed positive verdict stays rejected and cannot promote its raw lesson', () => {
+  const raw = verdict({ notes: 'refund.ts:27 double refunds', lesson: 'Never promote this malformed advice' });
+  const v = parseVerdict(raw);
+  assert.equal(v.pass, false); assert.equal(v.lesson, null); assert.deepEqual(v.findings, []);
+  assert.equal(v.diagnostic, raw);
+  assert.match(feedbackFromVerdict(v), /refund.ts:27 double refunds/);
+});
+
+test('R15: JSON and root rejection retain original text including wrappers', () => {
+  for (const raw of ['defect at checkout.ts:10, not JSON', '{"blocking":"tenant bug"', '[' + verdict() + ']',
+    'Here is the verdict:\n```json\n' + verdict({ notes: 'missing guard' }) + '\n```\nEnd']) {
+    const v = parseVerdict(raw);
+    assert.equal(v.pass, false); assert.equal(v.lesson, null); assert.equal(v.diagnostic, raw);
+    assert.match(feedbackFromVerdict(v), /Unvalidated evaluator output/);
+  }
+});
+
+test('R15: empty evaluator text has no invented diagnostic section', () => {
+  for (const raw of ['', ' \n\t ', null, undefined]) {
+    const v = parseVerdict(raw);
+    assert.equal(v.diagnostic, undefined);
+    assert.equal(feedbackFromVerdict(v), 'Evaluator: evaluator output is not a JSON object');
+  }
+});
+
+test('R15: rejected output excerpt is bounded, keeps both ends and marks omitted context', () => {
+  const raw = 'START checkout.ts:10 ' + 'x'.repeat(10000) + ' END tenant.ts:27';
+  const v = parseVerdict(raw);
+  assert.equal(v.diagnostic!.length, 2000);
+  assert.ok(v.diagnostic!.startsWith('START checkout.ts:10'));
+  assert.ok(v.diagnostic!.endsWith('END tenant.ts:27'));
+  assert.match(v.diagnostic!, /\[truncated\]/);
+  assert.ok(feedbackFromVerdict(v).length < 2500, 'keep the schema header inside the reviewer outcome limit');
+  const exact = 'a'.repeat(2000); assert.equal(parseVerdict(exact).diagnostic, exact);
+});
+
+test('R15: valid negative and contradictory verdicts keep their existing validated feedback', () => {
+  const good = verdict({ lesson: 'Valid advice' });
+  assert.equal(parseVerdict(good).pass, true); assert.equal(parseVerdict(good).diagnostic, undefined);
+  for (const pass of [true, false]) {
+    const v = parseVerdict(verdict({ pass, findings: [{ check: 'tenant', ok: false, evidence: 'missing guard' }], blocking: ['defect'], lesson: 'Valid advice' }));
+    assert.equal(v.pass, false); assert.equal(v.diagnostic, undefined); assert.equal(v.lesson, 'Valid advice');
+    assert.equal(feedbackFromVerdict(v), (pass ? 'Evaluator: pass:true contradicted by findings, cheating or blocking\n' : '') + 'FAILED tenant: missing guard\nBLOCKING: defect');
+  }
+});
+
 test('parseVerdict accepts a bare JSON verdict and one wrapped in prose/fences', () => {
   assert.equal(parseVerdict(verdict()).pass, true);
   const v = parseVerdict('Here is my verdict:\n```json\n' + verdict({ lesson: 'L' }) + '\n```\nThanks');

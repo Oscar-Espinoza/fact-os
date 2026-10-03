@@ -34,9 +34,13 @@ const firstLine = (s: string): string => s.split('\n')[0]!.slice(0, 200);
 
 const TEST_PATH = /[\w@.+-]+(?:\/[\w@.+-]+)*\.(?:test|spec)\.[cm]?[jt]sx?/g;
 const FAIL_LINE = /\bFAIL\b|×|✗|\bnot ok\b|\(fail\)/;
+// Parser-owned rejection headers are authoritative. A diagnostic excerpt can
+// quote tests, conflicts or infrastructure without establishing any of them.
+const INVALID_VERDICT = /^Evaluator: (evaluator output is not a JSON object|verdict\.)/;
 
 // Test files named on failure lines of a test command's output (vitest/jest "FAIL", tables, ×/✗, TAP "not ok").
 export function failingTests(detail: string): string[] {
+  if (INVALID_VERDICT.test(detail)) return [];
   const out = new Set<string>();
   for (const line of detail.split('\n')) if (FAIL_LINE.test(line)) for (const m of line.match(TEST_PATH) || []) out.add(m.replace(/^\.\//, ''));
   return [...out];
@@ -56,6 +60,7 @@ export function resolveTests(names: string[], files: string[]): string[] {
 // Why a feature got stuck. `tests` are the resolved failing tests, `changed` the files the feature changes.
 // A test counts as the feature's own when the feature changes it or a file in its directory.
 export function classify(detail: string, tests: string[], changed: string[], extra: string[] = []): { cause: Cause; evidence: string } {
+  if (INVALID_VERDICT.test(detail)) return { cause: 'own', evidence: 'the evaluator did not pass it' };
   const low = detail.toLowerCase();
   const infra = [...INFRA, ...extra.map((p) => p.toLowerCase())].find((p) => p && low.includes(p));
   if (infra) return { cause: 'infra', evidence: infra };

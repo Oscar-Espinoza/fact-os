@@ -7,7 +7,7 @@ import { passKind, passesOf, nextResult, selectPasses, parseFingerprint, promptF
   type Pass, type PromptReview } from '../lib/promptreview.ts';
 import { mergeNotes, fitNotes, parseNotes, noteBullet, notesBlock, notesHash, notesFile, readNotes, overCap } from '../lib/notes.ts';
 import { promptFingerprint, builderPrompt, parseVerdict, feedbackFromVerdict } from '../lib/foreman.ts';
-import { agentStats, versionKey } from '../lib/observe.ts';
+import { agentStats, versionKey, classify } from '../lib/observe.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
 import type { Cause, Feature } from '../lib/types.ts';
 
@@ -16,7 +16,18 @@ const e = (min: number, feature: string, event: string, detail = '') => ({ ts: a
 const B = (notes = '') => `builder model=sonnet effort=medium lessons=aaaaaaaa briefs=-${notes ? ` notes=${notes}` : ''} profile=fable-sonnet`;
 const EV = 'evaluator model=fable effort=high lessons=- briefs=-';
 const RES = 'resolver model=sonnet effort=high lessons=- briefs=-';
-const own: (f: string, d: string) => Cause = (_f, d) => (/FAIL a\.test\.ts|^FAILED /.test(d) ? 'own' : /exited/.test(d) ? 'untouched' : 'unknown');
+const own: (f: string, d: string) => Cause = (_f, d) => (/FAIL a\.test\.ts|^FAILED /.test(d) ? 'own' : /exited/.test(d) ? 'untouched' : 'unknown'); // a stand-in for the observer's classify
+
+test('R15: raw diagnostics keep evaluator attribution and the schema header in a reviewer prompt', () => {
+  const detail = feedbackFromVerdict(parseVerdict('ECONNREFUSED ' + 'x'.repeat(10000) + ' missing tenant guard'));
+  assert.match(detail, /Unvalidated evaluator output/);
+  const [pass] = passesOf([e(0, 'a', 'launch'), e(0, 'a', 'prompt', B()), e(1, 'a', 'prompt', EV),
+    e(1, 'a', 'evaluating'), e(2, 'a', 'stuck', detail)], (_feature, feedback) => classify(feedback, [], []).cause);
+  assert.deepEqual([pass!.kind, pass!.role, pass!.outcome], ['evaluator-run-failed', 'evaluator', 'bad']);
+  const prompt = reviewPrompt({ feature: 'a', title: 'A', role: 'evaluator', model: 'fake', effort: 'medium', kind: pass!.kind!,
+    outcome: detail, diffStat: '', next: '', prompt: '', file: 'saved.prompt.md' });
+  assert.ok(prompt.includes(detail), 'the 4000-character reviewer outcome tail retains header and bounded context');
+});
 
 test('parser schema failures review the evaluator while valid rejections review the builder', () => {
   const core = { pass: true, findings: [{ check: 'c', ok: true, evidence: 'e' }] };
@@ -37,7 +48,7 @@ test('parser schema failures review the evaluator while valid rejections review 
   const [pass] = passesOf([e(0, 'a', 'launch'), e(0, 'a', 'prompt', B()), e(1, 'a', 'prompt', EV),
     e(1, 'a', 'evaluating'), e(2, 'a', 'failed', detail)], () => 'own');
   assert.deepEqual([pass.kind, pass.role], ['evaluator-rejected', 'builder']);
-}); // a stand-in for the observer's classify
+});
 
 test('passKind: what a prompt review is for, and what it is not', () => {
   assert.equal(passKind('FAILED check 1: missing route', 'failed', 'own'), 'evaluator-rejected');

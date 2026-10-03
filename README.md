@@ -139,9 +139,13 @@ verdict. Present `cheating`/`blocking`/`notes` must be arrays of nonempty string
 `lesson` must be a string or null. Legacy omissions of those four optional fields remain
 supported; lists default to empty and lesson to null. Bare, fenced and prose-wrapped JSON
 remain supported; a parsed array/string root cannot be unwrapped into a passing verdict.
-Malformed output fails with field/index feedback and cannot write a lesson.
+Malformed output fails with field/index feedback and cannot write a lesson. Feedback
+also carries a labeled, unvalidated excerpt of the evaluator's original text, capped at
+2,000 characters with both ends retained and a truncation marker when needed. The excerpt
+is diagnostic context for the next builder, never validated findings or lesson advice.
+Schema rejection stays authoritative for observer classification; quoted infrastructure,
+conflicts and test failures cannot trigger automatic retries. Full run artifacts remain available.
 A valid `pass: true` with a failed finding or nonempty `cheating`/`blocking` also counts as a fail.
-
 The evaluator must run the feature's changed test files, mutate one guard per money/auth/tenant/state check, and check
 production wiring; its diff lists any file it could not include instead of cutting silently (`evaluatorDiffExclude` lists
 generated paths by name only).
