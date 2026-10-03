@@ -9,6 +9,9 @@ Formerly Shipyard. Projects set up before the rename keep working: their `.shipy
 `.fact-os/` dir exists, `SHIPYARD_*` env vars are read when the `FACTOS_*` one is unset, and children get both.
 The name itself lives in one constant, `NAME` in `lib/state.ts`.
 
+The [review backlog](docs/review-backlog.md) tracks correctness repairs and handoff notes;
+the [repair process](docs/fixing-process.md) keeps implementation to one issue at a time.
+
 ## Install
 
 ```sh
