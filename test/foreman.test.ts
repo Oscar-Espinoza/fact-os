@@ -35,6 +35,62 @@ test('parseVerdict: pass:true with a failed finding or cheating is still a fail'
   assert.equal(parseVerdict(verdict({ cheating: ['test asserts true'] })).pass, false);
 });
 
+test('parseVerdict rejects malformed present lists instead of discarding or coercing them', () => {
+  for (const pass of [true, false]) for (const field of ['cheating', 'blocking', 'notes']) for (const bad of ['tenant isolation broken', null, {}, [true], [7], [{}], [' '], ['valid', null]]) {
+    const v = parseVerdict(verdict({ pass, [field]: bad }));
+    assert.equal(v.pass, false, `${field}: ${JSON.stringify(bad)}`);
+    assert.match(v.error!, new RegExp(field));
+    assert.equal(v.lesson, null);
+  }
+});
+
+test('parseVerdict validates every finding without filtering malformed entries', () => {
+  const good = { check: 'c', ok: true, evidence: 'checked' };
+  for (const pass of [true, false]) for (const bad of [null, true, 'ignored', [], { ok: true }, { check: 'c', ok: true },
+    { check: 'c', evidence: 'e' }, { ...good, check: 7 }, { ...good, check: ' ' },
+    { ...good, evidence: {} }, { ...good, evidence: '' }, { ...good, ok: 'true' }, { ...good, ok: 1 }]) {
+    const v = parseVerdict(verdict({ pass, findings: [good, bad] }));
+    assert.equal(v.pass, false, JSON.stringify(bad));
+    assert.match(v.error!, /findings\[1\]/);
+  }
+  const empty = parseVerdict(verdict({ findings: [] }));
+  assert.equal(empty.pass, false);
+  assert.match(empty.error!, /findings/);
+});
+
+test('parseVerdict rejects malformed lessons without compounding their advice', () => {
+  for (const pass of [true, false]) for (const lesson of [true, 7, {}, []]) {
+    const v = parseVerdict(verdict({ pass, lesson }));
+    assert.equal(v.pass, false);
+    assert.match(v.error!, /lesson/);
+    assert.equal(v.lesson, null);
+  }
+});
+
+test('parseVerdict rejects parsed non-object roots instead of unwrapping an inner verdict', () => {
+  for (const text of ['[' + verdict() + ']', '```json\n[' + verdict() + ']\n```', JSON.stringify(verdict()), 'null']) {
+    const v = parseVerdict(text);
+    assert.equal(v.pass, false, text);
+    assert.match(v.error!, /JSON object/);
+  }
+});
+
+test('parseVerdict preserves legacy omissions and normalizes correctly typed optional fields', () => {
+  const core = { pass: true, findings: [{ check: 'c', ok: true, evidence: 'e' }] };
+  assert.deepEqual(parseVerdict(JSON.stringify(core)), { ...core, cheating: [], blocking: [], notes: [], lesson: null });
+  const v = parseVerdict(JSON.stringify({ ...core, cheating: [], blocking: [], notes: [' minor '], lesson: ' L ' }));
+  assert.equal(v.pass, true);
+  assert.deepEqual(v.notes, ['minor']);
+  assert.equal(v.lesson, 'L');
+  assert.equal(parseVerdict(JSON.stringify({ ...core, lesson: ' ' })).lesson, null);
+  const rejected = parseVerdict(JSON.stringify({ ...core, pass: false,
+    findings: [{ check: 'c', ok: false, evidence: 'fails in production' }], lesson: 'Keep the guard' }));
+  assert.equal(rejected.pass, false);
+  assert.equal(rejected.error, undefined, 'valid rejection retains its evidence instead of a schema error');
+  assert.match(feedbackFromVerdict(rejected), /FAILED c: fails in production/);
+  assert.equal(rejected.lesson, 'Keep the guard');
+});
+
 test('parseClaudeOutput reads result and cost (total_cost_usd, falling back to cost_usd)', () => {
   assert.deepEqual(parseClaudeOutput(JSON.stringify({ type: 'result', is_error: false, result: 'hi', total_cost_usd: 0.5 })),
     { ok: true, text: 'hi', cost: 0.5 });

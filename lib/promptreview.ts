@@ -42,7 +42,7 @@ export function passKind(detail: string, endEvent: string, cause: Cause): PassKi
   if (cause === 'infra' || cause === 'setup' || cause === 'conflict-loop' || cause === 'untouched') return null;
   if (/^The merge resolution lost lines/.test(detail)) return 'keep-check';
   if (/^(builder failed|commit your work)/.test(detail)) return 'builder-failed'; // before the evaluator patterns: its stderr may have a line starting "FAILED "
-  if (/^Evaluator: (evaluator failed|evaluator output is not|verdict needs)/.test(detail)) return 'evaluator-run-failed';
+  if (/^Evaluator: (evaluator failed|evaluator output is not|verdict needs|verdict\.)/.test(detail)) return 'evaluator-run-failed';
   if (/^(Evaluator:|FAILED |CHEATING:|BLOCKING:)/m.test(detail)) return 'evaluator-rejected';
   if (cause === 'own' && /^test command `/.test(detail)) return 'gate-failed';
   return null;

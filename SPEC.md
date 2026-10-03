@@ -233,8 +233,21 @@ Each tick:
      skipped/deleted tests and hard-coded results (`cheating`), and to list under `blocking` any defect in money, auth,
      tenant isolation or state handling, fake- or dev-only paths, multi-line copies of existing helpers, unchecked
      behaviour changes of existing exports and weakened unrelated tests, even when no acceptance check names them.
-     Unparseable output, no findings, or `pass: true` with a failed finding, cheating or a blocking entry counts as a
-     fail. `notes` never block; `lesson` is advice for future builders only.
+     Parsing validates the whole object: boolean `pass`, a nonempty findings array,
+     every finding an object with nonempty string `check`/`evidence` and boolean `ok`.
+     Present `cheating`/`blocking`/`notes` must be arrays of nonempty strings, and
+     `lesson` must be string or null. Legacy omissions of those four fields are
+     supported (empty lists/null lesson); valid list entries and lessons trim whitespace,
+     with empty lesson strings normalized to null. Bare JSON, fenced JSON and prose
+     wrappers remain supported; a parsed non-object root is refused instead of searching
+     inside it for a passing object. Unknown extra fields are allowed. A malformed field
+     rejects the whole verdict with a field/index error and no lesson; invalid finding
+     entries are never filtered away and list members are never coerced. Unparseable output, no findings, or `pass: true` with a
+     failed finding, cheating or a blocking entry counts as a fail. Valid `notes` never
+     block; `lesson` is advice for future builders only. The prompt asks for acceptance
+     coverage, but the parser does not enforce correspondence to the acceptance list.
+     Prompt review attributes schema errors to the evaluator; a valid verdict rejecting
+     the feature's code continues to review the builder's prompt.
    - **Pass** → `merge: "auto"`: in the main checkout (must be clean and on `base`, else the feature
      becomes `ready` with `parked: true` and a log event explains why; "clean" = no tracked changes outside `.fact-os/`),
      `git merge --no-ff <sha>` (refused if the branch moved since it was recorded; a merge git refuses to

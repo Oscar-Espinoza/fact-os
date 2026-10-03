@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { passKind, passesOf, nextResult, selectPasses, parseFingerprint, promptFile, parseReview, eligible, promptRates, trend, promptSummary, renderPromptSection, reviewPrompt, reviewBudget, reviewTimeoutMin,
   type Pass, type PromptReview } from '../lib/promptreview.ts';
 import { mergeNotes, fitNotes, parseNotes, noteBullet, notesBlock, notesHash, notesFile, readNotes, overCap } from '../lib/notes.ts';
-import { promptFingerprint, builderPrompt } from '../lib/foreman.ts';
+import { promptFingerprint, builderPrompt, parseVerdict, feedbackFromVerdict } from '../lib/foreman.ts';
 import { agentStats, versionKey } from '../lib/observe.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
 import type { Cause, Feature } from '../lib/types.ts';
@@ -16,7 +16,28 @@ const e = (min: number, feature: string, event: string, detail = '') => ({ ts: a
 const B = (notes = '') => `builder model=sonnet effort=medium lessons=aaaaaaaa briefs=-${notes ? ` notes=${notes}` : ''} profile=fable-sonnet`;
 const EV = 'evaluator model=fable effort=high lessons=- briefs=-';
 const RES = 'resolver model=sonnet effort=high lessons=- briefs=-';
-const own: (f: string, d: string) => Cause = (_f, d) => (/FAIL a\.test\.ts|^FAILED /.test(d) ? 'own' : /exited/.test(d) ? 'untouched' : 'unknown'); // a stand-in for the observer's classify
+const own: (f: string, d: string) => Cause = (_f, d) => (/FAIL a\.test\.ts|^FAILED /.test(d) ? 'own' : /exited/.test(d) ? 'untouched' : 'unknown');
+
+test('parser schema failures review the evaluator while valid rejections review the builder', () => {
+  const core = { pass: true, findings: [{ check: 'c', ok: true, evidence: 'e' }] };
+  const cases = [
+    { ...core, pass: 'true' }, { ...core, findings: [] }, { ...core, findings: [{ ok: true }] },
+    { ...core, blocking: 'tenant isolation broken' }, { ...core, cheating: null },
+    { ...core, notes: [7] }, { ...core, lesson: {} },
+  ];
+  for (const input of cases) {
+    const detail = feedbackFromVerdict(parseVerdict(JSON.stringify(input)));
+    const [pass] = passesOf([e(0, 'a', 'launch'), e(0, 'a', 'prompt', B()), e(1, 'a', 'prompt', EV),
+      e(1, 'a', 'evaluating'), e(2, 'a', 'failed', detail)], () => 'own');
+    assert.equal(pass.kind, 'evaluator-run-failed', detail);
+    assert.equal(pass.role, 'evaluator', detail);
+  }
+  assert.equal(passKind('Evaluator: verdict needs boolean "pass" and array "findings"', 'failed', 'own'), 'evaluator-run-failed', 'historical errors retain their classification');
+  const detail = feedbackFromVerdict(parseVerdict(JSON.stringify({ ...core, blocking: ['real defect'] })));
+  const [pass] = passesOf([e(0, 'a', 'launch'), e(0, 'a', 'prompt', B()), e(1, 'a', 'prompt', EV),
+    e(1, 'a', 'evaluating'), e(2, 'a', 'failed', detail)], () => 'own');
+  assert.deepEqual([pass.kind, pass.role], ['evaluator-rejected', 'builder']);
+}); // a stand-in for the observer's classify
 
 test('passKind: what a prompt review is for, and what it is not', () => {
   assert.equal(passKind('FAILED check 1: missing route', 'failed', 'own'), 'evaluator-rejected');

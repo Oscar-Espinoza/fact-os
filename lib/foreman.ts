@@ -33,13 +33,35 @@ const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { 
 export function parseVerdict(text: unknown): Verdict {
   const fail = (error: string): Verdict => ({ pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error });
   const s = String(text ?? '');
-  const v = [s, s.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1], s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]
-    .map((x) => (x === undefined ? undefined : tryJson(x))).find((x) => x && typeof x === 'object' && !Array.isArray(x)) as Record<string, unknown> | undefined;
-  if (!v) return fail('evaluator output is not a JSON object');
-  if (typeof v.pass !== 'boolean' || !Array.isArray(v.findings)) return fail('verdict needs boolean "pass" and array "findings"');
-  const findings = v.findings.filter((f) => f && typeof f === 'object') as Finding[]; // fields unchecked: a missing ok is a failed finding
-  const list = (x: unknown) => (Array.isArray(x) ? x.map(String).map((s) => s.trim()).filter(Boolean) : []);
-  const cheating = list(v.cheating), blocking = list(v.blocking), notes = list(v.notes);
+  // Once a candidate parses, its root is authoritative: never unwrap an object
+  // from a parsed array or string just because that inner object would pass.
+  const raw = [s, s.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1], s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]
+    .map((x) => (x === undefined ? undefined : tryJson(x))).find((x) => x !== undefined);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fail('evaluator output is not a JSON object');
+  const v = raw as Record<string, unknown>;
+  if (typeof v.pass !== 'boolean') return fail('verdict.pass must be a boolean');
+  if (!Array.isArray(v.findings) || !v.findings.length) return fail('verdict.findings must be a nonempty array');
+  const nonempty = (x: unknown): x is string => typeof x === 'string' && x.trim().length > 0;
+  const findings: Finding[] = [];
+  for (const [i, rawFinding] of v.findings.entries()) {
+    const at = `verdict.findings[${i}]`;
+    if (!rawFinding || typeof rawFinding !== 'object' || Array.isArray(rawFinding)) return fail(`${at} must be an object`);
+    const f = rawFinding as Record<string, unknown>;
+    if (!nonempty(f.check)) return fail(`${at}.check must be a nonempty string`);
+    if (typeof f.ok !== 'boolean') return fail(`${at}.ok must be a boolean`);
+    if (!nonempty(f.evidence)) return fail(`${at}.evidence must be a nonempty string`);
+    findings.push({ check: f.check, ok: f.ok, evidence: f.evidence });
+  }
+  const lists = { cheating: [] as string[], blocking: [] as string[], notes: [] as string[] };
+  for (const field of ['cheating', 'blocking', 'notes'] as const) {
+    const value = v[field];
+    if (value === undefined) continue; // legacy omissions are supported; malformed present values are not
+    if (!Array.isArray(value)) return fail(`verdict.${field} must be an array of nonempty strings`);
+    for (const [i, item] of value.entries()) if (!nonempty(item)) return fail(`verdict.${field}[${i}] must be a nonempty string`);
+    lists[field] = value.map((item: string) => item.trim());
+  }
+  const { cheating, blocking, notes } = lists;
+  if (v.lesson !== undefined && v.lesson !== null && typeof v.lesson !== 'string') return fail('verdict.lesson must be a string or null');
   const lesson = typeof v.lesson === 'string' && v.lesson.trim() ? v.lesson.trim() : null;
   // A blocking problem fails the feature even when every acceptance check is ok: the evaluator used to find real defects,
   // write them into a note or the lesson, and pass anyway.

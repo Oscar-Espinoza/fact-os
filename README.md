@@ -99,8 +99,16 @@ every open human task that unblocks it is `mockable` (it is then built `onMock`)
 makes it *waiting-on-human*. Ready features run by priority, then number of transitive dependents, then id.
 Features in cycles, with unknown deps or duplicate ids are reported and never run.
 
-**Evaluator verdict:** `{pass, findings: [{check, ok, evidence}], cheating: [], blocking: [], notes: [], lesson}`. Output that is
-not such an object, `pass: true` with a failed finding, non-empty `cheating` or `blocking`, or no findings all count as a fail.
+**Evaluator verdict:** `{pass, findings: [{check, ok, evidence}], cheating: [], blocking: [], notes: [], lesson}`.
+Parsing requires a JSON object, boolean `pass` and nonempty `findings`. Every finding must
+have nonempty string `check`/`evidence` and boolean `ok`; malformed entries reject the whole
+verdict. Present `cheating`/`blocking`/`notes` must be arrays of nonempty strings, and
+`lesson` must be a string or null. Legacy omissions of those four optional fields remain
+supported; lists default to empty and lesson to null. Bare, fenced and prose-wrapped JSON
+remain supported; a parsed array/string root cannot be unwrapped into a passing verdict.
+Malformed output fails with field/index feedback and cannot write a lesson.
+A valid `pass: true` with a failed finding or nonempty `cheating`/`blocking` also counts as a fail.
+
 The evaluator must run the feature's changed test files, mutate one guard per money/auth/tenant/state check, and check
 production wiring; its diff lists any file it could not include instead of cutting silently (`evaluatorDiffExclude` lists
 generated paths by name only).

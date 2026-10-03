@@ -127,6 +127,34 @@ test('refreshBeforeTest: passing evaluator lessons are committed after merge wit
   assert.match(s.git('log', '-1', '--format=%s'), /lesson from a/);
 });
 
+test('malformed evaluator blocking rejects the merge and cannot write a lesson', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: true,
+    findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked' }], cheating: [],
+    blocking: 'tenant isolation broken', lesson: 'Advice from a malformed verdict' }] }));
+  const r = s.cli('run');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.match(s.feature('a').lastFeedback!, /Evaluator:.*blocking.*array/);
+  assert.equal(s.git('log', '--merges', '--oneline'), '');
+  assert.equal(existsSync(join(s.repo, 'a.txt')), false);
+  assert.equal(existsSync(join(s.repo, 'CLAUDE.md')), false, 'malformed output cannot compound a lesson');
+});
+
+test('malformed evaluator findings feed the retry; a valid legacy verdict can then merge', (t) => {
+  const s = setup(t, { features: [F('a')] });
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [
+    { pass: true, findings: [{ ok: true }] },
+    { pass: true, findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked' }] },
+  ] }));
+  const r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 1]);
+  assert.equal(s.calls('build', 'a').length, 2);
+  assert.equal(s.calls('eval', 'a').length, 2);
+  assert.match(s.calls('build', 'a')[1].prompt, /findings\[0\]\.check.*nonempty string/);
+});
+
 test('a builder that leaves no commit, or uncommitted changes, is failed with "commit your work" (exit 2)', (t) => {
   const s = setup(t, { features: [F('noop'), F('dirty')], config: { maxAttempts: 1 }, scenario: { noop: 'noop', dirty: 'dirty' } });
   const r = s.cli('run');
