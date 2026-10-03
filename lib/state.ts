@@ -1,5 +1,6 @@
-// State files: JSON, written atomically (temp + rename) under .fact-os/.lock (O_EXCL, stale when its PID is dead).
-import { existsSync, readFileSync, writeFileSync, renameSync, linkSync, openSync, closeSync, writeSync, unlinkSync, appendFileSync, statSync } from 'node:fs';
+// State files: JSON, written atomically (temp + rename) under a populated .fact-os/.lock directory.
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, appendFileSync, lstatSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
 import type { Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
 import { OPUS, normalizeProfile, profileNames, validProfile } from './profiles.ts';
@@ -60,42 +61,70 @@ export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 
 export interface LockOptions {
   timeoutMs?: number;
-  // Test hook: runs right after a stale lock's pid was read, before the takeover, so a test can race it.
+  // Test hook: runs after a dead owner's token was read, before its removal.
   beforeTakeover?: () => void;
 }
 
+// Removing an old token cannot remove a successor's different token. rmdir is
+// deliberately nonrecursive: a populated successor remains locked, even if it
+// was published between this unlink and rmdir. Never move the canonical lock away.
+function removeLockOwner(lock: string, owner: string): void {
+  try { unlinkSync(join(lock, owner)); } catch (e) {
+    if (!['ENOENT', 'ENOTDIR'].includes(errCode(e) ?? '')) throw e;
+  }
+  try { rmdirSync(lock); } catch (e) {
+    if (!['ENOENT', 'ENOTEMPTY', 'EEXIST', 'ENOTDIR'].includes(errCode(e) ?? '')) throw e;
+  }
+}
+
 export async function withLock<R>(root: string, fn: () => R | Promise<R>, { timeoutMs = 30000, beforeTakeover }: LockOptions = {}): Promise<R> {
-  const lock = paths(root).lock;
-  const start = Date.now();
-  for (;;) {
-    try {
-      const fd = openSync(lock, 'wx');
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      break;
-    } catch (e) {
-      if (errCode(e) !== 'EEXIST') throw e;
-      let pid: number, age: number;
-      try { pid = parseInt(readFileSync(lock, 'utf8'), 10); age = Date.now() - statSync(lock).mtimeMs; } catch { continue; }
-      // Stale: holder is dead, or the file stayed empty (writer died between open and write).
-      const stale = (p: number, a: number) => (p ? !pidAlive(p) : a > 5000);
-      if (stale(pid, age)) {
-        beforeTakeover?.();
-        // Move it aside under a unique name and re-check what we moved: another process may have
-        // replaced the stale lock with its own since we read it. If so, put that one back.
-        const aside = `${lock}.${process.pid}.${seq++}.stale`;
-        try { renameSync(lock, aside); } catch { continue; }
-        try {
-          if (!stale(parseInt(readFileSync(aside, 'utf8'), 10), Date.now() - statSync(aside).mtimeMs)) linkSync(aside, lock);
-        } catch {}
-        try { unlinkSync(aside); } catch {}
-        continue;
+  return withDirectoryLock(paths(root).lock, fn, { timeoutMs, beforeTakeover });
+}
+
+async function withDirectoryLock<R>(lock: string, fn: () => R | Promise<R>, { timeoutMs = 30000, beforeTakeover }: LockOptions): Promise<R> {
+  const start = Date.now(), owner = `owner-${process.pid}-${randomUUID()}`;
+  const staging = mkdtempSync(`${lock}.`);
+  try {
+    // Publish only a complete, nonempty directory. rename cannot replace a
+    // nonempty directory, so no other live owner can be displaced at acquisition.
+    writeFileSync(join(staging, owner), '');
+    for (;;) {
+      try { renameSync(staging, lock); break; } catch (e) {
+        if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR'].includes(errCode(e) ?? '')) throw e;
       }
-      if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for lock ${lock} (held by pid ${pid})`);
+      let heldBy = 'unknown owner';
+      try {
+        if (!lstatSync(lock).isDirectory()) {
+          throw new Error(`legacy or invalid lock ${lock}: stop all old factory, observer and dashboard writers before upgrading; remove the old lock only after they have stopped`);
+        }
+        const entries = readdirSync(lock);
+        // A crashed release can leave an empty directory, but a running callback
+        // always owns a populated one. Publication may also replace an empty dir.
+        if (entries.length === 0) {
+          try { rmdirSync(lock); } catch (e) {
+            if (!['ENOENT', 'ENOTEMPTY', 'EEXIST', 'ENOTDIR'].includes(errCode(e) ?? '')) throw e;
+          }
+        } else if (entries.length === 1) {
+          const token = entries[0]!, match = /^owner-([1-9]\d*)-[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/.exec(token);
+          const pid = match ? Number(match[1]) : NaN;
+          if (Number.isSafeInteger(pid)) {
+            heldBy = `pid ${pid}`;
+            if (!pidAlive(pid)) { beforeTakeover?.(); removeLockOwner(lock, token); }
+          }
+        }
+      } catch (e) {
+        // Another contender may have finished recovery or release while we read.
+        if (!['ENOENT', 'ENOTDIR'].includes(errCode(e) ?? '')) throw e;
+      }
+      // Every contention path is bounded and yields, including malformed locks
+      // and repeated recovery races. Same-process holders must be able to finish.
+      if (Date.now() - start >= timeoutMs) throw new Error(`timed out waiting for lock ${lock} (held by ${heldBy})`);
       await sleep(5 + Math.random() * 15);
     }
+    try { return await fn(); } finally { removeLockOwner(lock, owner); }
+  } finally {
+    removeLockOwner(staging, owner);
   }
-  try { return await fn(); } finally { try { unlinkSync(lock); } catch {} }
 }
 
 const EMPTY: { [N in StateName]: () => StateFiles[N] } = { features: () => ({ features: [] }), human: () => ({ tasks: [] }) };

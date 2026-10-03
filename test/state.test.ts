@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -10,6 +11,29 @@ import type { HumanTask } from '../lib/types.ts';
 const STATE = new URL('../lib/state.ts', import.meta.url).href;
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'fact-os-state-')); mkdirSync(join(d, '.fact-os')); return d; };
 const exited = (cp: ChildProcess) => new Promise<number | null>((r) => cp.on('exit', (code) => r(code)));
+const seedOwner = (lock: string, pid: number) => {
+  mkdirSync(lock);
+  const token = `owner-${pid}-${randomUUID()}`;
+  writeFileSync(join(lock, token), '');
+  return token;
+};
+const assertNoStaging = (root: string) => assert.deepEqual(readdirSync(paths(root).dir).filter((f) => f.startsWith('.lock.')), []);
+
+test('three participants cannot enter while the live successor holds the stale lock', (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixture = new URL('./fixtures/state-lock-race.ts', import.meta.url).pathname;
+  const result = spawnSync(process.execPath, [fixture, root], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+  assert.deepEqual(JSON.parse(result.stdout), { injected: true, parentEntered: false, thirdEntered: false });
+});
+
+test('successor publication between stale token unlink and rmdir preserves exclusion', (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixture = new URL('./fixtures/state-lock-race.ts', import.meta.url).pathname;
+  const result = spawnSync(process.execPath, [fixture, root, 'after-unlink'], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+  assert.deepEqual(JSON.parse(result.stdout), { injected: true, parentEntered: false, thirdEntered: false });
+});
 
 test('two concurrent writer processes lose no update (bug: read-modify-write without lock)', async (t) => {
   const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -40,13 +64,12 @@ test('a lock held by a live pid blocks; a lock left by a dead pid is taken over'
   const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
   const holder = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)']);
   t.after(() => holder.kill());
-  writeFileSync(paths(root).lock, String(holder.pid));
+  seedOwner(paths(root).lock, holder.pid!);
   await assert.rejects(withLock(root, () => 1, { timeoutMs: 300 }), /lock/i);
   holder.kill(); await exited(holder);
-  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
-  writeFileSync(paths(root).lock, dead);
   assert.equal(await withLock(root, () => 42, { timeoutMs: 2000 }), 42);
   assert.ok(!existsSync(paths(root).lock));
+  assertNoStaging(root);
 });
 
 test('mutate returns fn result and releases lock when fn throws', async (t) => {
@@ -61,14 +84,66 @@ test('stale-lock takeover does not delete a lock another process took in the mea
   const lock = paths(root).lock;
   const live = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)']);
   t.after(() => live.kill());
-  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
-  writeFileSync(lock, dead);
+  const dead = Number(spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString());
+  seedOwner(lock, dead);
   // Right after we read the dead pid, another process removes the stale lock and takes it.
-  let raced = false;
-  const beforeTakeover = () => { if (!raced) { raced = true; unlinkSync(lock); writeFileSync(lock, String(live.pid)); } };
+  let raced = false, successor = '';
+  const beforeTakeover = () => { if (!raced) { raced = true; rmSync(lock, { recursive: true }); successor = seedOwner(lock, live.pid!); } };
   await assert.rejects(withLock(root, () => 1, { timeoutMs: 300, beforeTakeover }), /lock/i);
   assert.ok(raced, 'the race was injected');
-  assert.equal(readFileSync(lock, 'utf8'), String(live.pid), 'the live holder keeps its lock');
+  assert.deepEqual(readdirSync(lock), [successor], 'the live holder keeps its lock');
+  assertNoStaging(root);
+});
+
+test('same-process asynchronous callbacks remain exclusive and yield to the holder', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  let active = 0, peak = 0;
+  await Promise.all(Array.from({ length: 12 }, () => withLock(root, async () => {
+    peak = Math.max(peak, ++active);
+    await new Promise((r) => setTimeout(r, 2));
+    active--;
+  }, { timeoutMs: 2000 })));
+  assert.equal(peak, 1);
+  assertNoStaging(root);
+});
+
+test('an empty directory left during release is recoverable', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(paths(root).lock);
+  assert.equal(await withLock(root, () => 42), 42);
+  assert.ok(!existsSync(paths(root).lock));
+  assertNoStaging(root);
+});
+
+test('malformed lock contents are preserved and time out without entering', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const lock = paths(root).lock;
+  mkdirSync(lock); writeFileSync(join(lock, 'unknown'), 'keep');
+  await assert.rejects(withLock(root, () => assert.fail('must not enter'), { timeoutMs: 50 }), /timed out.*unknown owner/);
+  assert.equal(readFileSync(join(lock, 'unknown'), 'utf8'), 'keep');
+  assertNoStaging(root);
+});
+
+test('legacy PID-file and empty-file locks fail closed with upgrade guidance', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const content of [String(process.pid), '99999999', '']) {
+    writeFileSync(paths(root).lock, content);
+    await assert.rejects(withLock(root, () => assert.fail('must not enter')), /legacy or invalid lock.*stop all old.*after they have stopped/);
+    assert.equal(readFileSync(paths(root).lock, 'utf8'), content);
+    assertNoStaging(root);
+  }
+});
+
+test('late release does not remove a successor owner', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const lock = paths(root).lock;
+  let successor = '';
+  await withLock(root, () => {
+    // Simulate an external replacement to exercise ownership on release.
+    rmSync(lock, { recursive: true }); successor = seedOwner(lock, process.pid);
+  });
+  assert.deepEqual(readdirSync(lock), [successor]);
+  assertNoStaging(root);
 });
 
 test('builder and evaluator default to permissionMode "auto"', () => {

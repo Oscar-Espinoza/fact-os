@@ -16,9 +16,20 @@ and one dashboard across projects.
 - It never pushes, never force-deletes branches, never runs `git reset --hard` or `git clean`, never kills
   processes it did not start, and never touches anything outside the project repo, its worktrees dir and
   `~/.local/state/fact-os/`.
-- All state files are JSON and written atomically (write temp + rename) under a lock file
-  (`.fact-os/.lock`, O_EXCL, stale after its PID is dead). The dashboard and the foreman may write
-  concurrently; no write may be lost.
+- All state files are JSON and written atomically (write temp + rename) under a lock
+  directory (`.fact-os/.lock`). A staging directory already containing a unique
+  `owner-<pid>-<uuid>` marker is atomically renamed into place; a populated live lock
+  cannot be replaced. Recovery unlinks only the dead owner's exact marker, then
+  nonrecursively removes the empty directory. Release follows the same ownership rule.
+  Empty directories recover immediately, unknown contents time out, and every failed
+  acquisition yields with a bounded timeout. The dashboard and foreman may write
+  concurrently; no write may be lost. Local atomic directory rename is required.
+  Legacy PID-file locks fail closed: stop all old writers before upgrading, remove any
+  leftover legacy file only after stopping them, rerun `init` to update existing
+  projects' staging-directory ignores, and restart with the new code.
+  Mixed versions are unsupported. Unpublished `.lock.*` staging directories left by
+  a crash are harmless (ignored by `init`); clean them only with all writers stopped.
+  PID reuse delays recovery conservatively rather than risking a live owner's lock.
 
 ## Files (per project, in the main checkout)
 
@@ -298,7 +309,7 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
 
 - `fact-os init [--test "<cmd>"]` — creates `.fact-os/` with default config and empty
   features/human files, copies skills into `.claude/skills/`, adds `.fact-os/runs/`,
-  `.fact-os/*.jsonl`, `.fact-os/.lock`, `.fact-os/control.json` and the other runtime files to `.git/info/exclude`.
+  `.fact-os/*.jsonl`, `.fact-os/.lock`, `.fact-os/.lock.*`, `.fact-os/control.json` and the other runtime files to `.git/info/exclude`.
   Idempotent; never overwrites.
 - `fact-os status` — table of features and open human tasks.
 - `fact-os done <human-task-id>` — marks a human task done.

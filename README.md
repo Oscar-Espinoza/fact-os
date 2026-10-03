@@ -142,8 +142,18 @@ generated paths by name only).
   `claude` gets `--settings` deny rules (see Threat model).
 - Lessons are committed on `base` (only that file) when the main checkout is on `base` and the lessons
   file had no local edits; otherwise they are appended uncommitted.
-- State files are written atomically (temp + rename) under an `O_EXCL` lock that is stale once its pid is
-  dead, so the dashboard, `fact-os done`, hooks and the foreman can write concurrently.
+- State files are written atomically (temp + rename) under a populated `.lock/`
+  directory, published atomically with a unique PID/owner marker. Recovery and
+  release remove only that owner's marker; they cannot remove a successor's lock.
+  Dead-owner and empty directories recover automatically; unknown contents time out.
+  This requires local-filesystem atomic directory rename semantics.
+  Before upgrading from the PID-file lock format, stop all old foreman, observer,
+  dashboard and CLI writers. With the new code, rerun `fact-os init` in existing
+  projects to add staging-directory ignores, then restart writers. A leftover legacy
+  `.lock` file is refused with an error: remove it only after those writers have stopped.
+  Mixed versions must not run together. A crash before publication can leave harmless
+  `.lock.*` staging directories; these are ignored by new `init` runs and can be removed
+  when all writers are stopped. PID reuse can conservatively delay stale-lock recovery.
 - The dashboard binds to 127.0.0.1, accepts POSTs only for discovered project paths (exact match), and
   rejects any `Origin` other than its own and any unexpected `Host` (DNS rebinding).
 
