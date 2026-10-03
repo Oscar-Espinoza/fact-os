@@ -96,7 +96,15 @@ HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
 `.fact-os/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
 `.fact-os/runs/<feature>/<tag>-{build,eval,resolve}.json` — raw `claude -p --output-format json` results (tag: see Observer 7).
 `.fact-os/prompt-notes/<model>-<role>.md` (+ `.archive.md`) — per-model prompt notes (see Observer 8), git-ignored by `init`.
-`.fact-os/.foreman` — pid of the running foreman (one per repo).
+`.fact-os/.foreman` / `.fact-os/.observer` — running supervisor ownership:
+PID on the first line, unique invocation token on the second. Claim and release
+are serialized by the state lock; atomic marker publication rejects every live PID,
+including same-process calls. Foreman and observer own separate markers and may run
+together. Release compares the full marker and runs on startup/loop/summary errors;
+installed signal listeners are removed on failed startup. Existing plain-PID markers
+are supported; dead PIDs and empty old markers recover, invalid PID text fails closed.
+Temporary `.foreman.*.tmp` / `.observer.*.tmp` files are ignored by `init`; crashes
+before publication may leave harmless artifacts. PID reuse can delay recovery.
 `.fact-os/control.json` — a person's runtime limits on new launches (CLI `pause-all`/`resume-all`/`lanes`/`profile`, or the dashboard):
 ```
 Control { paused: boolean, maxParallel: number|null /* integer 0–32; null = config.maxParallel */,

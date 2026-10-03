@@ -6,10 +6,10 @@
 // the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). It also reviews
 // each failed pass (promptreview.ts) to learn whether the prompt or the model was at fault, and keeps per-model prompt notes
 // from that. The observer itself never changes code: every code change goes through the factory's own checks.
-import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
+import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, withSupervisor, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
 import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import { SLUG } from './ready.ts';
@@ -600,19 +600,20 @@ export function renderReport(root: string, state: ObserverState, features: Featu
 
 // ---- the loop ----
 
-export async function observe(root: string, opts: ObserveOptions & { watch?: boolean } = {}): Promise<number> {
+export function observe(root: string, opts: ObserveOptions & { watch?: boolean } = {}): Promise<number> {
+  return withSupervisor(root, 'observer', () => observeOwned(root, opts));
+}
+
+async function observeOwned(root: string, opts: ObserveOptions & { watch?: boolean }): Promise<number> {
   const O = observerPaths(root), out = opts.out || ((s: string) => console.log(s));
-  const other = parseInt((() => { try { return readFileSync(O.pid, 'utf8'); } catch { return ''; } })(), 10);
-  if (other && other !== process.pid && pidAlive(other)) throw new Error(`another observer is running (pid ${other})`);
-  writeFileSync(O.pid, String(process.pid));
   const children = new Set<ChildProcess>();
   let stopping = false;
   const onSignal = () => { if (stopping) process.exit(130); stopping = true; out('observer: stopping…'); for (const c of children) { try { process.kill(-c.pid!, 'SIGTERM'); } catch {} } };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
-  const profile = { last: null as string | null };
-  let pollSec = DEFAULT_OBSERVER.pollSec;
   try {
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
+    const profile = { last: null as string | null };
+    let pollSec = DEFAULT_OBSERVER.pollSec;
     for (;;) {
       try { await observeOnce(root, { ...opts, out, children, profile, stopping: () => stopping }); } catch (e) {
         if (!opts.watch) throw e;
@@ -628,7 +629,6 @@ export async function observe(root: string, opts: ObserveOptions & { watch?: boo
   } finally {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
-    if (parseInt((() => { try { return readFileSync(O.pid, 'utf8'); } catch { return ''; } })(), 10) === process.pid) unlinkSync(O.pid);
   }
   out(`observer: report at ${O.report}`);
   return 0;

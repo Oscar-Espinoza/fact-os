@@ -83,7 +83,8 @@ feed back into the next build prompt; at `maxAttempts` the feature is `stuck`.
   two such keyword families in the description, decide.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
-  `runs/<feature>/<tag>-{build,eval,resolve}.json` (raw `claude -p` output), `.lock`, `.foreman` (foreman pid).
+  `runs/<feature>/<tag>-{build,eval,resolve}.json` (raw `claude -p` output), `.lock`,
+  `.foreman` / `.observer` (PID on the first line, invocation token on the second).
 - `prompt-notes/<model>-<role>.md` — short per-model advice the observer learns from reviewed failures (config `observer.promptReview`:
   `enabled`, `maxPerPass` (6), `notesMaxBytes` (3000)); the foreman appends it under `## Notes for <model> as <role>`. Deleting a file drops its notes for good: the reviews behind it are marked as used and are not applied again. Reviews are throttled (`everyMinutes` 30, `maxPerDay` 24) and run on each profile's `curator` role; the report shows what they cost.
 - `control.json` — `{paused, maxParallel: 0–32|null, profile: name|null, updatedAt, by}`, written by `pause-all`/`resume-all`/`lanes`/`profile` and the
@@ -154,6 +155,12 @@ generated paths by name only).
   Mixed versions must not run together. A crash before publication can leave harmless
   `.lock.*` staging directories; these are ignored by new `init` runs and can be removed
   when all writers are stopped. PID reuse can conservatively delay stale-lock recovery.
+- Supervisor claims and releases also use the state lock. Only one foreman and one
+  observer may run per project, including calls from the same process; the two roles
+  can run together. Markers are published atomically and cleanup compares the full
+  invocation token, so a rejected startup cannot delete the winner's ownership.
+  Failed startup removes its marker and signal listeners. Plain-PID legacy supervisor
+  markers still block live owners and recover when their PID is dead.
 - The dashboard binds to 127.0.0.1, accepts POSTs only for discovered project paths (exact match), and
   rejects any `Origin` other than its own and any unexpected `Host` (DNS rebinding).
 

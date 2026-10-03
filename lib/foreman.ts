@@ -1,10 +1,10 @@
 // Foreman: plan → build → test → evaluate → merge → compound, over ready features, in parallel worktrees.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, load, loadConfig, mutate, log, pidAlive, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
+import { paths, load, loadConfig, mutate, log, withSupervisor, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole } from './profiles.ts';
@@ -316,12 +316,13 @@ const readLogEvents = (file: string): LogEvent[] => { try { return readFileSync(
 
 export interface RunOptions { watch?: boolean; once?: boolean; maxFeatures?: number; out?: (s: string) => void }
 
-export async function run(root: string, opts: RunOptions = {}): Promise<number> {
+export function run(root: string, opts: RunOptions = {}): Promise<number> {
+  return withSupervisor(root, 'foreman', () => runOwned(root, opts));
+}
+
+async function runOwned(root: string, opts: RunOptions): Promise<number> {
   const P = paths(root);
   const out = opts.out || ((s: string) => console.log(s));
-  const other = parseInt(readIf(P.foreman) ?? '', 10);
-  if (other && other !== process.pid && pidAlive(other)) throw new Error(`another foreman is running (pid ${other})`);
-  writeFileSync(P.foreman, String(process.pid));
   const children = new Set<ChildProcess>(), inflight = new Map<string, Promise<unknown>>();
   let stopping = false, launched = 0, onceDone = false, chain: Promise<unknown> = Promise.resolve(), lastWaiting = '', lastOrphans = '', lastParked = '';
   // control.json: the control applied last tick (null before the first read), the last valid one read, the invalid content
@@ -334,6 +335,7 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     out('stopping… (again to force)');
     for (const c of children) killGroup(c, 'SIGTERM');
   };
+  try {
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   const edit = (id: string, fn: (f: Feature) => void) => mutate(root, 'features', (d) => { const f = d.features.find((x) => x.id === id); if (f) fn(f); });
@@ -729,7 +731,6 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
     return set(id, { status: 'merged', sha, lastFeedback: undefined, parked: undefined });
   }
 
-  try {
     for (;;) {
       const seen = stamp(P); // before load() and readControl(), so a change made during this tick still wakes --watch
       const ctlSeen = stamp({ control: P.control });
@@ -857,16 +858,15 @@ export async function run(root: string, opts: RunOptions = {}): Promise<number> 
       }
       await waitForChange(P, seen, () => stopping);
     }
+    const { features } = load(root);
+    const counts: Record<string, number> = {};
+    for (const f of features) counts[f.status] = (counts[f.status] || 0) + 1;
+    out(`summary: ${Object.entries(counts).map(([s, n]) => `${n} ${s}`).join(', ') || 'no features'}`);
+    return !halted && features.every((f) => f.status === 'merged' || f.status === 'ready') ? 0 : 2;
   } finally {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
-    if (parseInt(readIf(P.foreman) ?? '', 10) === process.pid) unlinkSync(P.foreman);
   }
-  const { features } = load(root);
-  const counts: Record<string, number> = {};
-  for (const f of features) counts[f.status] = (counts[f.status] || 0) + 1;
-  out(`summary: ${Object.entries(counts).map(([s, n]) => `${n} ${s}`).join(', ') || 'no features'}`);
-  return !halted && features.every((f) => f.status === 'merged' || f.status === 'ready') ? 0 : 2;
 }
 
 type Watched = Partial<Pick<Paths, 'features' | 'human' | 'control'>>;

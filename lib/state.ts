@@ -127,6 +127,35 @@ async function withDirectoryLock<R>(lock: string, fn: () => R | Promise<R>, { ti
   }
 }
 
+// The state lock serializes short ownership claims/releases, not the supervisor's
+// lifetime. PID stays first for dashboard/CLI readers; the nonce identifies this
+// invocation, so its cleanup cannot remove a replacement with the same PID.
+export async function withSupervisor<R>(root: string, role: 'foreman' | 'observer', fn: () => R | Promise<R>): Promise<R> {
+  const file = join(paths(root).dir, `.${role}`), owner = `${process.pid}\n${randomUUID()}\n`;
+  const readOwner = () => {
+    try { return readFileSync(file, 'utf8'); } catch (e) { if (errCode(e) === 'ENOENT') return null; throw e; }
+  };
+  let claimed = false;
+  try {
+    await withLock(root, () => {
+      const previous = readOwner(), firstLine = previous?.split('\n')[0]?.trim() ?? '', pid = Number(firstLine);
+      if (previous?.trim() && (!/^[1-9]\d*$/.test(firstLine) || !Number.isSafeInteger(pid))) throw new Error(`invalid ${role} ownership marker ${file}`);
+      if (pidAlive(pid)) throw new Error(`another ${role} is running (pid ${pid})`);
+      const tmp = `${file}.${randomUUID()}.tmp`;
+      try {
+        writeFileSync(tmp, owner, { flag: 'wx' });
+        renameSync(tmp, file);
+        claimed = true;
+      } finally {
+        try { unlinkSync(tmp); } catch (e) { if (errCode(e) !== 'ENOENT') throw e; }
+      }
+    });
+    return await fn();
+  } finally {
+    if (claimed) await withLock(root, () => { if (readOwner() === owner) unlinkSync(file); });
+  }
+}
+
 const EMPTY: { [N in StateName]: () => StateFiles[N] } = { features: () => ({ features: [] }), human: () => ({ tasks: [] }) };
 
 // The one place state files become typed: shape is trusted here, validated by `fact-os doctor`.
