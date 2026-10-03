@@ -78,6 +78,8 @@ export function feedbackFromVerdict(v: Partial<Verdict>): string {
 }
 
 export function applyFailure(f: Feature, feedback: string, maxAttempts: number): void {
+  delete f.sha; // counted failures rebuild; only unspent revalidation retains accepted build reuse
+  delete f.pendingLesson;
   f.attempts = (f.attempts || 0) + 1;
   f.lastFeedback = feedback;
   f.status = f.attempts >= maxAttempts ? 'stuck' : 'todo';
@@ -450,7 +452,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const env = { ...process.env, ...featureEnv({ FEATURE: id }) };
     const onSpawn = (pid: number) => edit(id, (x) => { Object.assign(x, { pid, pidStart: procStart(pid) ?? undefined, foremanPid: process.pid }); }).catch(() => {}); // lets a later foreman see the child is alive
     const fail = failer(id);
-    const stopped = async () => { if (!stopping) return false; await set(id, { status: 'todo' }); log(root, id, 'interrupted'); return true; };
+    const stopped = async () => { if (!stopping) return false; await set(id, { status: 'todo', pendingLesson: undefined }); log(root, id, 'interrupted'); return true; };
     const roleCfg = (role: Role) => resolveRole(config, profile, role, { feature: f });
     const claude = async (role: Role, prompt: string, file: string): Promise<ClaudeResult> => {
       const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, roleCfg(role), root),
@@ -638,15 +640,17 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         log(root, id, 'ready', branch); out(`ready ${id} (${branch})`);
         return set(id, { status: 'ready', sha, lastFeedback: undefined });
       }
-      const merged = await serial(() => merge(f, branch, sha, fail, inline));
+      const merged = await serial(async () => {
+        // Keep the accepted commit and lesson across parking or a crash after Git
+        // merges but before feature state is recorded. Never promote it while ready.
+        await set(id, { sha, pendingLesson: lesson ? { sha, text: lesson } : undefined });
+        return merge(f, branch, sha, fail, inline);
+      });
       if (merged === 'revalidate') {
         tag = runTag(readdirSync(runDir), attempt); // keep the prior evaluation and prompt
         continue;
       }
-      if (merged !== 'conflicted') {
-        if (lesson) await serial(() => compound(id, lesson));
-        return;
-      }
+      if (merged !== 'conflicted') return;
       const note = await resolveNow(); // bounced: resolve now, then test and evaluate again
       if (note == null) return;
       resolved = note;
@@ -681,6 +685,24 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     }
   }
 
+  // Caller owns checkout serialization. Delivery is retryable after an ordinary
+  // write failure; appendLesson deduplicates an append completed before state clear.
+  async function compoundPending(id: string): Promise<void> {
+    const f = loadState(root).features.find((x) => x.id === id), pending = f?.pendingLesson;
+    if (!pending || f.status !== 'merged') return;
+    if (pending.sha !== f.sha || git(['merge-base', '--is-ancestor', pending.sha, config.base], root).code !== 0) return;
+    try {
+      compound(id, pending.text);
+      await edit(id, (x) => {
+        if (x.pendingLesson?.sha === pending.sha && x.pendingLesson.text === pending.text) delete x.pendingLesson;
+      });
+    } catch (e) {
+      // A lesson failure must not send already-merged code back to the builder.
+      const why = (e as Error).message ?? String(e);
+      log(root, id, 'lesson-error', why); out(`warning ${id}: lesson delivery failed: ${why}`);
+    }
+  }
+
   // After a conflicting merge into base (or before the test, with refreshBeforeTest), the foreman (never the builder)
   // merges the verified base sha into the feature's clean worktree; a conflict there is left for the next build to
   // resolve and commit. No attempt is spent. beforeTest: a clean merge returns 'clean' and the pipeline goes on.
@@ -696,7 +718,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const tooMany = () => {
       const fb = `merge conflict with ${base}: too many base refreshes (${n})`;
       log(root, id, 'stuck', fb); out(`stuck ${id}: ${fb}`);
-      return set(id, { status: 'stuck', lastFeedback: fb });
+      return set(id, { status: 'stuck', lastFeedback: fb, pendingLesson: undefined });
     };
     if (n >= config.maxRefreshes && !beforeTest) return tooMany();
     const st = git(['status', '--porcelain'], wt);
@@ -719,7 +741,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     }
     log(root, id, 'refreshed', (beforeBuild ? 'before build, ' : '') + (conflicted ? `conflicts in: ${files}` : 'conflict-free'));
     out(`refresh ${id}: merged ${base} into ${branch}${conflicted ? `, conflicts in: ${files}` : ''}`);
-    const patch = { refreshes: n + 1, lastFeedback: keepPrior + fb, parked: undefined, ...(rec ? { conflict: rec } : {}) };
+    const patch = { refreshes: n + 1, lastFeedback: keepPrior + fb, parked: undefined, pendingLesson: undefined, ...(rec ? { conflict: rec } : {}) };
     if (beforeBuild) return set(id, patch).then(() => 'conflicted' as const); // this builder owns the started merge
     if (rec && inline) return set(id, patch).then(() => 'conflicted' as const); // the pipeline's resolver takes it from here
     return set(id, { status: 'todo', ...patch });
@@ -739,16 +761,16 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (result !== 'revalidate') return result;
       // Preserve the evaluated SHA through the queue so the next launch can skip the
       // builder. Launch clears it from disk; a real subsequent failure rebuilds normally.
-      return set(f.id, { status: 'todo', parked: undefined });
+      return set(f.id, { status: 'todo', parked: undefined, pendingLesson: undefined });
     }
     log(root, f.id, 'unparked', `${branch} moved since it was evaluated; back to todo`);
     out(`retry ${f.id}: ${branch} moved since it was evaluated`);
-    return set(f.id, { status: 'todo', parked: undefined, sha: undefined });
+    return set(f.id, { status: 'todo', parked: undefined, sha: undefined, pendingLesson: undefined });
   }
 
   async function merge(f: Feature, branch: string, sha: string, fail: Fail, inline = false): Promise<void | 'conflicted' | 'revalidate'> {
     const id = f.id;
-    if (tampered()) { log(root, id, 'merge-skipped', `${halted}; back to todo`); return set(id, { status: 'todo', parked: undefined }); }
+    if (tampered()) { log(root, id, 'merge-skipped', `${halted}; back to todo`); return set(id, { status: 'todo', parked: undefined, pendingLesson: undefined }); }
     const why = checkoutProblem();
     if (why) {
       log(root, id, 'merge-skipped', `${why}; left as ready`);
@@ -756,9 +778,18 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       return set(id, { status: 'ready', sha, parked: true });
     }
     if (git(['rev-parse', branch], root).out !== sha) return fail(`${branch} moved during evaluation; only the evaluated commit is merged`);
+    // A parked merge may have landed before a crash (or a verified hand merge).
+    // It needs status/lesson recovery, not another gate against its own merge commit.
+    if (git(['merge-base', '--is-ancestor', sha, baseSha], root).code === 0) {
+      log(root, id, 'merged', `${branch}; evaluated commit already on ${config.base}`);
+      out(`merged ${id} (already on ${config.base})`);
+      await set(id, { status: 'merged', sha, lastFeedback: undefined, parked: undefined });
+      return compoundPending(id);
+    }
     if (config.refreshBeforeTest && git(['merge-base', '--is-ancestor', baseSha, sha], root).code !== 0) {
       log(root, id, 'revalidate', `${config.base} advanced after evaluation; refresh, test and evaluate again`);
       out(`revalidate ${id}: ${config.base} advanced after evaluation`);
+      await set(id, { pendingLesson: undefined });
       return 'revalidate';
     }
     const msg = `${NAME}: merge ${id}: ${f.title}`, hook = config.mergeHook;
@@ -780,7 +811,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         const fb = h.code !== 0 ? `mergeHook \`${hook}\` exited ${h.code}:\n${tail(h.out + h.err, 2000)}` : `committing the merge after mergeHook failed: ${c!.err}`;
         log(root, id, 'merge-hook-failed', fb);
         out(`retry ${id}: merge hook failed; merge aborted`);
-        return set(id, { status: 'todo', lastFeedback: fb, sha: undefined, parked: undefined }); // no attempt spent
+        return set(id, { status: 'todo', lastFeedback: fb, sha: undefined, parked: undefined, pendingLesson: undefined }); // no attempt spent
       }
     }
     baseSha = baseHead();
@@ -791,7 +822,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     }
     log(root, id, 'merged', branch);
     out(`merged ${id}`);
-    return set(id, { status: 'merged', sha, lastFeedback: undefined, parked: undefined });
+    await set(id, { status: 'merged', sha, lastFeedback: undefined, parked: undefined });
+    return compoundPending(id);
   }
 
     for (;;) {
@@ -827,6 +859,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       // In flight now: this foreman's own launches plus live children of a previous foreman (orphans), against either limit.
       const busyCount = () => inflight.size + orphans.length;
       const { features, tasks } = loadState(root);
+      // Recovery and verified dashboard acknowledgment can mark merged without
+      // returning through merge(). Deliver their accepted pending lessons too.
+      const pending = config.merge === 'auto' ? features.filter((f) => f.status === 'merged' && f.pendingLesson) : [];
+      if (pending.length && !stopping && !tampered())
+        await serial(async () => { for (const f of pending) await compoundPending(f.id); });
       const parked = features.filter(isParked);
       if (parked.length && !stopping && !tampered() && !checkoutProblem()) { // then reload: dependents may be ready now
         for (const f of parked) await serial(() => retryMerge(f));
@@ -865,12 +902,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
             hotHeld = claims.held.flatMap(([by, files]) => files.filter(claims!.hot).map((x) => `${x} (${by})`));
           }
           // Claim and capture together: a pending edit may have completed since this tick's load.
-          // Keep the pre-transition SHA for build reuse; clear disk SHA for a fresh pass.
+          // Keep the pre-transition SHA for build reuse; clear disk acceptance until a fresh auto pass.
           const f = await mutate(root, 'features', (d) => {
             const current = d.features.find((x) => x.id === id);
             if (!current || current.status !== 'todo') return null;
             const snapshot = { ...current, acceptance: [...(current.acceptance || [])] };
-            Object.assign(current, { status: 'building', onMock: a.mock.has(id), sha: undefined, 
+            Object.assign(current, { status: 'building', onMock: a.mock.has(id), sha: undefined, pendingLesson: undefined,
               pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
             return snapshot;
           });

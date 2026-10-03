@@ -167,7 +167,12 @@ generated paths by name only).
   goes back to `todo` exactly as above. Immediately before an automatic merge, the foreman checks again that the
   evaluated commit contains current `base`. If another feature merged during its test or evaluation, it refreshes,
   tests and evaluates again, reusing the build after a clean refresh and keeping the earlier run files. A stale
-  parked feature goes back through that same validation queue before merging.
+  parked feature goes back through that same validation queue before merging. Passing automatic lessons
+  are saved with the evaluated commit and appended only after it merges. Parking cannot move base
+  through its own lesson; restarts retain pending advice, and superseding validation discards it.
+  Already-landed evaluated commits recover without another provider call. Manual-ready and failing
+  verdict lessons keep their immediate behavior. Lesson write errors retain merged status and pending
+  delivery for a later pass; they never send merged code back to the builder.
 - Tamper checks: if `config.json` changes on disk during a run, or `base` moves other than by fact-os's
   own merges and lesson commits so that it now reaches a commit of a feature branch (`branchPrefix*` or a
   feature's `branch`), or carries a (non-empty) blob that is also in one, the foreman logs an `alert`,

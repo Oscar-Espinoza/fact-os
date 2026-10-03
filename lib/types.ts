@@ -98,7 +98,8 @@ export interface Feature {
   lastFeedback?: string;
   costUsd?: number;
   updatedAt: string;                  // ISO
-  sha?: string;                       // evaluated commit (ready/merged)
+  sha?: string;                       // evaluated commit; auto persists before merge, may survive parking/interruption
+  pendingLesson?: { sha: string; text: string }; // foreman-owned passing auto lesson, delivered after this commit merges
   parked?: boolean;
   pausedAt?: string;                  // ISO, while paused
   issue?: number;                     // GitHub issue number

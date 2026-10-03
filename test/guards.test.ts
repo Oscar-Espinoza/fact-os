@@ -135,6 +135,193 @@ test('refreshBeforeTest: passing evaluator lessons are committed after merge wit
   assert.match(s.git('log', '-1', '--format=%s'), /lesson from a/);
 });
 
+const passingLesson = (lesson: string | null): Partial<Verdict> => ({ pass: true,
+  findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked' }], lesson });
+const seedLessons = (s: ReturnType<typeof setup>) => {
+  const file = join(s.repo, 'CLAUDE.md'); writeFileSync(file, '# Instructions\n');
+  s.git('add', 'CLAUDE.md'); s.git('commit', '-qm', 'instructions'); return file;
+};
+const pendingOf = (s: ReturnType<typeof setup>) => s.feature('a').pendingLesson;
+const parkWithLesson = (t: TestContext, config: Partial<Config> = {}, later: Partial<Verdict>[] = []) => {
+  const s = setup(t, { features: [F('a')], config: { refreshBeforeTest: true, maxAttempts: 1, ...config },
+    verdicts: { a: [passingLesson('Original accepted lesson.'), ...later] } });
+  const file = seedLessons(s); writeFileSync(join(s.repo, 'README.md'), 'local edit\n');
+  const initial = s.git('rev-parse', 'main'), r = s.cli('run');
+  assert.equal(r.status, 0, r.stdout + r.stderr); assert.equal(s.feature('a').status, 'ready');
+  return { s, file, initial };
+};
+
+test('R14: a parked passing lesson cannot move base; restart delivers it once without another evaluation', (t) => {
+  const { s, file, initial } = parkWithLesson(t);
+  assert.equal(s.git('rev-parse', 'main'), initial, 'parking must not commit its passing lesson');
+  assert.equal(readFileSync(file, 'utf8'), '# Instructions\n');
+  assert.deepEqual(pendingOf(s), { sha: s.feature('a').sha, text: 'Original accepted lesson.' });
+  assert.equal(s.cli('run').status, 0, 'another dirty-checkout pass must keep parking');
+  s.git('checkout', '-q', 'README.md');
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged'); assert.equal(pendingOf(s), undefined);
+  assert.equal(s.calls('build', 'a').length, 1); assert.equal(s.calls('eval', 'a').length, 1);
+  assert.equal(readFileSync(file, 'utf8').split('Original accepted lesson.').length - 1, 1);
+  assert.match(s.log(), /"event":"merged"[^\n]*\n[^\n]*"event":"lesson"/);
+  assert.equal(s.git('log', '-2', '--format=%s'), 'fact-os: lesson from a\nfact-os: merge a: Feature a');
+  assert.equal(s.cli('run').status, 0); assert.equal(s.calls('eval', 'a').length, 1);
+  assert.equal(readFileSync(file, 'utf8').split('Original accepted lesson.').length - 1, 1);
+});
+
+for (const lesson of ['Fresh aggregate lesson.', null]) test(`R14: stale parked revalidation replaces the pending lesson with ${lesson ?? 'no lesson'}`, (t) => {
+  const { s, file } = parkWithLesson(t, {}, [passingLesson(lesson)]);
+  s.git('checkout', '-q', 'README.md'); writeFileSync(join(s.repo, 'user.txt'), 'new base\n');
+  s.git('add', 'user.txt'); s.git('commit', '-qm', 'user advanced base');
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged'); assert.equal(pendingOf(s), undefined);
+  assert.equal(s.calls('build', 'a').length, 1); assert.equal(s.calls('eval', 'a').length, 2);
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /Original accepted lesson/);
+  if (lesson) assert.ok(readFileSync(file, 'utf8').includes(lesson));
+  else assert.equal(readFileSync(file, 'utf8'), '# Instructions\n');
+});
+
+for (const failure of ['gate', 'evaluator']) test(`R14: failed aggregate ${failure} never promotes the superseded passing lesson`, (t) => {
+  const { s, file } = parkWithLesson(t, { test: '[ ! -f reject ]' }, [
+    { pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'aggregate regression' }], lesson: null },
+  ]);
+  s.git('checkout', '-q', 'README.md'); writeFileSync(join(s.repo, failure === 'gate' ? 'reject' : 'user.txt'), 'new base\n');
+  s.git('add', '.'); s.git('commit', '-qm', 'user advanced base');
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'stuck'); assert.equal(pendingOf(s), undefined);
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /Original accepted lesson/);
+  assert.equal(existsSync(join(s.repo, 'a.txt')), false);
+});
+
+test('R14: a moved parked branch discards the old lesson before rebuilding', (t) => {
+  const { s, file } = parkWithLesson(t, {}, [passingLesson('Rebuilt lesson.')]);
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'branch moved'], { cwd: wtOf(s, 'a') });
+  s.git('checkout', '-q', 'README.md');
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.calls('build', 'a').length, 2); assert.equal(pendingOf(s), undefined);
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /Original accepted lesson/); assert.match(readFileSync(file, 'utf8'), /Rebuilt lesson/);
+});
+
+test('R14: a failed parked merge hook discards its pending lesson without spending an attempt', (t) => {
+  const { s, file } = parkWithLesson(t, { mergeHook: 'exit 1' });
+  s.git('checkout', '-q', 'README.md');
+  const r = s.cli('run', '--max-features', '0'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'todo'); assert.equal(s.feature('a').attempts, 0); assert.equal(pendingOf(s), undefined);
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /Original accepted lesson/);
+  assert.equal(s.calls('eval', 'a').length, 1);
+});
+
+test('R14: merge refusal retains its lesson through observer reparking until an actual merge', (t) => {
+  const s = setup(t, { features: [F('a')], config: { refreshBeforeTest: true }, verdicts: { a: [passingLesson('Refused then merged lesson.')] } });
+  const file = seedLessons(s); writeFileSync(join(s.repo, 'a.txt'), 'user untracked file\n');
+  assert.equal(s.cli('run').status, 0); assert.equal(s.feature('a').parked, undefined);
+  assert.equal(readFileSync(file, 'utf8'), '# Instructions\n'); assert.ok(pendingOf(s));
+  assert.equal(s.cli('observe').status, 0); assert.equal(s.feature('a').parked, true);
+  rmSync(join(s.repo, 'a.txt')); assert.equal(s.cli('run').status, 0);
+  assert.equal(s.calls('eval', 'a').length, 1); assert.equal(pendingOf(s), undefined);
+  assert.match(readFileSync(file, 'utf8'), /Refused then merged lesson/);
+});
+
+for (const status of ['ready', 'evaluating', 'merged'] as const) test(`R14: already-landed ${status} pending lessons recover without another provider`, (t) => {
+  const { s, file } = parkWithLesson(t);
+  s.git('checkout', '-q', 'README.md'); s.git('merge', '--no-ff', '-qm', 'merge before state recording', 'ship/a');
+  const stateFile = join(s.repo, '.fact-os/features.json'), data = JSON.parse(readFileSync(stateFile, 'utf8'));
+  Object.assign(data.features[0], { status, pendingLesson: { sha: s.feature('a').sha, text: 'Original accepted lesson.' } });
+  writeFileSync(stateFile, JSON.stringify(data));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged'); assert.equal(pendingOf(s), undefined);
+  assert.equal(s.calls('eval', 'a').length, 1); assert.equal(s.calls('build', 'a').length, 1);
+  assert.equal(readFileSync(file, 'utf8').split('Original accepted lesson.').length - 1, 1);
+});
+
+test('R14: counted refresh failure clears saved acceptance so the next attempt rebuilds', async (t) => {
+  const s = setup(t, { features: [F('a')], config: { refreshBeforeTest: true, maxAttempts: 2 },
+    verdicts: { a: [passingLesson('Superseded accepted lesson.'), passingLesson('Retry accepted lesson.')] } });
+  const file = seedLessons(s); s.env.FAKE_DELAY_MS = '0'; s.git('config', 'merge.ff', 'only');
+  const entered = join(s.repo, '.fact-os/eval-entered'), release = join(s.repo, '.fact-os/eval-release');
+  const wrapper = join(s.repo, '.fact-os/blocked-evaluator.sh');
+  writeFileSync(wrapper, `#!/bin/sh\nin=$(cat)\ncase "$in" in "You are the evaluator"*) touch '${entered}'; while [ ! -f '${release}' ]; do sleep 0.01; done;; esac\nprintf '%s' "$in" | '${FAKE}' "$@"\n`, { mode: 0o755 });
+  s.env.FACTOS_CLAUDE = wrapper;
+  const running = s.start('--once');
+  try {
+    assert.ok(await until(() => existsSync(entered)), running.out());
+    writeFileSync(join(s.repo, 'user.txt'), 'advanced base\n'); s.git('add', 'user.txt'); s.git('commit', '-qm', 'advance during evaluation');
+    writeFileSync(release, ''); assert.equal(await running.exit, 2, running.out());
+  } finally { writeFileSync(release, ''); s.git('config', '--unset', 'merge.ff'); }
+  assert.equal(s.feature('a').attempts, 1, running.out() + s.log() + JSON.stringify(s.feature('a'))); assert.equal(s.feature('a').status, 'todo');
+  assert.match(s.feature('a').lastFeedback!, /merging main into your branch did not start/);
+  assert.equal(s.feature('a').sha, undefined); assert.equal(pendingOf(s), undefined);
+  const next = s.cli('run'); assert.equal(next.status, 0, next.stdout + next.stderr);
+  assert.equal(s.calls('build', 'a').length, 2, 'a counted failure cannot retain the parked-build shortcut');
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /Superseded accepted lesson/); assert.match(readFileSync(file, 'utf8'), /Retry accepted lesson/);
+});
+
+test('R14: a failed fresh verdict keeps only its negative lesson, never the old passing advice', (t) => {
+  const { s, file } = parkWithLesson(t, {}, [{ pass: false, findings: [{ check: 'works', ok: false, evidence: 'aggregate rejection' }], lesson: 'Fresh negative lesson.' }]);
+  s.git('checkout', '-q', 'README.md'); writeFileSync(join(s.repo, 'user.txt'), 'new base\n');
+  s.git('add', 'user.txt'); s.git('commit', '-qm', 'advance base');
+  assert.equal(s.cli('run').status, 2); assert.equal(pendingOf(s), undefined);
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /Original accepted lesson/); assert.match(readFileSync(file, 'utf8'), /Fresh negative lesson/);
+});
+
+for (const mismatch of ['receipt', 'ancestry'] as const) test(`R14: recovered merged lesson refuses invalid ${mismatch}`, (t) => {
+  const { s, file } = parkWithLesson(t); s.git('checkout', '-q', 'README.md');
+  if (mismatch === 'receipt') s.git('merge', '--no-ff', '-qm', 'merge a', 'ship/a');
+  const stateFile = join(s.repo, '.fact-os/features.json'), data = JSON.parse(readFileSync(stateFile, 'utf8'));
+  data.features[0].status = 'merged';
+  if (mismatch === 'receipt') data.features[0].pendingLesson.sha = s.git('rev-parse', 'main');
+  writeFileSync(stateFile, JSON.stringify(data));
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(readFileSync(file, 'utf8'), '# Instructions\n'); assert.equal(s.calls('eval', 'a').length, 1); assert.ok(pendingOf(s), 'refused receipts remain available for inspection');
+});
+
+test('R14: a pending receipt retried after its append deduplicates and clears without a provider', (t) => {
+  const { s, file } = parkWithLesson(t); s.git('checkout', '-q', 'README.md');
+  s.git('merge', '--no-ff', '-qm', 'merge before receipt clear', 'ship/a');
+  writeFileSync(file, '## fact-os lessons\n\n- 2026-10-02: Original accepted lesson.\n');
+  s.git('add', 'CLAUDE.md'); s.git('commit', '-qm', 'lesson before receipt clear');
+  const stateFile = join(s.repo, '.fact-os/features.json'), data = JSON.parse(readFileSync(stateFile, 'utf8'));
+  data.features[0].status = 'merged'; writeFileSync(stateFile, JSON.stringify(data));
+  assert.equal(s.cli('run').status, 0); assert.equal(pendingOf(s), undefined);
+  assert.equal(readFileSync(file, 'utf8').split('Original accepted lesson.').length - 1, 1);
+  assert.equal(s.calls('eval', 'a').length, 1);
+});
+
+test('R14: lesson write errors keep code merged and retain delivery for the next healthy pass', (t) => {
+  const s = setup(t, { features: [F('a')], config: { refreshBeforeTest: true }, verdicts: { a: [passingLesson('Retry delivery lesson.')] } });
+  const file = join(s.repo, 'CLAUDE.md'); mkdirSync(file);
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged'); assert.ok(pendingOf(s)); assert.match(s.log(), /"event":"lesson-error"/);
+  const stats = agentStats(s.log().trim().split('\n').map((line) => JSON.parse(line) as LogEvent), [], 0)[0]!;
+  assert.equal(stats.launches, 1); assert.equal(stats.evaluated, 1); assert.equal(stats.passed, 1); assert.equal(stats.merged, 1);
+  rmSync(file, { recursive: true }); assert.equal(s.cli('run').status, 0);
+  assert.equal(pendingOf(s), undefined); assert.equal(s.calls('build', 'a').length, 1); assert.equal(s.calls('eval', 'a').length, 1);
+  assert.match(readFileSync(file, 'utf8'), /Retry delivery lesson/);
+  assert.equal(readFileSync(file, 'utf8').split('Retry delivery lesson.').length - 1, 1);
+});
+
+test('R14: crash in postMerge retains the accepted SHA and pending lesson for startup recovery', (t) => {
+  const s = setup(t, { features: [F('a')], config: { refreshBeforeTest: true, postMerge: 'kill -KILL "$PPID"' }, verdicts: { a: [passingLesson('Recovered active lesson.')] } });
+  const r = s.cli('run'); assert.equal(r.signal, 'SIGKILL', r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'evaluating'); assert.ok(s.feature('a').sha);
+  assert.deepEqual(pendingOf(s), { sha: s.feature('a').sha, text: 'Recovered active lesson.' });
+  assert.equal(s.git('merge-base', '--is-ancestor', s.feature('a').sha!, 'main'), '');
+  const next = s.cli('run'); assert.equal(next.status, 0, next.stdout + next.stderr);
+  assert.equal(s.feature('a').status, 'merged'); assert.equal(pendingOf(s), undefined);
+  assert.equal(s.calls('build', 'a').length, 1); assert.equal(s.calls('eval', 'a').length, 1);
+  assert.match(readFileSync(join(s.repo, 'CLAUDE.md'), 'utf8'), /Recovered active lesson/);
+  const events = s.log().trim().split('\n').map((line) => JSON.parse(line) as LogEvent);
+  assert.equal(events.filter((e) => e.event === 'recovered' && e.detail.startsWith('already merged')).length, 1);
+});
+
+for (const kind of ['manual', 'negative'] as const) test(`R14: ${kind} verdict lessons retain their existing immediate behavior`, (t) => {
+  const s = setup(t, { features: [F('a')], config: { merge: kind === 'manual' ? 'manual' : 'auto', maxAttempts: 1 }, verdicts: { a: [
+    kind === 'manual' ? passingLesson('Immediate manual lesson.') : { pass: false, findings: [{ check: 'works', ok: false, evidence: 'fixture rejection' }], lesson: 'Immediate negative lesson.' },
+  ] } });
+  const r = s.cli('run'); assert.equal(r.status, kind === 'manual' ? 0 : 2, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, kind === 'manual' ? 'ready' : 'stuck'); assert.equal(pendingOf(s), undefined);
+  assert.match(readFileSync(join(s.repo, 'CLAUDE.md'), 'utf8'), /Immediate (manual|negative) lesson/);
+});
+
 test('malformed evaluator blocking rejects the merge and cannot write a lesson', (t) => {
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
   writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: true,

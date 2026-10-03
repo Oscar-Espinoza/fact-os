@@ -118,7 +118,8 @@ Feature {
   pausedAt?: ISO string           // set while paused; only a person pauses (CLI or dashboard), never the foreman
   onMock?: boolean                // built while a human task it needs is open
   attempts: number, refreshes?: number /* base refreshes after merge conflicts */, lastFeedback?: string, costUsd?: number, updatedAt: ISO string
-  sha?: string                    // evaluated commit, recorded when the feature becomes ready or merged
+  sha?: string                    // evaluated commit, persisted before auto merge; may survive parking/interruption
+  pendingLesson?: {sha, text}      // foreman-owned passing auto advice; delivered only after its commit merges
   parked?: boolean                // ready only because the main checkout was dirty or off base (merge-skipped)
   pid?, pidStart?, foremanPid?    // current child: pid, /proc/<pid>/stat start time, foreman that spawned it
 }
@@ -333,7 +334,10 @@ Each tick:
      SHA. Otherwise log `revalidate` and repeat refresh/test/fresh evaluation without another builder after a
      clean refresh. Earlier evaluation files/prompts are retained under distinct run tags. Conflicts use the
      existing resolution path; a refresh alone spends no attempt, while a failing aggregate gate does.
-     On conflict, `git merge --abort`, then a
+     A passing automatic evaluation saves its SHA and pending lesson before attempting merge, under
+     the serialized checkout operation. Ready/parked features append nothing. An evaluated commit already
+     on base needs status/lesson recovery rather than another gate or provider call; postMerge is not
+     replayed on this recovery path. Failing verdict lessons remain immediate. On conflict, `git merge --abort`, then a
      **base refresh**: the foreman runs `git merge --no-edit <recorded base sha>` in the feature's worktree
      (which must be clean, else attempt++). Clean → `todo` with feedback "the foreman merged <base> into your
      branch (conflict-free); re-run the tests and fix anything the new base broke". Conflicted → the merge is
@@ -384,7 +388,23 @@ Each tick:
      `maxAttempts` → `stuck`.
    - **Compound.** A non-null `lesson` is appended to `lessonsFile` as one dated bullet under a
      `## fact-os lessons` heading (created if missing), deduplicated by exact text, and committed on
-     `base` (that file only) when the main checkout is on `base` and the file had no local edits.
+     `base` (that file only) when the main checkout is on `base` and the file had no local edits. A failing
+     verdict's lesson is kept before failure feedback, and manual-ready lessons remain immediate.
+     Automatic passing lessons are saved as pending advice associated with the evaluated SHA. Shared
+     delivery requires recorded merged status, matching recorded/pending SHA and that commit on base;
+     it runs under checkout serialization after merge or on a later foreman pass following recovery.
+     Parking and merge refusal retain the pending lesson without appending/committing it. Revalidation,
+     conflict refresh, new launch, counted failure, moved branch, tamper halt and failed merge hook clear
+     superseded advice; a fresh passing verdict supplies its replacement (including no lesson).
+     Ordinary append/state-clear errors log lesson-error, preserve merged status and leave delivery
+     pending for another pass, without another builder/evaluator. A mismatched or off-base receipt is
+     refused and retained for inspection. Automatic delivery runs only in auto mode; switching to manual
+     leaves old pending advice alone until a subsequent auto pass or launch.
+     Normal append-before-clear retries deduplicate exact normalized lesson text. Git merge, append and
+     state clear are separate durable operations, not an exactly-once transaction: a crash plus intervening
+     curation that rewrites/removes that text can allow a repeated lesson. Atomic state-file writes do not
+     promise fsync/power-loss or network-filesystem durability. Legacy ready state without pending advice
+     cannot recover its lesson from this field; old run artifacts remain available for inspection.
    - **Tamper checks.** If `config.json` changes on disk, or `base` moves other than by the foreman's own
      merges/lesson commits so that it reaches a feature-branch commit, or its new objects
      (`git rev-list --objects <newBase> ^<recordedBase>`) include a non-empty blob that is also in a feature
