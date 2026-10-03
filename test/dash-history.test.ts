@@ -264,3 +264,40 @@ test('R16: a truncated history associates the retained explicit failure and leav
   assert.match(b.node('d-prob').innerHTML, /Try 2 failed inspection/);
   assert.match(b.node('d-attempts').innerHTML, /Try 1[\s\S]*Failed \(record unavailable\)[\s\S]*Try 2[\s\S]*Failed evaluation[\s\S]*Try 3[\s\S]*Stopped/);
 });
+
+test('factory reconciliation: lowering lanes keeps running work, then departed features leave no cards and spare lanes read OFF', async (t) => {
+  const s = await fixture(t, feature('building', 0)), b = await browser(s.dash.url);
+  const mk = (i: number, status: Feature['status']): Feature => ({ ...feature(status, 1), id: 'f' + i, title: 'Feature ' + i });
+  const slots = () => [0, 1, 2, 3, 4, 5, 6, 7].map((i) => b.node('fx-slot' + i).innerHTML as string);
+  const cards = () => slots().flatMap((h) => /data-fid="([^"]+)"/.exec(h)?.[1] ?? []);
+  const P = b.F.P;
+  b.route('factory');
+  P.features = Array.from({ length: 8 }, (_, i) => mk(i, 'building'));
+  P.control = { paused: false, maxParallel: 8, configMax: 8, effective: 8 }; P.inFlight = 8; b.F.render();
+  assert.equal(cards().length, 8);
+  P.control = { ...P.control, maxParallel: 4, effective: 4 }; b.F.render();
+  assert.deepEqual(cards().sort(), P.features.map((f: Feature) => f.id).sort(), 'running work stays visible when lanes are lowered');
+  // The high-lane features merge and the foreman restarts (new running/since): nothing of them may linger.
+  for (const f of P.features.slice(4)) f.status = 'merged';
+  P.foreman = { running: true, since: new Date().toISOString() }; P.inFlight = 4; b.F.render();
+  const live = slots();
+  assert.deepEqual(cards().sort(), ['f0', 'f1', 'f2', 'f3']);
+  for (const id of ['f4', 'f5', 'f6', 'f7']) assert.ok(!live.some((h) => h.includes('data-fid="' + id + '"')), id + ' left the floor');
+  live.slice(4).forEach((h) => { assert.match(h, /OFF/); assert.doesNotMatch(h, /data-fid/); });
+  // Paused with nothing running: no cards, four idle lanes, four OFF lanes.
+  for (const f of P.features) f.status = 'merged';
+  P.control = { ...P.control, paused: true, effective: 0 }; P.inFlight = 0; b.F.render();
+  const idle = slots();
+  assert.equal(cards().length, 0);
+  assert.equal(idle.slice(0, 4).filter((h) => !/OFF/.test(h) && h.includes('bay-idle')).length, 4);
+  assert.equal(idle.slice(4).filter((h) => /OFF/.test(h) && h.includes('bay-idle')).length, 4);
+  assert.match(b.node('fx-sign').innerHTML, /0 BUSY/);
+});
+
+test('served factory CSS dims disabled lanes without transparency, so the floor image cannot show through', async (t) => {
+  const s = await fixture(t), css = await (await fetch(s.dash.url + '/dash/factory.css')).text();
+  const rule = /\.fx-slot\.off\s*\{([^}]*)\}/.exec(css);
+  assert.ok(rule, 'disabled-slot rule exists');
+  const op = /(?:^|;)\s*opacity\s*:\s*([\d.]+)/.exec(rule![1]!);
+  assert.ok(!op || Number(op[1]) >= 1, 'disabled slots must stay opaque');
+});
