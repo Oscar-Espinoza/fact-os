@@ -14,7 +14,7 @@ import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAli
 import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import { SLUG } from './ready.ts';
-import { passesOf, promptRates, reviewFailures, updateNotes, fileTemplateTasks, promptSummary, renderPromptSection, type PromptState } from './promptreview.ts';
+import { passesOf, promptRates, PROMPT_RATES_UNIT, reviewFailures, updateNotes, fileTemplateTasks, promptSummary, renderPromptSection, type PromptState } from './promptreview.ts';
 import { readNotes } from './notes.ts';
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
 
@@ -431,6 +431,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
     if (!stopping()) await step('template tasks', () => fileTemplateTasks(root, state, out, stopping));
   }
   state.promptRates = promptRates(passes);
+  state.promptRatesUnit = PROMPT_RATES_UNIT;
   if (cfg.agent && !stopping()) await step('lesson curation', () => curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, children, stopping));
   if (cfg.agent && cfg.improve && !stopping()) await step('improver', () => improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, children, stopping));
 

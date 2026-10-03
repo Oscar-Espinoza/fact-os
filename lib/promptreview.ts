@@ -155,7 +155,7 @@ const middle = (s: string, head: number, end: number): string => (s.length <= he
 
 export function reviewPrompt(i: ReviewInput): string {
   return [`You review one failed pass of the ${NAME} software factory, to find out why it failed: was it the prompt the model was given, or the model?`,
-    `A pass is one run of a model in a role (builder, merge resolver or evaluator) on a feature. Below are the prompt it was given and how the pass ended.`,
+    `A pass starts at one feature launch and can contain repeated role prompts. Below are the final prompt in the responsible role and how the pass ended.`,
     'Read the repository if you need to check what the prompt did or did not tell the model. You are read-only: change nothing.', '',
     `Feature: ${i.feature}: ${i.title}`, `Role: ${i.role}. Model: ${i.model}. Effort: ${i.effort}.`, `How it ended: ${KIND_WORDS[i.kind]}.`,
     `What happened in the feature's next pass: ${i.next}.`, '', 'The outcome:', '```', tail(i.outcome, 4000), '```', '',
@@ -194,9 +194,10 @@ export interface PromptReview { ts: string; feature: string; tag: string; role: 
   noted?: boolean;   // its suggestion went into the model's notes
   filed?: boolean }  // its suggestion went into a human task (a change to the role's template)
 export interface PromptRate { model: string; role: Role; notes: string; since: string; ok: number; bad: number }
+export const PROMPT_RATES_UNIT = 'final-role-pass-v1';
 // What the observer keeps beside the reviews: when the last batch ran and the start of every review run in the last 24 hours
 // (the throttle), the running cost of review runs, and how often a pass's review run failed (it is asked again at most once).
-export interface PromptState { promptReviews?: Record<string, PromptReview>; promptRates?: PromptRate[]; promptReviewAt?: string; promptReviewRuns?: string[];
+export interface PromptState { promptReviews?: Record<string, PromptReview>; promptRates?: PromptRate[]; promptRatesUnit?: string; promptReviewAt?: string; promptReviewRuns?: string[];
   promptReviewCost?: number; promptReviewTries?: Record<string, { n: number; ts: string }> }
 export const MAX_TRIES = 2;
 
@@ -358,13 +359,17 @@ export async function fileTemplateTasks(root: string, state: PromptState, out: O
 // ---- rates by notes version ----
 
 // For each model, role and notes version, how many passes ended well and how many badly (a bad pass counts for the role the
-// review is about; a good pass for every prompt it used), oldest version first.
+// review is about; a good pass once per role, using that role's final prompt), oldest version first.
 export function promptRates(passes: Pass[]): PromptRate[] {
   const m = new Map<string, PromptRate>();
-  const at = (model: string, role: Role, notes: string, ts: string) => { const k = `${model}\n${role}\n${notes}`; return m.get(k) ?? m.set(k, { model, role, notes, since: ts, ok: 0, bad: 0 }).get(k)!; };
+  const at = (model: string, role: Role, notes: string, ts: string) => {
+    const k = `${model}\n${role}\n${notes}`, r = m.get(k) ?? m.set(k, { model, role, notes, since: ts, ok: 0, bad: 0 }).get(k)!;
+    if (Date.parse(ts) < Date.parse(r.since)) r.since = ts;
+    return r;
+  };
   for (const p of passes) {
-    if (p.outcome === 'ok') for (const x of p.prompts) at(x.model, x.role, x.notes, x.ts).ok++;
-    else if (p.outcome === 'bad') { const x = p.prompts.filter((y) => y.role === p.role).at(-1)!; at(x.model, x.role, x.notes, x.ts).bad++; }
+    if (p.outcome === 'ok') for (const x of new Map(p.prompts.map((x) => [x.role, x])).values()) at(x.model, x.role, x.notes, x.ts).ok++;
+    else if (p.outcome === 'bad') { const x = p.prompts.filter((y) => y.role === p.role).at(-1); if (x) at(x.model, x.role, x.notes, x.ts).bad++; }
   }
   return [...m.values()].sort((a, b) => Date.parse(a.since) - Date.parse(b.since));
 }
@@ -381,15 +386,18 @@ export function trend(prev: { ok: number; bad: number } | undefined, cur: { ok: 
 
 export interface PromptRow { model: string; role: Role; reviewed: number; causes: { cause: PromptCause; n: number }[]; suggestions: { text: string; n: number; target: Target }[];
   notes: { text: string; bytes: number } | null; versions: { notes: string; since: string; ok: number; bad: number; trend: string }[] }
-export interface PromptSummary { reviewed: number; invalid: number; cost: number; runs24h: number; rows: PromptRow[] } // cost: all review runs so far
+export interface PromptSummary { reviewed: number; invalid: number; cost: number; runs24h: number; rows: PromptRow[]; ratesPending?: boolean } // cost: all review runs so far
 
 // Per model and role: the causes of the reviewed failures in the last 7 days, the suggestions most often made, the notes in force
 // and the results by notes version. `readNotesText` reads a model's notes ('' when none).
 export function promptSummary(state: PromptState, readNotesText: (model: string, role: Role) => string): PromptSummary {
-  const since = Date.now() - 7 * DAY, rs = Object.values(state.promptReviews ?? {}).filter((r) => Date.parse(r.ts) >= since && r.cause), rates = state.promptRates ?? [];
+  const since = Date.now() - 7 * DAY, rs = Object.values(state.promptReviews ?? {}).filter((r) => Date.parse(r.ts) >= since && r.cause), cachedRates = state.promptRates ?? [];
+  // Legacy invocation totals cannot be converted without the event log. Keep
+  // reviews/notes visible, but wait for the observer to regenerate rates.
+  const ratesPending = state.promptRates != null && state.promptRatesUnit !== PROMPT_RATES_UNIT, rates = ratesPending ? [] : cachedRates;
   const keys = new Map<string, { model: string; role: Role }>();
   for (const r of rs) keys.set(`${r.model}\n${r.role}`, { model: r.model, role: r.role });
-  for (const r of rates) if (r.notes !== '-') keys.set(`${r.model}\n${r.role}`, { model: r.model, role: r.role });
+  for (const r of cachedRates) if (r.notes !== '-') keys.set(`${r.model}\n${r.role}`, { model: r.model, role: r.role });
   const rows = [...keys.values()].map(({ model, role }): PromptRow => {
     const mine = rs.filter((r) => r.model === model && r.role === role), count = new Map<PromptCause, number>(), sug = new Map<string, { text: string; n: number; target: Target }>();
     for (const r of mine) {
@@ -402,14 +410,16 @@ export function promptSummary(state: PromptState, readNotesText: (model: string,
       versions: vs.map((x, i) => ({ notes: x.notes, since: x.since, ok: x.ok, bad: x.bad, trend: i ? trend(vs[i - 1], x) : '' })) };
   }).sort((a, b) => b.reviewed - a.reviewed || a.model.localeCompare(b.model) || a.role.localeCompare(b.role));
   return { reviewed: rs.length, invalid: Object.values(state.promptReviews ?? {}).filter((r) => !r.cause && Date.parse(r.ts) >= since).length, cost: state.promptReviewCost ?? 0,
-    runs24h: (state.promptReviewRuns ?? []).filter((t) => Date.now() - Date.parse(t) < DAY).length, rows };
+    runs24h: (state.promptReviewRuns ?? []).filter((t) => Date.now() - Date.parse(t) < DAY).length, rows, ...(ratesPending ? { ratesPending: true } : {}) };
 }
 
 export function renderPromptSection(s: PromptSummary, at: (iso: string) => string): string[] {
-  if (!s.rows.length && !s.cost) return [];
+  if (!s.rows.length && !s.cost && !s.ratesPending) return [];
   const pct = (a: number, b: number) => (b ? `${Math.round((100 * a) / b)}%` : '–');
   return ['## Why runs failed, by model', '',
     `The review agent read ${s.reviewed} failed passes from the last 7 days (the saved prompt and how the pass ended) and named one main cause for each. Review cost so far: $${s.cost.toFixed(2)} (${s.runs24h} review runs in the last 24 hours).`, '',
+    'Each successful pass counts once per role, using its final prompt. A reviewable failure counts only for the responsible role. Other outcomes are excluded.', '',
+    ...(s.ratesPending ? ['Rates will update after the next observer pass.', ''] : []),
     ...s.rows.flatMap((r) => [`### ${r.model} as ${r.role}`, '',
       r.causes.length ? `Causes: ${r.causes.map((c) => `${CAUSE_WORDS[c.cause]} ${c.n}`).join(', ')}.` : 'No failed passes reviewed yet.',
       ...(r.suggestions.length ? ['', 'Suggested prompt changes, most often first:', ...r.suggestions.map((x) => `- ${x.n > 1 ? `${x.n}× ` : ''}${x.text} (${x.target === 'template' ? 'the role template: a task for you' : x.target})`)] : []),

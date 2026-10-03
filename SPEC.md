@@ -515,6 +515,9 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
     something out, could be read two ways, contradicted itself; the model got it wrong; infrastructure; the spec was wrong),
     what would have helped most and where it belongs, the notes sent with its prompts (in a `<details>`) and how many
     passes failed per notes version, against the version before, and what the reviews have cost so far.
+    A successful pass contributes once per role at its final prompt's model/notes; a reviewable
+    failure contributes only to the responsible role. Legacy cached rates are hidden, with
+    `prompts.ratesPending: true`, until an observer pass regenerates them; reviews/notes/cost stay visible.
   - **Project**: `<state dir>/project-view.html` if present, in an iframe with `sandbox="allow-scripts"`
     and served with `Content-Security-Policy: sandbox allow-scripts` (opaque origin: it cannot call
     the API). The dashboard posts `{type: "fact-os-state", project, features: [{id, title, status,
@@ -705,8 +708,19 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
      task, and its first step's count ("found N failed … passes") follows. Logged `observer-proposal`.
    - **Rates by notes version.** `observer.json` keeps `promptRates` (last 7 days): per model, role and notes version, the
      passes that ended well (`merged`, `ready`, or passed evaluation and bounced) and the reviewable ones that ended badly.
+     A pass starts at one feature launch and can include repeated evaluation or inline resolver runs.
+     Success counts once per role that was prompted, using that role's final model and notes version;
+     earlier superseded prompts contribute nothing. Failure counts once for the final prompt of the
+     responsible role, matching review attribution; other roles receive no success credit in that failed
+     pass. Skipped builders receive no inherited credit from an earlier launch. Interrupted, incomplete,
+     infrastructure-only and parked (`merge-skipped`/`merge-failed`) outcomes remain excluded; these are
+     attributed pass outcomes, not provider-call failure rates or evidence that notes caused a change.
+     `since` is the earliest contributing final-prompt timestamp, even when passes finish out of order.
      A version counts as better or worse than the one before only with at least 5 passes on each side and a failure rate 15
-     points apart.
+     points apart. Regenerated rates carry `promptRatesUnit: "final-role-pass-v1"`. Aggregates without
+     that unit cannot be converted arithmetically: report/dashboard withhold their rates and trends and
+     say they will update after the next observer pass, preserving reviews, notes and costs. No live-log
+     regeneration is added to dashboard polling. An observer pass rebuilds both array and marker from logs.
 9. **Reports** to `<state dir>/observer-report.md`: features merged/in progress/to do/stuck/paused, what needs a
    person (alerts, stuck features with their cause, open proposals), the last 24h (failures by cause, tests failing
    in several features, retries, fixes), **Why runs failed, by model** (per model and role: the reviews' causes of the

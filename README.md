@@ -92,6 +92,10 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   `.foreman` / `.observer` (PID on the first line, invocation token on the second).
 - `prompt-notes/<model>-<role>.md` — short per-model advice the observer learns from reviewed failures (config `observer.promptReview`:
   `enabled`, `maxPerPass` (6), `notesMaxBytes` (3000)); the foreman appends it under `## Notes for <model> as <role>`. Deleting a file drops its notes for good: the reviews behind it are marked as used and are not applied again. Reviews are throttled (`everyMinutes` 30, `maxPerDay` 24) and run on each profile's `curator` role; the report shows what they cost.
+- Prompt results count successful passes once per role, using its final model/notes version;
+  reviewable failures count only for the responsible role. Repeated evaluation/resolution does not
+  add samples. After upgrading, legacy cached rates wait for the next observer pass to rebuild them;
+  reviews, notes and costs remain visible. See SPEC.md "Rates by notes version" for exclusions.
 - `control.json` — `{paused, maxParallel: 0–32|null, profile: name|null, updatedAt, by}`, written by `pause-all`/`resume-all`/`lanes`/`profile` and the
   dashboard and re-read by the foreman every tick: the launch limit is 0 while paused, else `maxParallel`, else the config's,
   counted against features in flight including a previous foreman's live children. Not `config.json`, so it never trips the

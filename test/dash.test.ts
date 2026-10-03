@@ -263,7 +263,7 @@ test('state carries the prompt summary: causes per model and role, top suggestio
   const rev = (o: object) => ({ ts: now, feature: 'a', tag: '1', role: 'builder', model: 'sonnet', effort: 'medium', notes: '-', kind: 'gate-failed', next: '', cause: 'prompt-missing-info', evidence: ['q'], confidence: 'high', suggestion: 'Run the typecheck.', target: 'briefs', cost: 0, ...o });
   writeFileSync(join(dir, 'observer.json'), JSON.stringify({ offset: 0, retried: {}, diagnoses: [], alerts: [],
     promptReviews: { 'a/1': rev({}), 'b/1': rev({ feature: 'b', cause: 'model-limitation', suggestion: '', target: null }), 'c/1': rev({ feature: 'c', cause: null, confidence: null, suggestion: '', target: null, error: 'invalid answer: x' }) },
-    promptRates: [{ model: 'sonnet', role: 'builder', notes: '-', since: now, ok: 1, bad: 2 }] }));
+    promptRatesUnit: 'final-role-pass-v1', promptRates: [{ model: 'sonnet', role: 'builder', notes: '-', since: now, ok: 1, bad: 2 }] }));
   mkdirSync(join(dir, 'prompt-notes'), { recursive: true });
   writeFileSync(join(dir, 'prompt-notes/sonnet-builder.md'), '- Run the typecheck.\n');
   try {

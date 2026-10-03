@@ -222,7 +222,7 @@ test('promptSummary and the report section: causes, top suggestions, notes and r
     'a/1': R({ ts: now, suggestion: 'Run the typecheck.' }), 'b/1': R({ ts: now, feature: 'b', suggestion: 'run the typecheck.', confidence: 'high' }),
     'c/1': R({ ts: now, feature: 'c', cause: 'model-limitation', suggestion: '', target: null }), 'd/1': R({ ts: now, feature: 'd', cause: null, confidence: null, suggestion: '', target: null, error: 'invalid answer: x' }),
     'old/1': R({ ts: '2020-01-01T00:00:00Z' }) };
-  const s = promptSummary({ promptReviews: reviews, promptRates: [{ model: 'sonnet', role: 'builder', notes: '-', since: at(0), ok: 1, bad: 4 }, { model: 'sonnet', role: 'builder', notes: 'n1', since: at(10), ok: 5, bad: 1 }] },
+  const s = promptSummary({ promptReviews: reviews, promptRatesUnit: 'final-role-pass-v1', promptRates: [{ model: 'sonnet', role: 'builder', notes: '-', since: at(0), ok: 1, bad: 4 }, { model: 'sonnet', role: 'builder', notes: 'n1', since: at(10), ok: 5, bad: 1 }] },
     (m, r) => (m === 'sonnet' && r === 'builder' ? '- Run the typecheck.\n- Read CONTRACTS.md.\n' : ''));
   assert.equal(s.reviewed, 3);
   assert.equal(s.invalid, 1);
