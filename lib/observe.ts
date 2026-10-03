@@ -8,8 +8,9 @@
 // from that. The observer itself never changes code: every code change goes through the factory's own checks.
 import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
-import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, withSupervisor, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
+import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, withSupervisor, withCheckoutLock, errCode, errMsg, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
 import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import { SLUG } from './ready.ts';
@@ -446,11 +447,41 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
 // `agent`: the curator's resolved model/effort (the observer agent config, or the active profile's `curator` entry).
 async function curateLessons(root: string, config: Config, agent: RoleConfig, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>): Promise<void> {
   const file = resolve(root, config.lessonsFile);
-  const text = existsSync(file) ? readFileSync(file, 'utf8') : '', sec = lessonSection(text);
-  if (!sec || Buffer.byteLength(sec.body) <= cfg.lessonsMaxBytes) return;
   if (state.lessonsAt && Date.now() - Date.parse(state.lessonsAt) < cfg.curateEveryHours * 3600e3) return;
-  const tracked = git(['ls-files', '--error-unmatch', '--', file], root).code === 0;
-  if (tracked && (git(['symbolic-ref', '--quiet', '--short', 'HEAD'], root).out !== config.base || git(['status', '--porcelain', '--', file], root).out)) return;
+  const refuse = (why: string) => { log(root, null, 'observer-lessons', `not curated: ${why}`); out(`observer: lessons not curated: ${why}`); };
+  // A slow main-checkout hook may outlast the lock's bounded wait. Defer curation
+  // without disrupting the observer or touching the lessons/archive/index.
+  const checkout = async <R>(fn: () => R): Promise<R | undefined> => {
+    try { return await withCheckoutLock(root, fn); } catch (e) {
+      if (!errMsg(e).startsWith(`timed out waiting for lock ${join(paths(root).dir, '.checkout-lock')} `)) throw e;
+      refuse('checkout is busy; retry on a later curation pass'); return undefined;
+    }
+  };
+  const safety = (): { tracked: boolean } | { error: string } => {
+    const branch = git(['symbolic-ref', '--quiet', '--short', 'HEAD'], root);
+    if (branch.code !== 0 || branch.out !== config.base) return { error: 'checkout branch changed or is not on base' };
+    for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']) {
+      const path = git(['rev-parse', '--git-path', marker], root);
+      if (path.code !== 0 || existsSync(resolve(root, path.out))) return { error: 'checkout has a Git operation in progress' };
+    }
+    const listed = git(['ls-files', '--error-unmatch', '--', file], root);
+    if (listed.code !== 0 && listed.code !== 1) return { error: 'cannot determine lessons tracking status' };
+    const tracked = listed.code === 0;
+    if (tracked) {
+      const status = git(['status', '--porcelain', '--', file], root);
+      if (status.code !== 0 || status.out) return { error: 'tracked lessons file is not clean' };
+    }
+    return { tracked };
+  };
+  const logStat = () => { try { return statSync(paths(root).log); } catch (e) { if (errCode(e) === 'ENOENT') return null; throw e; } };
+  const snapshot = await checkout(() => {
+    const text = existsSync(file) ? readFileSync(file, 'utf8') : '', sec = lessonSection(text);
+    if (!sec || Buffer.byteLength(sec.body) <= cfg.lessonsMaxBytes) return null;
+    const safe = safety(); if ('error' in safe) { refuse(safe.error); return null; }
+    return { text, sec, tracked: safe.tracked, log: logStat() };
+  });
+  if (!snapshot) return;
+  const { sec, tracked } = snapshot;
   state.lessonsAt = now();
   const since = Date.now() - 7 * DAY, recent = state.diagnoses.filter((d) => Date.parse(d.ts) >= since);
   const causes = Object.entries(recent.reduce<Record<string, number>>((m, d) => ((m[d.cause] = (m[d.cause] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
@@ -471,17 +502,41 @@ async function curateLessons(root: string, config: Config, agent: RoleConfig, cf
   const p = parseClaudeOutput(r.out), c = p.ok ? parseCurated(p.text, cfg.lessonsMaxBytes) : { error: `agent failed: ${p.error}` };
   if ('error' in c) { log(root, null, 'observer-lessons', `not curated: ${c.error}`); out(`observer: lessons not curated: ${c.error}`); return; }
 
-  // Lessons the foreman appended while the agent worked are kept after the curated ones.
-  const nowText = readFileSync(file, 'utf8'), cur = lessonSection(nowText) ?? sec, had = new Set(bulletsOf(sec.body));
-  const added = bulletsOf(cur.body).filter((b) => !had.has(b));
-  const archive = file.replace(/(\.md)?$/, '.archive.md');
-  appendFileSync(archive, `${existsSync(archive) ? '\n' : ''}## Archived ${now().slice(0, 10)} (${bulletsOf(sec.body).length} lessons)\n\n${sec.body.trim()}\n`);
-  writeFileSync(file, [cur.before ? cur.before.replace(/\n*$/, '\n\n') : '', `${cur.heading}\n\n`, `<!-- Curated ${now().slice(0, 10)} by the ${NAME} observer; the full history is in ${archive.split('/').pop()}. -->\n\n`,
-    c.body, added.length ? `\n\n${added.join('\n')}` : '', '\n', cur.after ? `\n${cur.after.replace(/^\n*/, '')}` : ''].join(''));
-  if (tracked) { git(['add', '--', file], root); git(['commit', '-q', '-m', `${NAME}: curate lessons`, '--', file], root); }
-  const size = Buffer.byteLength(lessonSection(readFileSync(file, 'utf8'))!.body);
-  log(root, null, 'observer-lessons', `curated ${bulletsOf(sec.body).length} lessons into ${bulletsOf(c.body).length} (${size} bytes); $${p.cost.toFixed(2)}`);
-  out(`observer: curated lessons: ${bulletsOf(sec.body).length} → ${bulletsOf(c.body).length + added.length}, ${size} bytes`);
+  await checkout(() => {
+    const safe = safety(); if ('error' in safe) { refuse(safe.error); return; }
+    if (safe.tracked !== tracked || !existsSync(file)) { refuse('lessons tracking status or file changed'); return; }
+    const nowText = readFileSync(file, 'utf8'), cur = lessonSection(nowText);
+    if (!cur) { refuse('lessons section changed or was removed'); return; }
+    if (nowText !== snapshot.text) {
+      const currentLog = logStat();
+      if (snapshot.log && (!currentLog || currentLog.dev !== snapshot.log.dev || currentLog.ino !== snapshot.log.ino || currentLog.size < snapshot.log.size)) {
+        refuse('lesson append log changed or was truncated'); return;
+      }
+      const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+      let expected = hash(snapshot.text);
+      for (const e of readNew(paths(root).log, snapshot.log?.size ?? 0).events) {
+        const proof = e.lessonAppend;
+        if (e.event !== 'lesson' || !e.feature || !proof || proof.file !== file) continue;
+        if (!/^[a-f0-9]{64}$/.test(proof.before) || !/^[a-f0-9]{64}$/.test(proof.after) || proof.before !== expected) {
+          refuse('lessons changed outside recognized foreman appends'); return;
+        }
+        expected = proof.after;
+      }
+      if (expected !== hash(nowText)) { refuse('lessons changed outside recognized foreman appends'); return; }
+    }
+    // Full-file provenance is established before computing the appended bullets.
+    const had = new Set(bulletsOf(sec.body)), added = bulletsOf(cur.body).filter((b) => !had.has(b));
+    const archive = file.replace(/(\.md)?$/, '.archive.md');
+    appendFileSync(archive, `${existsSync(archive) ? '\n' : ''}## Archived ${now().slice(0, 10)} (${bulletsOf(sec.body).length} lessons)\n\n${sec.body.trim()}\n`);
+    writeFileSync(file, [cur.before ? cur.before.replace(/\n*$/, '\n\n') : '', `${cur.heading}\n\n`, `<!-- Curated ${now().slice(0, 10)} by the ${NAME} observer; the full history is in ${archive.split('/').pop()}. -->\n\n`,
+      c.body, added.length ? `\n\n${added.join('\n')}` : '', '\n', cur.after ? `\n${cur.after.replace(/^\n*/, '')}` : ''].join(''));
+    const commit = tracked ? git(['commit', '-q', '-m', `${NAME}: curate lessons`, '--', file], root) : null;
+    const size = Buffer.byteLength(lessonSection(readFileSync(file, 'utf8'))!.body);
+    log(root, null, 'observer-lessons', `curated ${bulletsOf(sec.body).length} lessons into ${bulletsOf(c.body).length} (${size} bytes); $${p.cost.toFixed(2)}` +
+      (commit && commit.code !== 0 ? `; commit failed: ${commit.err}` : ''));
+    out(`observer: curated lessons: ${bulletsOf(sec.body).length} → ${bulletsOf(c.body).length + added.length}, ${size} bytes` +
+      (commit && commit.code !== 0 ? `; commit failed: ${commit.err}` : ''));
+  });
 }
 
 // ---- the improver ----

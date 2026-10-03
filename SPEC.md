@@ -93,6 +93,9 @@ HumanTask { id, title, steps: string[], unblocks: string[] /* feature ids */,
             waitingOn?: string /* who the person waits on; status stays open */, waitingSince?: ISO string }
 ```
 `.fact-os/log.jsonl` — one JSON line per event (`{ts, feature, event, detail}`).
+Foreman `lesson` events also carry `lessonAppend: {file, before, after}`: the absolute
+lessons path and SHA-256 hashes of its whole text before/after the append. The detail
+remains the lesson text; old events remain readable but cannot prove a concurrent append.
 `.fact-os/activity.jsonl` — hook events (`{ts, session, feature, tool, summary}`), capped to last 2000 lines.
 `.fact-os/runs/<feature>/<tag>-{build,eval,resolve}.json` — raw `claude -p --output-format json` results (tag: see Observer 7).
 `.fact-os/prompt-notes/<model>-<role>.md` (+ `.archive.md`) — per-model prompt notes (see Observer 8), git-ignored by `init`.
@@ -105,6 +108,11 @@ installed signal listeners are removed on failed startup. Existing plain-PID mar
 are supported; dead PIDs and empty old markers recover, invalid PID text fails closed.
 Temporary `.foreman.*.tmp` / `.observer.*.tmp` files are ignored by `init`; crashes
 before publication may leave harmless artifacts. PID reuse can delay recovery.
+`.fact-os/.checkout-lock/` — the same populated-directory ownership protocol as the
+state lock, on a separate path. Foreman serialized operations (including merge hooks
+and post-merge commands) and observer curation snapshot/apply acquire it. They may
+mutate state under it; never acquire checkout ownership from inside a state mutation.
+`init` ignores `.checkout-lock` and `.checkout-lock.*` staging directories.
 `.fact-os/control.json` — a person's runtime limits on new launches (CLI `pause-all`/`resume-all`/`lanes`/`profile`, or the dashboard):
 ```
 Control { paused: boolean, maxParallel: number|null /* integer 0–32; null = config.maxParallel */,
@@ -483,10 +491,20 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    `lessonsFile` grows past `lessonsMaxBytes` (12000), `claude -p` rewrites it into at most that many bytes of bullets
    under 3–8 `### topic` headings, favoring lessons that prevent the recent failure causes. The answer must sit between
    `<lessons>` tags, hold at least 5 bullets, only bullets and topics, and stay within 1.25× the limit; otherwise the
-   file is left alone (`observer-lessons` "not curated"). On success the old section is appended to
-   `<lessonsFile>.archive.md`, the section is replaced (with a note pointing at the archive), lessons the foreman
-   appended meanwhile are kept after it, and a tracked file is committed on base (`fact-os: curate lessons`; skipped
-   when the checkout is not on base or the file has uncommitted changes).
+   file is left alone (`observer-lessons` "not curated"). Snapshot and apply share the checkout lock with foreman
+   operations; the lock is released during the curator call. Both phases require the checkout on base, no pending
+   merge/cherry-pick/revert/rebase, and clean tracked lessons. Apply also requires unchanged tracking and exact
+   whole-file content, or a continuous chain of subsequent foreman `lessonAppend` hashes ending at the current file.
+   Unproved content changes, user edits/appends, removed files/sections and replaced/truncated logs needed to prove appends refuse before
+   writing lessons, archive or index. On success the old section is appended to `<lessonsFile>.archive.md`, the
+   section is replaced (with a note pointing at the archive), and proved foreman appends are kept after it. A tracked
+   file is committed on base (`fact-os: curate lessons`, that path only); unrelated staged work stays staged, and
+   untracked lessons stay uncommitted. Commit failures are explicitly logged; the local rewrite/archive remain.
+   A 30-second checkout-lock timeout safely
+   defers curation; a snapshot timeout consumes no throttle, while an apply timeout follows an attempted call.
+   Proofs assume an append-only local log and cooperating updated foreman/observer processes; upgrade them together.
+   External editors/Git commands that ignore the lock can still race the final critical section. These guards
+   validate checkout consistency, not the semantic quality of the agent's rules.
 7. **Measures the agents** over the last 7 days, per prompt version (a version starts at a lessons curation or when the
    builder's model, effort, briefs or profile change: each `launch` is keyed by its own pass's builder `prompt`, the first one
    of that feature after the launch, so a pass still in prepare at a switch stays in its own version; versions change in

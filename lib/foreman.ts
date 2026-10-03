@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, load, loadConfig, mutate, log, withSupervisor, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
+import { paths, load, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole } from './profiles.ts';
@@ -350,7 +350,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   // control.json: the control applied last tick (null before the first read), the last valid one read, the invalid content
   // last reported, and the ready features last logged as held by its limit.
   let lastControl: Control | null = null, lastGood: Control | null = null, lastBad: string | null = null, lastHeld = '';
-  const serial = <R>(fn: () => R | Promise<R>): Promise<R> => { const p = chain.then(fn); chain = p.catch(() => {}); return p; }; // main-checkout git ops
+  const serial = <R>(fn: () => R | Promise<R>): Promise<R> => { const p = chain.then(() => withCheckoutLock(root, fn)); chain = p.catch(() => {}); return p; }; // shared main-checkout git ops
   const onSignal = () => {
     if (stopping) { out('forced exit'); for (const c of children) killGroup(c, 'SIGKILL'); process.exit(130); }
     stopping = true;
@@ -631,9 +631,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
 
   function compound(id: string, lesson: string): void {
     const file = resolve(root, config.lessonsFile);
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+    const before = hash(readIf(file) ?? '');
     const wasClean = git(['status', '--porcelain', '--', file], root).out === '';
     if (!appendLesson(file, lesson)) return;
-    log(root, id, 'lesson', lesson);
+    log(root, id, 'lesson', lesson, { file, before, after: hash(readFileSync(file, 'utf8')) });
     if (wasClean && git(['symbolic-ref', '--quiet', '--short', 'HEAD'], root).out === config.base && !tampered()) {
       git(['add', '--', file], root);
       git(['commit', '-q', '-m', `${NAME}: lesson from ${id}`, '--', file], root);

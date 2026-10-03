@@ -81,6 +81,11 @@ export async function withLock<R>(root: string, fn: () => R | Promise<R>, { time
   return withDirectoryLock(paths(root).lock, fn, { timeoutMs, beforeTakeover });
 }
 
+// Checkout operations may call mutate(), so they must not own the state lock.
+export function withCheckoutLock<R>(root: string, fn: () => R | Promise<R>, options: LockOptions = {}): Promise<R> {
+  return withDirectoryLock(join(paths(root).dir, '.checkout-lock'), fn, options);
+}
+
 async function withDirectoryLock<R>(lock: string, fn: () => R | Promise<R>, { timeoutMs = 30000, beforeTakeover }: LockOptions): Promise<R> {
   const start = Date.now(), owner = `owner-${process.pid}-${randomUUID()}`;
   const staging = mkdtempSync(`${lock}.`);
@@ -238,8 +243,8 @@ export async function writeControl(root: string, patch: Partial<Pick<Control, 'p
 export const effectiveLimit = (c: Pick<Control, 'paused' | 'maxParallel'>, config: Pick<Config, 'maxParallel'>): number =>
   c.paused ? 0 : c.maxParallel ?? Math.max(1, config.maxParallel);
 
-export function log(root: string, feature: string | null, event: string, detail = ''): void {
-  const e: LogEvent = { ts: new Date().toISOString(), feature, event, detail };
+export function log(root: string, feature: string | null, event: string, detail = '', lessonAppend?: LogEvent['lessonAppend']): void {
+  const e: LogEvent = { ts: new Date().toISOString(), feature, event, detail, ...(lessonAppend ? { lessonAppend } : {}) };
   appendFileSync(paths(root).log, JSON.stringify(e) + '\n');
 }
 

@@ -151,6 +151,12 @@ generated paths by name only).
   `claude` gets `--settings` deny rules (see Threat model).
 - Lessons are committed on `base` (only that file) when the main checkout is on `base` and the lessons
   file had no local edits; otherwise they are appended uncommitted.
+  Observer curation shares a checkout lock with foreman operations, released while its agent runs.
+  Before applying, it rechecks base, Git operation state, tracking and file cleanliness; intervening
+  content changes are accepted only through foreman's whole-file append hashes. Other changes leave
+  lessons, archive and index untouched. Recognized appends survive; unrelated staged files stay staged.
+  A busy checkout defers curation after 30 seconds; failed commits are reported with the local rewrite
+  and archive retained. Upgrade foreman and observer together; arbitrary editors do not honor this lock.
 - State files are written atomically (temp + rename) under a populated `.lock/`
   directory, published atomically with a unique PID/owner marker. Recovery and
   release remove only that owner's marker; they cannot remove a successor's lock.

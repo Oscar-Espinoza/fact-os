@@ -58,7 +58,7 @@ function init(test: string | undefined): void {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/'].map((f) => `${paths(root).name}/${f}`)
+  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');

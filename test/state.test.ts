@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { withLock, mutate, writeJsonAtomic, paths, DEFAULT_CONFIG, envVar } from '../lib/state.ts';
+import { withLock, withCheckoutLock, mutate, writeJsonAtomic, paths, DEFAULT_CONFIG, envVar } from '../lib/state.ts';
 import type { HumanTask } from '../lib/types.ts';
 
 const STATE = new URL('../lib/state.ts', import.meta.url).href;
@@ -18,6 +18,17 @@ const seedOwner = (lock: string, pid: number) => {
   return token;
 };
 const assertNoStaging = (root: string) => assert.deepEqual(readdirSync(paths(root).dir).filter((f) => f.startsWith('.lock.')), []);
+
+test('checkout ownership excludes other checkout writers while allowing state mutations', async (t) => {
+  const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  await withCheckoutLock(root, async () => {
+    await mutate(root, 'human', (d) => { d.tasks.push({ id: 'h', title: 'x', steps: [], unblocks: [], mockable: false, status: 'open' }); });
+    await assert.rejects(withCheckoutLock(root, () => assert.fail('overlapping checkout callback'), { timeoutMs: 10 }), /timed out/);
+  });
+  await withCheckoutLock(root, () => {});
+  assert.equal(existsSync(join(paths(root).dir, '.checkout-lock')), false);
+  assert.deepEqual(readdirSync(paths(root).dir).filter((f) => f.startsWith('.checkout-lock.')), []);
+});
 
 test('three participants cannot enter while the live successor holds the stale lock', (t) => {
   const root = tmp(); t.after(() => rmSync(root, { recursive: true, force: true }));

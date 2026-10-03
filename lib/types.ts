@@ -143,7 +143,11 @@ export interface Finding { check: string; ok: boolean; evidence: string }
 export interface Verdict { pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string }
 
 // log.jsonl
-export interface LogEvent { ts: string; feature: string | null; event: string; detail: string }
+export interface LogEvent {
+  ts: string; feature: string | null; event: string; detail: string;
+  // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
+  lessonAppend?: { file: string; before: string; after: string };
+}
 // activity.jsonl
 export interface ActivityEvent { ts: string; session: string | null; feature: string | null; tool: string; summary: string }
 
