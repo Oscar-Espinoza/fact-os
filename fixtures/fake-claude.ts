@@ -13,7 +13,10 @@ import type { FeaturesFile, Verdict } from '../lib/types.ts';
 const prompt = readFileSync(0, 'utf8');
 const id = (process.env.FACTOS_FEATURE ?? /^Feature: (\S+?):/m.exec(prompt)?.[1]) as string;
 const log = process.env.FAKE_LOG as string;
-const mode = prompt.startsWith('You are the builder') ? 'build' : prompt.startsWith('You are the merge resolver') ? 'resolve' : prompt.startsWith('You review one failed pass') ? 'review' : 'eval';
+const argv = process.argv.slice(2);
+// fix: a resumed builder session (--resume) fixing a failed test gate; diagnose: the read-only gate-failure diagnosis
+const mode = argv.includes('--resume') ? 'fix' : prompt.startsWith('You diagnose a failed test gate') ? 'diagnose'
+  : prompt.startsWith('You are the builder') ? 'build' : prompt.startsWith('You are the merge resolver') ? 'resolve' : prompt.startsWith('You review one failed pass') ? 'review' : 'eval';
 const flags = ((JSON.parse(process.env.FAKE_SCENARIO || '{}') as Record<string, string>)[id] || '').split(',');
 const has = (f: string) => flags.includes(mode === 'build' ? f : `${mode}:${f}`);
 const git = (...a: string[]) => execFileSync('git', a, { encoding: 'utf8' }).trim();
@@ -73,6 +76,9 @@ if (mode === 'resolve') {
       git('config', 'diff.external', 'true');
     }
     commit(`${id}.txt`, `built ${id} at ${Date.now()}\n`);
+    if (has('break')) commit('broken.txt', 'the guard tests\' gate fails while this exists\n');
+    if (has('skip-test')) commit('a.test.ts', "it.skip('works', () => {});\n"); // weakens the test that exists on base
+    if (has('new-test')) commit(`${id}-new.test.ts`, "it('is new', () => { expect(2).toBe(2); });\n");
     if (has('dirty')) writeFileSync('leftover.txt', 'not committed\n');
     if (has('move-base')) { git('update-ref', 'refs/heads/main', 'HEAD'); commit(`${id}-2.txt`, 'more\n'); } // base gets its unevaluated commit
     if (has('synthetic-base')) { // a commit built from the branch's tree, put on base without a feature-branch parent
@@ -90,6 +96,17 @@ if (mode === 'resolve') {
         git('-C', root(), 'add', f); git('-C', root(), 'commit', '-qm', `the user's ${f} on main`);
       }
   }
+} else if (mode === 'fix') {
+  // default: delete broken.txt (what makes the guard tests' gate fail) and commit; "noop": change nothing;
+  // "noop1": change nothing on this feature's first fix only
+  const fixes = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'fix' && e.id === id; }).length : 0;
+  if (!has('noop') && !(has('noop1') && fixes === 0) && existsSync('broken.txt')) { git('rm', '-q', 'broken.txt'); git('commit', '-qm', `fix ${id}: remove broken.txt`); }
+} else if (mode === 'diagnose') {
+  // answers with the next scripted diagnosis from $FAKE_DIAGNOSES, default a code fault; "edit": also commits a file (it must not)
+  if (has('edit')) commit('diagnoser.txt', 'edited by the diagnosis\n');
+  const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'diagnose' && e.id === id; }).length : 0;
+  const scripted = process.env.FAKE_DIAGNOSES ? (JSON.parse(readFileSync(process.env.FAKE_DIAGNOSES, 'utf8')) as Record<string, unknown[]>)[id]?.[past] : undefined;
+  result = 'Diagnosis:\n```json\n' + JSON.stringify(scripted ?? { fault: 'code', evidence: 'broken.txt makes the gate fail', fix: 'delete broken.txt and commit' }) + '\n```';
 } else if (mode === 'review') {
   const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'review' && e.id === id; }).length : 0;
   const scripted = process.env.FAKE_REVIEWS ? (JSON.parse(readFileSync(process.env.FAKE_REVIEWS, 'utf8')) as Record<string, unknown[]>)[id]?.[past] : undefined;

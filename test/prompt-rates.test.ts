@@ -165,3 +165,17 @@ test('R12: observer rebuilds legacy rates and report API and served UI agree on 
   assert.match(report, /final prompt/);
   assert.doesNotMatch(markup, /99 of|100 passes|Rates will update/);
 });
+
+test('I01: a resumed gate fix stays in its pass; the final builder prompt gets the credit or the blame', () => {
+  const fixed = (feature: string, end: LogEvent[]) => [ev(0, feature, 'launch'), ev(1, feature, 'prompt', fingerprint('builder', 'sol', 'n1')),
+    ev(2, feature, 'testing', 's1'), ev(3, feature, 'gate-fix', 'resuming the builder after a test-gate failure'),
+    ev(4, feature, 'prompt', fingerprint('builder', 'sol', 'n2')), ev(5, feature, 'test-edits', 'in the fix: a.test.ts: removes 1 line'),
+    ev(6, feature, 'testing', 's2'), ...end];
+  const passes = classified([...fixed('a', [ev(7, 'a', 'evaluating'), ev(8, 'a', 'prompt', fingerprint('evaluator')), ev(9, 'a', 'merged')]),
+    ...fixed('b', [ev(10, 'b', 'diagnosis', 'code: broken'), ev(11, 'b', 'failed', 'test command `gate` exited 1:\nboom')])]);
+  assert.equal(passes.length, 2, 'one pass per launch');
+  assert.deepEqual(promptRates(passes).map(({ role, notes, ok, bad }) => ({ role, notes, ok, bad })), [
+    { role: 'builder', notes: 'n2', ok: 1, bad: 1 },
+    { role: 'evaluator', notes: 'n1', ok: 1, bad: 0 },
+  ]);
+});

@@ -11,7 +11,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 |---|---|---|
 | — | done (522aa4c) | Prompt notes cut mid-sentence at 400 characters; both ecommerce notes restored |
 | — | queued in ecommerce | `F99-43-gate-direct-builder-check`: a fast `pnpm gate --direct` builders run after each step |
-| I01 | open | B: report edits to existing tests. C: one inline fix after a gate failure, then a diagnosis |
+| I01 | done | B: report edits to existing tests. C: one inline fix after a gate failure, then a diagnosis |
 | — | deferred | Codex reviewer: WIP branch deleted 2026-10-03 (commit 94603fe); rescope on current `main` later |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -95,7 +95,8 @@ builder fingerprint; R12 credits the final builder prompt of the pass, which is 
 
 ### Defaults taken (change before implementation if needed)
 
-- `gateFixes: 1`, `diagnoser: null` in the defaults; the ecommerce config sets
+- Implemented with `gateFixes: 0` and `diagnoser: null` as the defaults, so existing projects keep today's
+  behaviour until their config turns it on; the ecommerce config is to set `gateFixes: 1` and
   `diagnoser: {model: "opus", effort: "high"}`. Codex can become the diagnoser once a provider exists.
 - Worst case per pass becomes three gate runs. F99-43's direct check is meant to make the first
   failure rarer; measure the gate-failure rate before and after both land.

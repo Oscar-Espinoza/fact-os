@@ -25,7 +25,8 @@ export function parseClaudeOutput(stdout: string): ClaudeResult {
   const cost = Number(j?.total_cost_usd ?? j?.cost_usd ?? 0) || 0;
   const text = j?.structured_output !== undefined ? JSON.stringify(j.structured_output) : String(j?.result ?? '');
   if (j?.subtype === 'error_max_budget_usd') return { ok: false, text, cost, error: 'budget exhausted (--max-budget-usd)' };
-  return j?.is_error ? { ok: false, text, cost, error: (text || j.subtype || 'claude reported an error') as string } : { ok: true, text, cost };
+  const sessionId = typeof j?.session_id === 'string' && j.session_id ? { sessionId: j.session_id } : {};
+  return j?.is_error ? { ok: false, text, cost, error: (text || j.subtype || 'claude reported an error') as string, ...sessionId } : { ok: true, text, cost, ...sessionId };
 }
 
 const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { return undefined; } };
@@ -177,7 +178,7 @@ export function promptFingerprint(role: Role, r: { model?: string; effort?: stri
 
 // The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
 // `testing <sha>` of the same pass), or null. The next pass can skip the builder if the branch is still exactly there.
-const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked'];
+const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked', 'gate-fix'];
 export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'detail'>[], id: string): string | null {
   let sha: string | null = null, last = '', before: { sha: string | null; last: string } | null = null;
   for (const e of events) {
@@ -247,7 +248,7 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
 
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 
-export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = ''): string {
+export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = []): string {
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
     'You did not write this code. Judge it skeptically. You may read files and run commands; do not modify or commit anything in this',
     'worktree (for a mutation check, use a scratch copy: git worktree add /tmp/<name> HEAD, and remove it afterwards).',
@@ -273,7 +274,67 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null}. One finding per acceptance check, plus one ' +
     '"production wiring" finding; "pass" only if every finding is ok and cheating and blocking are empty. Evidence names files, ' +
     'lines, the tests you ran and what the mutation check showed.',
+    edits.length ? `\nExisting tests this branch changes (tests that already exist on ${config.base}). Justify each change from the acceptance ` +
+      `checks or the diff, or reject the feature and list it under "cheating":\n${edits.map((e) => `- ${e}`).join('\n')}\n` : '',
     briefs(root, config), notes].join('\n');
+}
+
+// Edits between two commits to test files that exist at `from` (TEST_FILE): deleted files, removed lines, and added
+// skip/only/todo/fails markers. New test files are not edits. Evidence for the evaluator and the diagnosis, never a block by itself.
+export function testEdits(cwd: string, from: string, to: string): string[] {
+  const out: string[] = [];
+  for (const row of git(['diff', '--name-status', '--no-renames', from, to], cwd).out.split('\n').filter(Boolean)) {
+    const [st, path] = row.split('\t');
+    if (!path || !TEST_FILE.test(path) || st === 'A') continue;
+    if (st === 'D') { out.push(`${path}: deletes the file`); continue; }
+    const lines = git(['diff', '--unified=0', '--no-ext-diff', '--no-textconv', from, to, '--', path], cwd).out.split('\n');
+    const added = lines.filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    for (const m of new Set(added.flatMap((l) => l.match(/\.(?:skip|only|todo|fails)\b|\bx(?:it|describe|test)\b/g) ?? []))) out.push(`${path}: adds \`${m}\``);
+    const removed = lines.filter((l) => l.startsWith('-') && !l.startsWith('---') && l.slice(1).trim()).length;
+    if (removed) out.push(`${path}: removes ${removed} line${removed === 1 ? '' : 's'}`);
+  }
+  return out.slice(0, 30);
+}
+
+export interface Diagnosis { fault: 'code' | 'test' | 'environment'; evidence: string; fix: string }
+// The diagnoser's answer: a JSON object (bare, fenced or inside prose) with fault, evidence and fix.
+export function parseDiagnosis(text: unknown): Diagnosis | { error: string } {
+  const s = String(text ?? '');
+  const raw = [s, s.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1], s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]
+    .map((x) => (x === undefined ? undefined : tryJson(x))).find((x) => x !== undefined);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'the diagnosis is not a JSON object' };
+  const v = raw as Record<string, unknown>;
+  if (v.fault !== 'code' && v.fault !== 'test' && v.fault !== 'environment') return { error: 'diagnosis.fault must be "code", "test" or "environment"' };
+  for (const k of ['evidence', 'fix'] as const) if (typeof v[k] !== 'string' || !v[k].trim()) return { error: `diagnosis.${k} must be a nonempty string` };
+  return { fault: v.fault, evidence: (v.evidence as string).trim().slice(0, 2000), fix: (v.fix as string).trim().slice(0, 2000) };
+}
+
+// Sent to the builder's own resumed session after a test-gate failure (and, with a diagnosis, its brief).
+export function gateFixPrompt(config: Config, failure: string, d: Diagnosis | null, diagnoserModel?: string): string {
+  return [`The test gate \`${config.test}\` failed on the work you just committed. Fix it in this same worktree and branch.`, '',
+    'The gate\'s output:', '```', failure, '```', '',
+    'Fix the code, not the tests. Change an existing test only when the test itself is wrong, and then name that test and say why in the ' +
+    'commit message: an independent evaluator sees every edit to an existing test. Never skip, delete or weaken a test to make the gate pass. ' +
+    'Run the failing tests before you finish, commit all your work and leave the worktree clean. Only the foreman merges.',
+    d ? `\nA read-only diagnosis of this failure${diagnoserModel ? ` (${diagnoserModel})` : ''} found a ${d.fault} fault.\nEvidence: ${d.evidence}\nFix: ${d.fix}\n` +
+      (d.fault === 'test' ? 'Change only the test it names, as it describes, and keep everything that test checks that is still right.' : 'Change the code; leave the tests as they are.') : '',
+  ].join('\n');
+}
+
+// The read-only diagnosis of a gate failure that a resumed fix did not cure (config.diagnoser, run in plan mode).
+export function diagnosisPrompt(config: Config, f: Feature, branch: string, failure: string, diffStat: string, edits: string[]): string {
+  return [`You diagnose a failed test gate for feature "${f.id}": ${f.title}`,
+    `Branch ${branch}, in this worktree; the builder already tried to fix this failure once. Do not edit, create or delete files and do not ` +
+    'commit: read the code and run only read-only commands (for example a single failing test file).', '',
+    'Acceptance checks:', ...(f.acceptance || []).map((a) => `- ${a}`), '',
+    `The gate \`${config.test}\` output:`, '```', failure, '```', '',
+    `What the branch changes (git diff --stat against ${config.base}):`, '```', diffStat || '(nothing)', '```',
+    edits.length ? `\nEdits to tests that already exist on ${config.base}:\n${edits.map((e) => `- ${e}`).join('\n')}` : '', '',
+    'Decide where the fault is: "code" (the feature\'s code is wrong), "test" (a test is wrong about the intended behaviour; name it and say ' +
+    'what it should check instead) or "environment" (the database, services, setup or a flaky test outside this change).',
+    'Answer with ONLY a JSON object: {"fault": "code" | "test" | "environment", "evidence": string, "fix": string}. "evidence" quotes the ' +
+    'failing output and the code that shows the cause; "fix" is the specific change the builder should make.',
+  ].join('\n');
 }
 
 function resolverPrompt(root: string, config: Config, f: Feature, branch: string, brief: string, notes = ''): string {
@@ -461,8 +522,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const fail = failer(id);
     const stopped = async () => { if (!stopping) return false; await set(id, { status: 'todo', pendingLesson: undefined }); log(root, id, 'interrupted'); return true; };
     const roleCfg = (role: Role) => resolveRole(config, profile, role, { feature: f });
-    const claude = async (role: Role, prompt: string, file: string): Promise<ClaudeResult> => {
-      const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, roleCfg(role), root),
+    const claude = async (role: Role, prompt: string, file: string, opts: { extra?: string[]; cfg?: RoleConfig } = {}): Promise<ClaudeResult> => {
+      const r = await exec(envVar('CLAUDE') || 'claude', [...claudeArgs(config, opts.cfg ?? roleCfg(role), root), ...(opts.extra ?? [])],
         { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin, onSpawn });
       writeFileSync(join(runDir, file), tryJson(r.out) ? r.out : JSON.stringify({ exitCode: r.code, stdout: r.out, stderr: tail(r.err) }));
       const p = parseClaudeOutput(r.out);
@@ -583,28 +644,87 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (skipBuild) log(root, id, 'build-skipped', reevaluate
       ? `revalidating the previously evaluated ${built!.slice(0, 12)} against current base`
       : `the foreman stopped after it built ${built!.slice(0, 12)}`);
-    else {
+    // The builder's Claude session in this pass: a test-gate failure resumes it (config.gateFixes), so the fix keeps its context.
+    // A skipped build has no session, so its gate failure stays an ordinary failure.
+    let builderSession: string | null = null, builderNotes: string | null = null;
+    if (!skipBuild) {
     const bn = notesFor('builder');
     const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn));
     recordPrompt('builder', bp, bn);
     const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
     if (!b.ok) return fail(`builder failed: ${b.error}`);
+    builderSession = b.sessionId ?? null; builderNotes = bn;
     }
     if (prepareDeferred && !await prepare()) return;
     // Any commit beyond base counts as the builder's, including the merge commit that completes a base refresh.
-    const status = git(['status', '--porcelain'], wt).out.split('\n').filter(Boolean);
-    const listed = status.slice(0, 40).join('\n') + (status.length > 40 ? `\n… ${status.length - 40} more` : '');
-    const merging = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 ? `the merge of ${config.base} the foreman started is not committed; ` : '';
-    if (merging || status.length || git(['rev-list', '--count', `${config.base}..${branch}`], wt).out === '0')
-      return fail(`commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`);
-    if (required.some((sha) => git(['merge-base', '--is-ancestor', sha, branch], wt).code !== 0))
-      return fail('commit your work: the branch no longer contains its declared merged dependencies');
+    const commitProblem = (): string | null => {
+      const status = git(['status', '--porcelain'], wt).out.split('\n').filter(Boolean);
+      const listed = status.slice(0, 40).join('\n') + (status.length > 40 ? `\n… ${status.length - 40} more` : '');
+      const merging = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 ? `the merge of ${config.base} the foreman started is not committed; ` : '';
+      if (merging || status.length || git(['rev-list', '--count', `${config.base}..${branch}`], wt).out === '0')
+        return `commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`;
+      if (required.some((sha) => git(['merge-base', '--is-ancestor', sha, branch], wt).code !== 0))
+        return 'commit your work: the branch no longer contains its declared merged dependencies';
+      return null;
+    };
+    { const cp = commitProblem(); if (cp) return fail(cp); }
     // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
     const rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
     if (rc.lost) return fail(rc.lost);
     const inline = !!config.resolver;
     let resolved = rc.note; // after a resolution in this pass: what the evaluator must also check
+    // Gate-failure recovery, bounded per pass: config.gateFixes resumed fixes, then (config.diagnoser) one read-only diagnosis
+    // and one more fix with its brief. 'retry' re-runs the gate; 'fail' counts the failure; 'done' means stopped or already failed.
+    let fixesLeft = config.gateFixes, diagnosed = false, diagNote = '';
+    const resumeFix = async (failure: string, d: Diagnosis | null): Promise<'retry' | 'done'> => {
+      if (await stopped()) return 'done';
+      const before = git(['rev-parse', 'HEAD'], wt).out;
+      tag = runTag(readdirSync(runDir), attempt);
+      await set(id, { status: 'building' });
+      log(root, id, 'gate-fix', d ? `resuming the builder with a ${d.fault} diagnosis` : 'resuming the builder after a test-gate failure');
+      out(`fix ${id}: the test gate failed; resuming the builder${d ? ' with the diagnosis' : ''}`);
+      const fp = gateFixPrompt(config, failure, d, config.diagnoser?.model);
+      recordPrompt('builder', fp, builderNotes);
+      const r = await claude('builder', fp, `${tag}-build.json`, { extra: ['--resume', builderSession!] });
+      if (await stopped()) return 'done';
+      if (!r.ok) { await fail(`builder failed: ${r.error}`); return 'done'; }
+      if (r.sessionId) builderSession = r.sessionId;
+      const cp = commitProblem();
+      if (cp) { await fail(cp); return 'done'; }
+      const edits = testEdits(wt, before, 'HEAD');
+      if (edits.length) log(root, id, 'test-edits', `in the fix: ${edits.join('; ')}`);
+      return 'retry';
+    };
+    const diagnose = async (failure: string): Promise<Diagnosis | null | 'stopped'> => {
+      if (await stopped()) return 'stopped';
+      const head = git(['rev-parse', 'HEAD'], wt).out, dcfg = { ...config.diagnoser!, permissionMode: 'plan' };
+      const mb = git(['merge-base', config.base, head], wt).out;
+      const prompt = diagnosisPrompt(config, f, branch, failure, git(['diff', '--stat=160', `${mb}..${head}`], wt).out, testEdits(wt, mb, head));
+      writeFileSync(join(runDir, `${tag}-diagnose.prompt.md`), prompt);
+      const r = await claude('builder', prompt, `${tag}-diagnose.json`, { cfg: dcfg });
+      if (await stopped()) return 'stopped';
+      if (git(['rev-parse', 'HEAD'], wt).out !== head || git(['status', '--porcelain'], wt).out) { // read-only, or nothing
+        git(['reset', '-q', '--hard', head], wt); git(['clean', '-q', '-fd'], wt);
+        log(root, id, 'diagnosis', 'refused: the diagnosis changed the worktree; its edits were undone'); return null;
+      }
+      if (!r.ok) { log(root, id, 'diagnosis', `failed: ${r.error}`); return null; }
+      const d = parseDiagnosis(r.text);
+      if ('error' in d) { log(root, id, 'diagnosis', `invalid: ${d.error}`); return null; }
+      log(root, id, 'diagnosis', `${d.fault}: ${d.evidence.split('\n')[0]}`);
+      return d;
+    };
+    const afterGateFailure = async (failure: string): Promise<'retry' | 'fail' | 'done'> => {
+      if (!builderSession) return 'fail';
+      if (fixesLeft > 0) { fixesLeft--; return resumeFix(failure, null); }
+      if (!config.diagnoser || diagnosed) return 'fail';
+      diagnosed = true;
+      const d = await diagnose(failure);
+      if (d === 'stopped') return 'done';
+      if (!d) return 'fail';
+      diagNote = `\n\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}`;
+      return d.fault === 'environment' ? 'fail' : resumeFix(failure, d);
+    };
     for (;;) { // fresh validation after an inline resolution or a clean base advance
       if (await stopped()) return;
       // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
@@ -622,7 +742,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const t = await exec('sh', ['-c', `exec 2>&1\n${config.test}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
       if (await stopped()) return;
       const test = { code: t.code, tail: tail(t.out + t.err) + (t.timedOut ? `\n(timed out after ${config.timeoutMin} min)` : '') };
-      if (t.code !== 0) return fail(`test command \`${config.test}\` exited ${t.code}:\n${test.tail}`);
+      if (t.code !== 0) {
+        const failure = `test command \`${config.test}\` exited ${t.code}:\n${test.tail}`, next = await afterGateFailure(failure);
+        if (next === 'retry') continue;
+        if (next === 'done') return;
+        return fail(failure + diagNote);
+      }
 
       await set(id, { status: 'evaluating' });
       log(root, id, 'evaluating', '');
@@ -632,7 +757,9 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         ? d('--name-only', range, '--', ...config.evaluatorDiffExclude.map((p) => `:(glob)${p}`)).split('\n').filter(Boolean) : [];
       const diff = evaluatorDiff(d('--stat=160', range), names.map((p) => ({ path: p, diff: excluded.includes(p) ? '' : d(range, '--', p) })), excluded);
       const en = notesFor('evaluator');
-      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en));
+      const edits = testEdits(wt, git(['merge-base', config.base, sha], wt).out, sha);
+      if (edits.length) log(root, id, 'test-edits', edits.join('; '));
+      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits);
       recordPrompt('evaluator', ep, en);
       const e = await claude('evaluator', ep, `${tag}-eval.json`);
       if (await stopped()) return;

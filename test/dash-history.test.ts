@@ -301,3 +301,12 @@ test('served factory CSS dims disabled lanes without transparency, so the floor 
   const op = /(?:^|;)\s*opacity\s*:\s*([\d.]+)/.exec(rule![1]!);
   assert.ok(!op || Number(op[1]) >= 1, 'disabled slots must stay opaque');
 });
+
+test('I01: served history lists a resumed fix as a builder run of the same try and shows the gate diagnosis', async (t) => {
+  const s = await fixture(t, feature('todo', 0)), time = Date.now() - 10000;
+  s.put('1-build.json', 'built', time); s.put('1.2-build.json', 'fixed the gate', time + 1000);
+  s.put('1.2-diagnose.json', '{"fault":"code","evidence":"broken.txt","fix":"delete it"}', time + 500);
+  const h = await s.history();
+  assert.deepEqual(h.runs.map((r) => `${r.tag}-${r.role}-${r.n}`), ['1-build-1', '1.2-diagnose-1', '1.2-build-1']);
+  assert.match(h.runs[1]!.text, /"fault":"code"/);
+});

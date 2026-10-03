@@ -52,7 +52,7 @@ export interface Conflict {
 }
 export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
 export interface Run {
-  n: number; tag: string; role: 'build' | 'eval' | 'resolve'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
+  n: number; tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
   pass?: boolean; findings?: Finding[]; error?: string; text: string; summary: string;
 }
 export type OpenTask = HumanTask & { project: string; projectName: string; reach: number };
@@ -284,7 +284,7 @@ function featureRuns(dir: string, id: string): Run[] {
   let names: string[] = [];
   try { names = readdirSync(rd); } catch { return []; }
   for (const name of names) {
-    const m = /^(\d+(?:\.\d+)?)-(build|eval|resolve)\.json$/.exec(name);
+    const m = /^(\d+(?:\.\d+)?)-(build|eval|resolve|diagnose)\.json$/.exec(name);
     if (!m) continue;
     try {
       const file = join(rd, name), raw = readFileSync(file, 'utf8'), j = tryJson(raw) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; stdout?: unknown } | undefined;
@@ -303,7 +303,7 @@ function featureRuns(dir: string, id: string): Run[] {
       out.push(run);
     } catch {}
   }
-  const order = { build: 0, resolve: 1, eval: 2 };
+  const order = { build: 0, resolve: 1, diagnose: 2, eval: 3 };
   const passIndex = (r: Run) => Number(r.tag.split('.')[1] ?? 1);
   return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.n - b.n || passIndex(a) - passIndex(b) || order[a.role] - order[b.role]).slice(-20);
 }

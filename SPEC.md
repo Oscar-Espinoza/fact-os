@@ -307,7 +307,20 @@ Each tick:
    - **Resume.** If the feature's previous pass ended with `interrupted` after its `testing <sha>` event (the foreman was
      stopped once the build was done) and the branch is still exactly at that sha with a clean worktree and no merge in
      progress, the builder is skipped (`build-skipped` event) and the pass goes on to the refresh and the test.
-   - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++.
+   - **Test.** Run `config.test` in the worktree. Failure → feedback = tail of output, attempt++. Before that counts,
+     a pass whose builder ran (not a skipped build) can recover inside the pass, spending no attempt: while
+     `gateFixes` (default 0) allows, the foreman logs `gate-fix` and resumes the builder's Claude session
+     (`claude -p --resume <session_id>`) with the gate output and the rule to fix the code, not the tests; the fix is
+     recorded as one more builder run under a new run tag, the commit checks run again, and so does the gate. When the
+     fixes are spent and `diagnoser` is set, one read-only run (plan mode) answers `{fault: code|test|environment,
+     evidence, fix}` (`diagnosis` event; a run that changes the worktree is refused and its changes undone). `code` or
+     `test` → one more resumed fix with that brief; `environment`, an invalid answer or a further failure → the
+     ordinary counted failure, its feedback followed by the diagnosis. At most `gateFixes` + 1 fixes and one diagnosis
+     per pass. A `gate-fix` ends build reuse of the sha that failed (a stop during a fix rebuilds). Observer statistics
+     treat the fix as part of the pass (no new launch or build); prompt rates credit the final builder prompt.
+     Before every evaluation the foreman lists edits to test files that exist on `base` (deleted files, removed
+     lines, added `.skip`/`.only`/`.todo`/`.fails`/`xit`), logs them as `test-edits` and gives them to the evaluator,
+     which must justify each or reject the feature; new test files are not listed, and the list never blocks by itself.
    - **Evaluate.** A fresh `claude -p` (never a resumed builder session) gets the acceptance list as read at launch, the
      test output and the diff `base...<sha>` (`--text --no-ext-diff --no-textconv`), built as: `git diff --stat`; files
      matching `evaluatorDiffExclude` pathspecs (generated files, fixtures) listed by name only; then whole files' diffs in

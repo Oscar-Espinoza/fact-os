@@ -82,7 +82,11 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   names both sides: this feature, the features merged into `base` that touched each conflicting file with their
   acceptance checks, and the diff3 hunks; resolutions must keep every line either side added or declare it as
   `dropped: <file>: <line>` in a commit message) and `resolver` (null; `{model, effort, permissionMode}`: a separate
-  resolver run resolves the conflict at once, in the same pass, then the test and a fresh evaluator run again).
+  resolver run resolves the conflict at once, in the same pass, then the test and a fresh evaluator run again),
+  `gateFixes` (0; after a test-gate failure, resume the builder's own Claude session that many times per pass to fix
+  it, spending no attempt) and `diagnoser` (null; `{model, effort}`: when a resumed fix fails the gate again, a
+  read-only run diagnoses a code, test or environment fault, and the builder gets one more fix with that brief).
+  Edits to tests that already exist on base are always listed for the evaluator (`test-edits` event).
 - `features.json` — `{features: [{id, title, description, acceptance[], surface, deps[], priority, branch?, group?, touches?, risk?,
   status, onMock?, attempts, refreshes?, parked?, lastFeedback?, costUsd?, pid?, pidStart?, foremanPid?, updatedAt}]}` (its current
   child: pid, start time from `/proc/<pid>/stat`, and the foreman that spawned it); status is

@@ -191,3 +191,21 @@ test('config: state-only reads leave the validated supervisor config snapshot in
   assert.deepEqual(loadState(s.root).tasks, []);
   assert.throws(() => load(s.root), /config\.maxAttempts/, 'normal consumers still validate config');
 });
+
+test('I01: gateFixes is a safe integer >= 0 and diagnoser is null or role settings; both default off', (t) => {
+  const s = setup(t);
+  s.set({});
+  assert.deepEqual([loadConfig(s.root).gateFixes, loadConfig(s.root).diagnoser], [0, null]);
+  for (const value of ['1', -1, 1.5, null, true]) {
+    s.set({ gateFixes: value });
+    assert.throws(() => loadConfig(s.root), /config\.gateFixes/, `gateFixes=${JSON.stringify(value)}`);
+  }
+  for (const value of ['opus', [], { model: '' }, { effort: 3 }]) {
+    s.set({ diagnoser: value });
+    assert.throws(() => loadConfig(s.root), /config\.diagnoser/, `diagnoser=${JSON.stringify(value)}`);
+  }
+  s.set({ gateFixes: 2, diagnoser: { model: 'opus', effort: 'high' } });
+  assert.deepEqual([loadConfig(s.root).gateFixes, loadConfig(s.root).diagnoser], [2, { model: 'opus', effort: 'high' }]);
+  s.set({ diagnoser: null });
+  assert.equal(loadConfig(s.root).diagnoser, null);
+});

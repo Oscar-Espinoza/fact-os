@@ -201,7 +201,7 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
   const eraOf = (ms: number) => { let i = 0; while (i + 1 < starts.length && t(starts[i + 1]!) <= ms) i++; return i; };
   const eras: (Era & { b: number[]; g: number[]; v: number[]; rej: string[]; bf: string[] })[] = starts.map((s) => ({ since: s.ts, change: s.change, launches: 0, setup: 0, built: 0, gated: 0,
     evaluated: 0, passed: 0, bounced: 0, merged: 0, resolves: 0, resolvedMerged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
-  const open = new Map<string, { era: number; stage: 'build' | 'test' | 'eval' | 'resolve' | 'revalidate'; at: number }>(), lastEra = new Map<string, number>();
+  const open = new Map<string, { era: number; stage: 'build' | 'test' | 'fix' | 'eval' | 'resolve' | 'revalidate'; at: number }>(), lastEra = new Map<string, number>();
   const min = (a: number, b: number) => (b - a) / 60e3;
   for (const e of events) {
     if (!e.feature) continue;
@@ -221,6 +221,13 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
       if (e.event === 'merged') { E.merged++; if (cur.stage === 'resolve') E.resolvedMerged++; }
       if (cur.stage === 'revalidate' && e.event === 'refreshed') E.bounced++;
       if (['merged', 'ready', 'failed', 'stuck', 'interrupted', 'resolve-failed', 'refreshed', 'merge-skipped'].includes(e.event)) open.delete(e.feature);
+      continue;
+    }
+    // A resumed gate fix (foreman gateFixes) continues the pass: not a new build; the gate that counts is the one after it.
+    if (e.event === 'gate-fix' && cur.stage === 'test') { Object.assign(cur, { stage: 'fix', at: ms }); continue; }
+    if (cur.stage === 'fix') {
+      if (e.event === 'testing') Object.assign(cur, { stage: 'test', at: ms });
+      else if (['failed', 'stuck', 'interrupted'].includes(e.event)) open.delete(e.feature);
       continue;
     }
     if (e.event === 'testing' && cur.stage === 'build') { E.built++; E.b.push(min(cur.at, ms)); Object.assign(cur, { stage: 'test', at: ms }); }
@@ -254,11 +261,11 @@ export function runCosts(runsDir: string): RunCost[] {
     let names: string[] = [];
     try { names = readdirSync(join(runsDir, f)); } catch { continue; }
     for (const n of names) {
-      const m = /-(build|eval|resolve)\.json$/.exec(n); // a resolver run is making code: counted with the builds
+      const m = /-(build|eval|resolve|diagnose)\.json$/.exec(n); // a resolver run is making code: counted with the builds; a gate diagnosis with the evaluations
       if (!m) continue;
       try {
         const file = join(runsDir, f, n), j = JSON.parse(readFileSync(file, 'utf8')) as { total_cost_usd?: unknown; duration_ms?: unknown };
-        out.push({ ts: new Date(statSync(file).mtimeMs).toISOString(), role: m[1] === 'eval' ? 'eval' : 'build', cost: Number(j.total_cost_usd) || 0, ms: Number(j.duration_ms) || 0 });
+        out.push({ ts: new Date(statSync(file).mtimeMs).toISOString(), role: m[1] === 'eval' || m[1] === 'diagnose' ? 'eval' : 'build', cost: Number(j.total_cost_usd) || 0, ms: Number(j.duration_ms) || 0 });
       } catch {}
     }
   }

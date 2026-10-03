@@ -43,6 +43,8 @@ export interface Config {
   claims: Partial<ClaimsConfig> | null; // null = schedule by group only; set = also never run two features that share a hot file
   conflictBrief: boolean;             // a conflicting refresh's feedback carries both sides' context; resolutions get the keep-lines check
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
+  gateFixes: number;                  // safe integer >= 0: resumed builder fixes after a test-gate failure, per pass (0 = none)
+  diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
   observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`
   profiles?: Record<string, Profile>; // added to (or replacing, by name) the built-in profiles; "opus" is reserved
 }
@@ -161,7 +163,7 @@ export interface LogEvent {
 export interface ActivityEvent { ts: string; session: string | null; feature: string | null; tool: string; summary: string }
 
 // What the foreman takes from `claude -p --output-format json`.
-export interface ClaudeResult { ok: boolean; text: string; cost: number; error?: string }
+export interface ClaudeResult { ok: boolean; text: string; cost: number; error?: string; sessionId?: string }
 
 export interface Paths {
   name: string; dir: string; config: string; features: string; human: string;

@@ -21,7 +21,7 @@ const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catc
 const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: `Feature ${id}`, description: `Build ${id}`, acceptance: [`${id}.txt exists`],
   surface: 'any', deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '', ...o });
 
-interface FakeCall { mode: string; id: string; t0: number; t1: number; prompt: string; args: string[] }
+interface FakeCall { mode: string; id: string; t0: number; t1: number; prompt: string; args: string[]; model?: string; effort?: string }
 function setup(t: TestContext, { features, config = {}, scenario = {}, verdicts = {} }:
   { features: Feature[]; config?: Partial<Config>; scenario?: Record<string, string>; verdicts?: Record<string, Partial<Verdict>[]> }) {
   const base = mkdtempSync(join(tmpdir(), 'fact-os-guard-'));
@@ -1108,4 +1108,94 @@ test('refreshBeforeTest defaults to false: the test runs on the branch as built,
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
   assert.match(s.feature('a').lastFeedback!, /test command `test -f base-a\.txt` exited 1/);
   assert.equal(s.calls('eval', 'a').length, 0);
+});
+
+// ---- I01: inline gate fix, diagnosis and test-edit evidence (docs/improvements.md) ----
+const GATE = 'test ! -f broken.txt'; // the fake builder's "break" flag commits broken.txt; a fix removes it
+const events = (s: { log: () => string }, id: string) => s.log().split('\n').filter(Boolean).map((l) => JSON.parse(l) as LogEvent).filter((e) => e.feature === id);
+const DIAG = { model: 'opus', effort: 'high', permissionMode: 'auto' };
+
+test('I01: gateFixes 0 keeps a gate failure an ordinary counted failure', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, diagnoser: null }, scenario: { a: 'break' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.equal(s.calls('fix', 'a').length, 0); assert.equal(s.calls('diagnose', 'a').length, 0);
+});
+
+test('I01: a first gate failure resumes the same builder session; a passing fix reaches evaluation in the same pass', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1 }, scenario: { a: 'break' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  const [fix] = s.calls('fix', 'a');
+  assert.ok(fix, 'one resumed fix'); assert.equal(fix.args[fix.args.indexOf('--resume') + 1], 'fake', 'the builder\'s own session');
+  assert.match(fix.prompt, /test command `test ! -f broken\.txt` exited 1/);
+  const ev = events(s, 'a').map((e) => e.event);
+  assert.equal(ev.filter((e) => e === 'launch').length, 1); assert.equal(ev.filter((e) => e === 'gate-fix').length, 1);
+  assert.equal(ev.filter((e) => e === 'failed').length, 0);
+  assert.equal(s.calls('eval', 'a').length, 1);
+  assert.ok(existsSync(join(s.repo, '.fact-os', 'runs', 'a', '1.2-build.json')), 'the fix is recorded as another builder run of try 1');
+});
+
+test('I01: a second failure gets a read-only diagnosis whose brief drives one more fix', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG }, scenario: { a: 'break,fix:noop1' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  const [d] = s.calls('diagnose', 'a'), fixes = s.calls('fix', 'a');
+  assert.ok(d); assert.equal(d.args[d.args.indexOf('--permission-mode') + 1], 'plan', 'diagnosis is read-only');
+  assert.equal(d.model, 'opus'); assert.equal(d.effort, 'high');
+  assert.equal(fixes.length, 2); assert.match(fixes[1]!.prompt, /delete broken\.txt and commit/, 'the second fix carries the diagnosis');
+  assert.ok(events(s, 'a').some((e) => e.event === 'diagnosis' && /^code: /.test(e.detail)));
+});
+
+test('I01: after the diagnosis-driven fix also fails, the failure counts once with the diagnosis in its feedback', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG }, scenario: { a: 'break,fix:noop' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.equal(s.calls('fix', 'a').length, 2); assert.equal(s.calls('diagnose', 'a').length, 1);
+  assert.match(s.feature('a').lastFeedback!, /^test command `test ! -f broken\.txt` exited 1/);
+  assert.match(s.feature('a').lastFeedback!, /Diagnosis \(opus\): code/);
+});
+
+test('I01: an environment diagnosis ends the pass without another fix', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG }, scenario: { a: 'break,fix:noop' } });
+  const file = join(s.repo, '..', 'diagnoses.json'); (s.env as Record<string, string>).FAKE_DIAGNOSES = file;
+  writeFileSync(file, JSON.stringify({ a: [{ fault: 'environment', evidence: 'the database refused connections', fix: 'restart postgres' }] }));
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('fix', 'a').length, 1);
+  assert.match(s.feature('a').lastFeedback!, /Diagnosis \(opus\): environment/);
+});
+
+test('I01: a diagnosis that edits the worktree is refused and its edits are undone', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG }, scenario: { a: 'break,fix:noop,diagnose:edit' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('fix', 'a').length, 1, 'no fix from a refused diagnosis');
+  assert.ok(events(s, 'a').some((e) => e.event === 'diagnosis' && /refused/.test(e.detail)));
+  const wt = join(s.repo, '..', 'app-worktrees', 'a');
+  assert.equal(existsSync(join(wt, 'diagnoser.txt')), false);
+  assert.doesNotMatch(execFileSync('git', ['log', '--format=%s', 'ship/a'], { cwd: s.repo, encoding: 'utf8' }), /diagnoser\.txt/);
+});
+
+test('I01: edits to tests that exist on base reach the evaluator; new test files do not', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 }, scenario: { a: 'skip-test,new-test' } });
+  writeFileSync(join(s.repo, 'a.test.ts'), "it('works', () => {\n  expect(1).toBe(1);\n});\n");
+  s.git('add', 'a.test.ts'); s.git('commit', '-qm', 'an existing test');
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  const [ev] = s.calls('eval', 'a');
+  assert.match(ev!.prompt, /Existing tests this branch changes/);
+  assert.match(ev!.prompt, /a\.test\.ts: adds `\.skip`/);
+  assert.match(ev!.prompt, /a\.test\.ts: removes 3 lines/);
+  assert.doesNotMatch(ev!.prompt, /a-new\.test\.ts: /, 'a new test file is not listed as an edit');
+  assert.ok(events(s, 'a').some((e) => e.event === 'test-edits' && /a\.test\.ts/.test(e.detail)));
+});
+
+test('I01: stopping during a resumed fix leaves the feature todo with no attempt spent and no evaluation', async (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1 }, scenario: { a: 'break' } });
+  s.env.FAKE_DELAY_MS = '1500';
+  const running = s.start();
+  assert.ok(await until(() => events(s, 'a').some((e) => e.event === 'gate-fix'), 20000), running.out());
+  running.cp.kill('SIGINT');
+  await running.exit;
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['todo', 0]);
+  assert.equal(s.calls('eval', 'a').length, 0);
+  assert.ok(events(s, 'a').some((e) => e.event === 'interrupted'));
 });

@@ -356,6 +356,19 @@ test('agentStats: clean revalidation preserves the pass and merge without a conf
     'clean revalidation also preserves an earlier resolver continuation');
 });
 
+test('agentStats: a resumed gate fix continues the pass; it is not a new launch or a new build', () => {
+  const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
+  const e = (min: number, event: string, detail = '') => ({ ts: at(min), feature: 'a', event, detail });
+  const fixed = [e(0, 'launch'), e(1, 'prompt', 'builder model=opus effort=medium lessons=- briefs=-'), e(5, 'testing', 's1'),
+    e(35, 'gate-fix', 'resuming the builder after a test-gate failure'), e(36, 'prompt', 'builder model=opus effort=medium lessons=- briefs=-'),
+    e(45, 'testing', 's2'), e(75, 'evaluating'), e(80, 'merged', 'ship/a')];
+  const [era] = agentStats(fixed, [], T0 - 60e3);
+  assert.deepEqual([era!.launches, era!.built, era!.gated, era!.evaluated, era!.merged], [1, 1, 1, 1, 1]);
+  assert.deepEqual([era!.buildMin, era!.gateMin], [5, 30], 'the gate time is the run that passed, not the fix');
+  const [failed] = agentStats([...fixed.slice(0, 6), e(75, 'stuck', 'test command `gate` exited 1')], [], T0 - 60e3);
+  assert.deepEqual([failed!.launches, failed!.built, failed!.gated, failed!.merged], [1, 1, 0, 0]);
+});
+
 test('agentStats: a resolver run continues the pass that hit the conflict; its merge counts once, its gate and evaluation are not counted again', () => {
   const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
   const e = (min: number, feature: string, event: string, detail = '') => ({ ts: at(min), feature, event, detail });

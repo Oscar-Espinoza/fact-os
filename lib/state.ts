@@ -12,6 +12,7 @@ export const DEFAULT_CONFIG: Config = {
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
+  gateFixes: 0, diagnoser: null,
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
@@ -204,7 +205,7 @@ function configProblems(raw: unknown): string[] {
   for (const key of ['briefFiles', 'evaluatorDiffExclude']) field(c, 'config', key, strings, 'an array of non-empty strings');
   for (const key of ['refreshBeforeTest', 'conflictBrief']) field(c, 'config', key, (x) => typeof x === 'boolean', 'a boolean');
   field(c, 'config', 'merge', (x) => x === 'auto' || x === 'manual', '"auto" or "manual"');
-  for (const key of ['maxParallel', 'maxRefreshes']) field(c, 'config', key, uint, 'a safe integer >= 0');
+  for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes']) field(c, 'config', key, uint, 'a safe integer >= 0');
   field(c, 'config', 'maxAttempts', (x) => uint(x) && (x as number) >= 1, 'a safe integer >= 1');
   for (const key of ['budgetUsdPerRun', 'budgetUsdTotal'])
     field(c, 'config', key, (x) => x === null || nonnegative(x), 'a finite number >= 0 or null');
@@ -213,6 +214,7 @@ function configProblems(raw: unknown): string[] {
     'positive finite minutes within the timer range (<= (2^31 - 1) / 60000), or null');
   for (const key of ['builder', 'evaluator', 'resolver'])
     if (Object.hasOwn(c, key) && !(key === 'resolver' && c[key] === null)) role(c[key], `config.${key}`);
+  if (Object.hasOwn(c, 'diagnoser') && c.diagnoser !== null) role(c.diagnoser, 'config.diagnoser');
   if (Object.hasOwn(c, 'claims') && c.claims !== null) {
     const cl = obj(c.claims, 'config.claims');
     if (cl) {

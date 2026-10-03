@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped } from '../lib/foreman.ts';
+import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis } from '../lib/foreman.ts';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -287,4 +287,18 @@ test('builtWhenStopped: the sha a pass had built when the foreman stopped, only 
   assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'interrupted'), ev('a', 'launch')], 'a'), 'abc', 'read by the new pass after its launch');
   assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'interrupted'), ev('a', 'launch'), ev('a', 'interrupted'), ev('a', 'launch')], 'a'), null, 'stopped again while building');
   assert.equal(builtWhenStopped([ev('b', 'launch'), ev('b', 'testing', 'abc'), ev('b', 'interrupted')], 'a'), null);
+
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'gate-fix'), ev('a', 'interrupted')], 'a'), null,
+    'stopped during a resumed gate fix: the sha that failed the gate is not reused');
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'gate-fix'), ev('a', 'testing', 'def'), ev('a', 'interrupted')], 'a'), 'def',
+    'stopped while the fixed sha was in the gate');
+});
+
+test('parseDiagnosis: fault, evidence and fix, bare, fenced or in prose; anything else is an error', () => {
+  const ok = { fault: 'test', evidence: 'expects 3 rows, the spec says 2', fix: 'expect 2 rows' };
+  assert.deepEqual(parseDiagnosis(JSON.stringify(ok)), ok);
+  assert.deepEqual(parseDiagnosis('Diagnosis:\n```json\n' + JSON.stringify(ok) + '\n```'), ok);
+  assert.match((parseDiagnosis('{"fault":"maybe","evidence":"x","fix":"y"}') as { error: string }).error, /fault/);
+  assert.match((parseDiagnosis('{"fault":"code","evidence":" ","fix":"y"}') as { error: string }).error, /evidence/);
+  assert.match((parseDiagnosis('no idea') as { error: string }).error, /not a JSON object/);
 });
