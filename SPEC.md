@@ -587,11 +587,21 @@ complete lines of `log.jsonl` (byte offset kept in `observer.json`; a shorter lo
    section is replaced (with a note pointing at the archive), and proved foreman appends are kept after it. A tracked
    file is committed on base (`fact-os: curate lessons`, that path only); unrelated staged work stays staged, and
    untracked lessons stay uncommitted. Commit failures are explicitly logged; the local rewrite/archive remain.
-   A 30-second checkout-lock timeout safely
+   Archive/file write failures are reported as `observer-error` without logging success;
+   the observer continues with other eligible stages and its report. A 30-second checkout-lock timeout safely
    defers curation; a snapshot timeout consumes no throttle, while an apply timeout follows an attempted call.
    Proofs assume an append-only local log and cooperating updated foreman/observer processes; upgrade them together.
    External editors/Git commands that ignore the lock can still race the final critical section. These guards
    validate checkout consistency, not the semantic quality of the agent's rules.
+   Curation and improvement checkpoint their throttle timestamps to `observer.json` synchronously before
+   attempting a provider spawn, after argument preparation and the final cancellation check. A checkpoint
+   failure prevents the call and restores the previous timestamp in memory. An attempted spawn consumes
+   its interval even if the provider fails, its result cannot be applied, or a later stage/report throws.
+   There is no asynchronous gap between checkpoint and spawn, but a process crash in that window can
+   consume the interval without a call. This is an atomic local-file checkpoint, not an fsync durability
+   guarantee or a transaction with feature/human mutations; abrupt failure can still leave partially
+   applied proposals. Ordinary apply errors are contained and partial queued-feature bookkeeping is saved
+   at the end of the pass. Prompt-review checkpoint behavior remains as described in item 8.
 7. **Measures the agents** over the last 7 days, per prompt version (a version starts at a lessons curation or when the
    builder's model, effort, briefs or profile change: each `launch` is keyed by its own pass's builder `prompt`, the first one
    of that feature after the launch, so a pass still in prepare at a switch stays in its own version; versions change in

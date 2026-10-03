@@ -431,8 +431,8 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
     if (!stopping()) await step('template tasks', () => fileTemplateTasks(root, state, out, stopping));
   }
   state.promptRates = promptRates(passes);
-  if (cfg.agent && !stopping()) await curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, children, stopping);
-  if (cfg.agent && cfg.improve && !stopping()) await improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, children, stopping);
+  if (cfg.agent && !stopping()) await step('lesson curation', () => curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, children, stopping));
+  if (cfg.agent && cfg.improve && !stopping()) await step('improver', () => improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, children, stopping));
 
   state.agents = agentStats([...all.events, ...readNew(P.log, all.offset).events], runCosts(P.runs), Date.now() - 7 * DAY); // what this pass logged too
   state.diagnoses = state.diagnoses.slice(-500);
@@ -444,6 +444,17 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
 }
 
 // ---- lessons ----
+
+// Reserve a paid stage before launching it. Apply/report failures must not cause
+// another paid call next poll; a failed checkpoint must not launch or retain a stamp.
+function checkpointAgentStart(root: string, state: ObserverState, key: 'lessonsAt' | 'improveAt'): void {
+  const previous = state[key];
+  state[key] = now();
+  try { writeJsonAtomic(observerPaths(root).state, state); } catch (e) {
+    if (previous === undefined) delete state[key]; else state[key] = previous;
+    throw e;
+  }
+}
 
 // `agent`: the curator's resolved model/effort (the observer agent config, or the active profile's `curator` entry).
 async function curateLessons(root: string, config: Config, agent: RoleConfig, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>, stopping: () => boolean): Promise<void> {
@@ -501,7 +512,7 @@ async function curateLessons(root: string, config: Config, agent: RoleConfig, cf
   out(`observer: curating ${bulletsOf(sec.body).length} lessons (${Buffer.byteLength(sec.body)} bytes)`);
   const args = claudeArgs(config, agent, root);
   if (stopping()) return;
-  state.lessonsAt = now();
+  checkpointAgentStart(root, state, 'lessonsAt');
   const r = await exec(envVar('CLAUDE') || 'claude', args,
     { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
   if (stopping()) return;
@@ -589,7 +600,7 @@ async function improvePass(root: string, config: Config, agent: RoleConfig, cfg:
   out('observer: improver looking at the last 24 hours');
   const args = claudeArgs(config, { ...agent, permissionMode: 'plan' }, root);
   if (stopping()) return;
-  state.improveAt = now();
+  checkpointAgentStart(root, state, 'improveAt');
   const r = await exec(envVar('CLAUDE') || 'claude', args,
     { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
   if (stopping()) return;

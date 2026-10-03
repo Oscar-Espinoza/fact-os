@@ -95,6 +95,17 @@ test('untracked lessons also refuse an intervening branch switch', async (t) => 
   } finally { s.finish(); await pending; }
 });
 
+test('a checkout snapshot lock timeout defers the curator without consuming its throttle', { timeout: 35000 }, async (t) => {
+  const s = setup(t);
+  await withCheckoutLock(s.root, async () => {
+    const state = await s.start();
+    assert.equal(state.lessonsAt, undefined);
+    assert.equal(JSON.parse(readFileSync(observerPaths(s.root).state, 'utf8')).lessonsAt, undefined);
+    assert.match(s.log(), /not curated: checkout is busy/);
+    assert.equal(readFileSync(s.file, 'utf8'), s.original); assert.equal(existsSync(s.archive), false);
+  });
+});
+
 for (const tracked of [true, false]) test(`curation preserves actual foreman appends (${tracked ? 'tracked' : 'untracked'}) and unrelated staging`, async (t) => {
   const s = setup(t, tracked), pending = s.start();
   try {
@@ -155,6 +166,16 @@ test('curation reports a failed commit and keeps unrelated staged work', async (
     assert.match(s.log(), /commit failed: curation commit rejected/);
     assert.match(readFileSync(s.file, 'utf8'), /Curated rule 0/); assert.ok(existsSync(s.archive));
   } finally { s.finish(); await pending; }
+});
+
+test('an archive write failure is reported, leaves lessons untouched and never logs successful curation', async (t) => {
+  const s = setup(t), pending = s.start();
+  try {
+    await s.started(); mkdirSync(s.archive); s.finish();
+    await pending;
+    assert.equal(readFileSync(s.file, 'utf8'), s.original); assert.doesNotMatch(s.log(), /"detail":"curated /);
+    assert.match(s.log(), /"event":"observer-error","detail":"lesson curation: EISDIR/);
+  } finally { s.finish(); await pending.catch(() => {}); }
 });
 
 test('a checkout lock timeout safely defers curation instead of failing the observer', { timeout: 35000 }, async (t) => {

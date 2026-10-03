@@ -114,6 +114,10 @@ and `run --watch` waits for acknowledgment. Independent manual features can stil
 at `ready`. Reused dependent branches import missing dependency commits before setup/build; conflicts
 go to their builder. Squash/cherry-pick merges need separate reconciliation and cannot be acknowledged.
 
+The observer checkpoints curation/improver throttles before attempting a provider call.
+Apply errors are reported and do not bypass the interval on the next poll; a failed
+checkpoint prevents launch. A stop before launch consumes no interval.
+
 The dashboard shows the current attempt as failures + 1 while running or ready/merged.
 Recorded runs retain full tags, resolver output and finding evidence; expanded logs keep
 original agent text and validation errors. Saved verdict validity uses the foreman parser
