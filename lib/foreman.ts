@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
-import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotScores, hotTest, keepCheck, keepFeedback } from './merge.ts';
+import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
@@ -878,7 +878,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (!stopping && !overBudget && !onceDone && !tampered()) {
         const running = features.filter((f) => IN_FLIGHT.includes(f.status) || inflight.has(f.id));
         const busy = new Set(running.map((f) => groupOf(f, config.groupBy)));
-        let claims: { hot: (file: string) => boolean; held: [string, string[]][] } | null = null; // this tick's, computed on first use
+        let claims: { hot: (file: string) => boolean; paths: string[]; held: [string, string[]][] } | null = null; // this tick's, computed on first use
         const held: string[] = []; // ready, but the launch limit is reached
         for (const id of a.ready) {
           const g = groupOf(features.find((x) => x.id === id)!, config.groupBy);
@@ -891,7 +891,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           // ever waits on a feature that is not running.
           let hotHeld: string[] = [];
           if (claimsCfg) {
-            claims ??= { hot: hotTest(hotScores(readEvents(), Date.now() - claimsCfg.days * 86400e3), claimsCfg), held: running.map((x) => [x.id, filesOf(x)]) };
+            if (!claims) {
+              const scores = hotScores(readEvents(), Date.now() - claimsCfg.days * 86400e3);
+              claims = { hot: hotTest(scores, claimsCfg), paths: hotPaths(scores, claimsCfg), held: running.map((x) => [x.id, filesOf(x)]) };
+            }
             const mine = filesOf(features.find((x) => x.id === id)!), c = claimBlock(mine, claims.held, claims.hot);
             if (c) {
               const why = `${c.file} is claimed by ${c.by}`;
@@ -899,7 +902,13 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
               continue;
             }
             claimWait.delete(id);
-            hotHeld = claims.held.flatMap(([by, files]) => files.filter(claims!.hot).map((x) => `${x} (${by})`));
+            hotHeld = claims.held.flatMap(([by, files]) => {
+              // Enumerate only protected intersections inside a holder's declared
+              // directories, so a hot descendant does not label all of src/ hot.
+              const hints = claimsCfg.minScore === 0 ? files : files.flatMap((file) => claims!.paths
+                .map((p) => sharedPath(file, p)).filter((p): p is string => p !== null && claims!.hot(p)));
+              return [...new Set(hints)].sort().map((p) => `${p} (${by})`);
+            });
           }
           // Claim and capture together: a pending edit may have completed since this tick's load.
           // Keep the pre-transition SHA for build reuse; clear disk acceptance until a fresh auto pass.

@@ -264,6 +264,15 @@ Each tick:
    progress only unmerged files and unstaged edits, not base's staged changes). Only features in flight hold claims, so a
    claim never waits on anything that is not running; a skip is logged once per reason as `claim-wait` ("<file> is claimed
    by <id>"), and the builder of a launched feature is told which hot files others in flight hold.
+   Paths are repository-relative with `/` separators; only a trailing `/` makes a directory claim
+   (`src` is an exact path, not a glob or `src/`). Compare claims at their narrower shared file or
+   directory, then test hotness there: directories include listed/scored hot descendants, but a hot
+   sibling outside the intersection does not block. The wait message names that shared path;
+   holder order is preserved and candidate/held paths are sorted and deduplicated. Builder hints
+   name protected intersections within each holder's claims, rather than labeling a broad directory
+   hot because it contains one hot file. With `minScore: 0`, every overlapping path is hot and hints
+   list the held paths themselves. Claims are a launch-time snapshot of known paths; new edits or
+   metadata changes after the snapshot are not a guarantee of mutual exclusion. `claims: null` is off.
 3. Per feature (concurrently):
    - **Dependency import.** After branch creation/restoration, before `prepare` or building, verify every
      declared merged dependency's recorded SHA is a commit reachable from current base. A legacy merged

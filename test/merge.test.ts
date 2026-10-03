@@ -40,8 +40,61 @@ test('claimBlock: a shared hot file blocks, a shared cold file does not; dir pre
   assert.deepEqual(claimBlock(['x.ts', 'p.ts'], [['a', ['y.ts']], ['b', ['p.ts']]], hot), { file: 'p.ts', by: 'b' });
   assert.equal(claimBlock(['x.ts'], [['a', ['x.ts']]], hot), null, 'x.ts is not hot');
   assert.deepEqual(claimBlock(['gen/a.json'], [['a', ['gen/']]], hot), { file: 'gen/a.json', by: 'a' }, 'declared dir prefix held');
-  assert.deepEqual(claimBlock(['gen/'], [['a', ['gen/b.json']]], hot), { file: 'gen/', by: 'a' }, 'declared dir prefix wanted');
+  assert.deepEqual(claimBlock(['gen/'], [['a', ['gen/b.json']]], hot), { file: 'gen/b.json', by: 'a' }, 'blocker is the concrete shared path');
   assert.equal(claimBlock(['p.ts'], [], hot), null);
+});
+
+for (const source of ['listed', 'scored'] as const) {
+  const cfg = { ...DEFAULT_CLAIMS, hot: source === 'listed' ? ['src/a/hot.ts'] : [] };
+  const scores = source === 'scored' ? new Map([['src/a/hot.ts', 3]]) : new Map<string, number>();
+  test(`R11: ${source} hot descendants are visible through ancestor directories`, () => {
+    const hot = hotTest(scores, cfg);
+    assert.deepEqual(['src/', 'src/a/', 'src/a/hot.ts', 'src/a/cold.ts', 'src/b/', 'src/ab/', 'src'].map(hot),
+      [true, true, true, false, false, false, false]);
+  });
+  test(`R11: ${source} concrete intersections block directory/file claims in both directions`, () => {
+    const hot = hotTest(scores, cfg);
+    assert.deepEqual(claimBlock(['src/'], [['holder', ['src/a/hot.ts']]], hot), { file: 'src/a/hot.ts', by: 'holder' });
+    assert.deepEqual(claimBlock(['src/a/hot.ts'], [['holder', ['src/']]], hot), { file: 'src/a/hot.ts', by: 'holder' });
+  });
+  test(`R11: ${source} descendants block nested directory overlap without blocking cold siblings`, () => {
+    const hot = hotTest(scores, cfg);
+    for (const [candidate, held] of [['src/', 'src/a/'], ['src/a/', 'src/'], ['src/a/', 'src/a/']])
+      assert.deepEqual(claimBlock([candidate!], [['holder', [held!]]], hot), { file: 'src/a/', by: 'holder' });
+    for (const [candidate, held] of [['src/', 'src/b/'], ['src/b/', 'src/'], ['src/', 'src/b/cold.ts'], ['src/b/cold.ts', 'src/'], ['src/a/', 'src/ab/']])
+      assert.equal(claimBlock([candidate!], [['holder', [held!]]], hot), null);
+  });
+}
+
+test('R11: listed hot directory prefixes overlap only the narrower protected area', () => {
+  const hot = hotTest(new Map(), { ...DEFAULT_CLAIMS, hot: ['src/a/protected/'] });
+  assert.equal(hot('src/'), true); assert.equal(hot('src/a/'), true); assert.equal(hot('src/a/protected/new.ts'), true);
+  assert.equal(hot('src/ab/'), false); assert.equal(hot('src/a/cold.ts'), false);
+  assert.deepEqual(claimBlock(['src/'], [['a', ['src/a/']]], hot), { file: 'src/a/', by: 'a' });
+  assert.equal(claimBlock(['src/'], [['a', ['src/a/cold/']]], hot), null);
+  const parent = hotTest(new Map(), { ...DEFAULT_CLAIMS, hot: ['src/'] });
+  assert.deepEqual(claimBlock(['src/'], [['a', ['src/a/']]], parent), { file: 'src/a/', by: 'a' });
+  assert.equal(claimBlock(['srcx/'], [['a', ['src/']]], parent), null);
+});
+
+test('R11: hot score thresholds and zero-score legacy behavior remain consistent for directories', () => {
+  const scores = new Map([['src/a/hot.ts', 2]]);
+  const hot = hotTest(scores, DEFAULT_CLAIMS);
+  assert.equal(hot('src/'), false); assert.equal(hot('src/a/hot.ts'), false);
+  const all = hotTest(scores, { ...DEFAULT_CLAIMS, minScore: 0 });
+  assert.equal(all('unseen/'), true); assert.equal(all('unseen/new.ts'), true);
+  assert.deepEqual(claimBlock(['unseen/'], [['a', ['unseen/new.ts']]], all), { file: 'unseen/new.ts', by: 'a' });
+  assert.equal(claimBlock(['unseen/'], [['a', ['elsewhere/new.ts']]], all), null);
+  const unrecorded = hotTest(new Map(), { ...DEFAULT_CLAIMS, minScore: 0 });
+  assert.deepEqual(claimBlock(['unseen/'], [['a', ['unseen/nested/']]], unrecorded), { file: 'unseen/nested/', by: 'a' });
+});
+
+test('R11: blocker selection preserves holder order and sorts/deduplicates path permutations', () => {
+  const hot = hotTest(new Map(), { ...DEFAULT_CLAIMS, hot: ['src/a.ts', 'src/z.ts'] });
+  for (const paths of [['src/z.ts', 'src/a.ts'], ['src/a.ts', 'src/z.ts', 'src/a.ts']])
+    assert.deepEqual(claimBlock(['unused/', 'src/', 'src/'], [['first', paths], ['second', ['src/a.ts']]], hot), { file: 'src/a.ts', by: 'first' });
+  assert.deepEqual(claimBlock(['src/'], [['second', ['src/z.ts']], ['first', ['src/a.ts']]], hot), { file: 'src/z.ts', by: 'second' });
+  assert.equal(claimBlock(['src/'], [], hot), null);
 });
 
 // A registry both sides append to before the same closing brace: the shape that kept conflicting in provisioning.ts.

@@ -74,7 +74,8 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   non-zero exit aborts the merge and sends the feature back to `todo` with the hook's output as feedback, costing no attempt),
   and the merge process (all off by default; see [docs/merge-process.md](docs/merge-process.md)): `claims` (null; `{hot, minScore,
   days}`: never run two features that change one hot file — listed, or scored from the log's merge conflicts — judged from
-  each feature's `touches`, branch diff and uncommitted edits), `conflictBrief` (false; a conflicting refresh's feedback
+  each feature's `touches`, branch diff and uncommitted edits; `dir/` claims include hot descendants, and only a hot
+  overlap blocks, so cold siblings can run concurrently), `conflictBrief` (false; a conflicting refresh's feedback
   names both sides: this feature, the features merged into `base` that touched each conflicting file with their
   acceptance checks, and the diff3 hunks; resolutions must keep every line either side added or declare it as
   `dropped: <file>: <line>` in a commit message) and `resolver` (null; `{model, effort, permissionMode}`: a separate

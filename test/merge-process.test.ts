@@ -37,7 +37,7 @@ function setup(t: TestContext, { features, config = {}, scenario = {}, delay = '
   writeFileSync(sy('features.json'), JSON.stringify({ features }));
   writeFileSync(env.FAKE_VERDICTS, '{}');
   const read = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8') : '');
-  return { repo, git, cli, sy,
+  return { repo, git, cli, sy, env,
     feature: (id: string) => (JSON.parse(read(sy('features.json'))) as FeaturesFile).features.find((f) => f.id === id)!,
     log: () => read(sy('log.jsonl')),
     events: (id: string) => read(sy('log.jsonl')).split('\n').filter(Boolean).map((l) => JSON.parse(l) as { feature: string; event: string; detail: string })
@@ -184,4 +184,50 @@ test('claims from history: a file whose conflicts scored minScore is hot, and a 
   const [a] = s.calls('build', 'a'), [b] = s.calls('build', 'b');
   assert.ok(a.t1 <= b.t0 || b.t1 <= a.t0, 'never in flight together');
   assert.match(s.log(), /"event":"claim-wait","detail":"registry\.txt is claimed by (a|b)"/);
+});
+
+
+const directoryClaimCases = [
+  { name: 'listed file held, broad directory wanted', a: 'src/a/hot.ts', b: 'src/', source: 'listed', blocker: 'src/a/hot.ts' },
+  { name: 'broad directory held, listed file wanted', a: 'src/', b: 'src/a/hot.ts', source: 'listed', blocker: 'src/a/hot.ts' },
+  { name: 'scored descendant inside nested directory overlap', a: 'src/', b: 'src/a/', source: 'scored', blocker: 'src/a/' },
+  { name: 'listed prefix beneath held/wanted directories', a: 'src/a/', b: 'src/', source: 'prefix', blocker: 'src/a/' },
+  { name: 'cold concrete overlap under a broadly hot directory', a: 'src/', b: 'src/b/cold.ts', source: 'listed', blocker: null },
+  { name: 'default-disabled claims keep concurrent launch behavior', a: 'src/', b: 'src/a/hot.ts', source: 'off', blocker: null },
+  { name: 'zero threshold protects unrecorded directory overlap and hints held paths', a: 'src/', b: 'src/a/', source: 'zero', blocker: 'src/a/' },
+] as const;
+for (const check of directoryClaimCases) test(`R11: foreman ${check.name}`, { timeout: 15000 }, (t) => {
+  const hotPath = check.source === 'prefix' ? 'src/a/protected/' : 'src/a/hot.ts';
+  const s = setup(t, { delay: '0', features: [F('a', { touches: [check.a] }), F('b', { touches: [check.b] }), F('c', { touches: [check.source === 'zero' ? 'other/' : 'src/b/cold.ts'] })],
+    config: { maxParallel: 3, claims: check.source === 'off' ? null : check.source === 'zero' ? { minScore: 0, hot: ['unrelated/hot.ts'] } : { hot: check.source === 'scored' ? [] : [hotPath] } } });
+  if (check.source === 'scored') for (const id of ['x', 'y', 'z'])
+    appendFileSync(s.sy('log.jsonl'), JSON.stringify({ ts: new Date().toISOString(), feature: id, event: 'refreshed', detail: 'conflicts in: src/a/hot.ts' }) + '\n');
+  // a cannot complete until c starts. Factory event order proves both exclusivity
+  // and cold-file concurrency without relying on process-duration overlap estimates.
+  const aStarted = s.sy('a-started'), cStarted = s.sy('c-started'), wrapper = s.sy('claim-provider.sh');
+  writeFileSync(wrapper, `#!/bin/sh\nin=$(cat)\ncase "$in" in "You are the builder"*)\ncase "$FACTOS_FEATURE" in a) touch '${aStarted}'; while [ ! -f '${cStarted}' ]; do sleep 0.01; done;; c) touch '${cStarted}';; esac;; esac\nprintf '%s' "$in" | '${FAKE}' "$@"\n`, { mode: 0o755 });
+  s.env.FACTOS_CLAUDE = wrapper;
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  const events = s.log().trim().split('\n').map((line) => JSON.parse(line) as { feature: string; event: string; detail: string });
+  const at = (id: string, event: string) => events.findIndex((e) => e.feature === id && e.event === event);
+  assert.ok(at('c', 'launch') >= 0 && at('c', 'launch') < at('a', 'merged'), 'cold c must launch while a holds its claim');
+  assert.ok(at('b', 'launch') >= 0);
+  if (check.blocker) {
+    assert.ok(at('a', 'merged') < at('b', 'launch'), 'protected overlap must wait until a merges');
+    assert.ok(events.some((e) => e.feature === 'b' && e.event === 'claim-wait' && e.detail === `${check.blocker} is claimed by a`));
+  } else {
+    assert.ok(at('b', 'launch') < at('a', 'merged'), 'cold or disabled claims must not serialize b');
+    assert.equal(events.some((e) => e.feature === 'b' && e.event === 'claim-wait'), false);
+  }
+  const prompt = s.calls('build', 'c')[0]!.prompt;
+  if (check.source === 'off') assert.doesNotMatch(prompt, /Hot files:/);
+  else if (check.source === 'zero') {
+    assert.ok(prompt.includes(`${check.a} (a)`), 'zero threshold hints all held paths, including unrecorded directories');
+    assert.equal(prompt.includes('unrelated/hot.ts (a)'), false, 'unheld known hot files do not enter hints');
+  }
+  else {
+    assert.ok(prompt.includes(`${hotPath} (a)`), 'builder hints identify the protected descendant, not its broad held directory');
+    if (check.a !== hotPath) assert.equal(prompt.includes(`- ${check.a} (a)`), false);
+  }
+  for (const id of ['a', 'b', 'c']) { assert.equal(s.feature(id).status, 'merged'); assert.equal(s.calls('build', id).length, 1); }
 });

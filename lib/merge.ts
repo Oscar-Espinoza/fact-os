@@ -31,16 +31,34 @@ export function hotScores(events: LogEvent[], since: number): Map<string, number
 // A pattern is a repo path, or a directory prefix ending in "/".
 export const matches = (file: string, pattern: string): boolean => (pattern.endsWith('/') ? file.startsWith(pattern) : file === pattern);
 
-// Is `file` hot: listed in config, or scored at least minScore from history?
-export const hotTest = (scores: Map<string, number>, c: ClaimsConfig) => (file: string): boolean =>
-  (scores.get(file) ?? 0) >= c.minScore || c.hot.some((p) => matches(file, p));
+// The narrower shared file/directory prefix, or null when paths do not overlap.
+export const sharedPath = (a: string, b: string): string | null => matches(a, b) ? a : matches(b, a) ? b : null;
 
-// The first hot file the candidate shares with a feature that holds it (in flight or parked), or null. Deterministic:
-// holders are checked in the order given, files in sorted order. Declared `touches` patterns count as files here.
+// Known protected paths for directory checks and precise builder hints. With a
+// zero threshold even unrecorded paths are hot; callers handle that separately.
+export const hotPaths = (scores: Map<string, number>, c: ClaimsConfig): string[] =>
+  [...new Set([...c.hot, ...[...scores].filter(([, n]) => n >= c.minScore).map(([f]) => f)])].sort();
+
+// A file keeps exact score/listed-pattern semantics. A declared directory also
+// contains hot paths when a listed/scored descendant overlaps it.
+export const hotTest = (scores: Map<string, number>, c: ClaimsConfig) => {
+  const known = hotPaths(scores, c);
+  return (file: string): boolean => (scores.get(file) ?? 0) >= c.minScore || c.hot.some((p) => matches(file, p)) ||
+    (file.endsWith('/') && known.some((p) => sharedPath(file, p) !== null));
+};
+
+// The first hot intersection with a holder, or null. The caller supplies in-flight
+// holders in order; candidate and held paths are sorted/deduplicated. A hot sibling
+// outside the actual intersection must not make a shared cold path block.
 export function claimBlock(candidate: string[], held: [string, string[]][], hot: (f: string) => boolean): { file: string; by: string } | null {
   const mine = [...new Set(candidate)].sort();
-  for (const [by, files] of held)
-    for (const f of mine) if (hot(f) && files.some((g) => g === f || matches(f, g) || matches(g, f))) return { file: f, by };
+  for (const [by, files] of held) {
+    const theirs = [...new Set(files)].sort();
+    for (const f of mine) for (const g of theirs) {
+      const shared = sharedPath(f, g);
+      if (shared !== null && hot(shared)) return { file: shared, by };
+    }
+  }
   return null;
 }
 

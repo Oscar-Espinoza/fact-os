@@ -49,6 +49,15 @@ test ──► evaluate (told what the resolution must not break) ──► merg
   is not running, and with nothing in flight nothing waits. Each skip is logged once per reason (`claim-wait`,
   "<file> is claimed by <id>"). A launched builder is told which hot files others in flight are changing ("keep your
   edits there small and additive; do not skip a change the feature needs").
+- **Directories** use repository-relative paths with `/` separators and a trailing `/`; `src` stays
+  an exact path. Check the narrower shared file/directory for hotness, including listed or scored
+  hot descendants. For example, `src/` versus `src/a/hot.ts` blocks when that file is hot, but
+  `src/` versus `src/b/cold.ts` does not block merely because `src/a/hot.ts` is hot. Wait messages
+  name the shared path. Builder hints list protected intersections inside held directories, not
+  every descendant. With `minScore: 0`, any shared path blocks and hints list held paths themselves.
+  Candidate/held paths are sorted and deduplicated; holders retain their given order. Claims use
+  known paths at launch time, so undeclared later edits and metadata changes after that snapshot
+  can still conflict. Claims remain off by default.
 - Cost: one `git diff --name-only` and one `git status` per feature in flight, only on ticks that launch, plus one
   read of `log.jsonl` when it changed.
 
