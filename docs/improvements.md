@@ -383,3 +383,18 @@ held-build inputs are captured when the build is made; a failure identity needs 
 ambiguous); an environment note is bound to its commit and failure (code/test diagnoses stay as context); day costs count
 unpriced Codex runs; a builder failing during a review repair counts as a builder failure. The base revision stays a
 validation input (accepted by the reviewer): any base movement, lesson commits included, lets identical code be revalidated.
+
+Two more stuck (one only on duplicated-helper blockers; one blocked by a fixture broken on main itself). Across 46 evaluator
+rejections since 10-01, 17 carried a duplicated-helper blocker (5 as the only cause) and the builder was never told the rule;
+3 blamed a defect already on main.
+
+9. Base defects: the evaluator reports a failure it reproduced on the base commit too (same command, isolated setup, same
+   signature) under `baseDefects` (check, command, signature, baseSha, evidence, paths), keeping that finding failed. A
+   rejection whose every failed finding is explained by a base defect, with no cheating or blocking entry and each base commit
+   on the base line, is an uncounted stop: the build is held, and a `base-defect` hold waits until base changes an implicated
+   path (an automatic recheck, at most twice per set of signatures), an edit, or `release`. Mixed rejections count as usual,
+   with base defects listed apart and the builder told not to fix them. A base defect always prevents a merge.
+10. The builder prompt now carries the helper-reuse rule the evaluator enforces (search with rg; a multi-line copy of a
+    production helper blocks; duplicated test setup is a note).
+11. (ecommerce) `F99-46` repairs the producer-queue fixture composition; F99-23 depends on it, and its status-parity check
+    tolerates only a demonstrated one-shard flake signature.

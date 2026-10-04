@@ -9,7 +9,7 @@ import { analyze, mockTasksFor, validate, type MockTask } from './ready.ts';
 import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, declaredNote, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
-import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
+import { IN_FLIGHT, type BaseDefect, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
@@ -66,12 +66,36 @@ export function parseVerdict(text: unknown): Verdict {
     lists[field] = value.map((item: string) => item.trim());
   }
   const { cheating, blocking, notes } = lists;
+  const baseDefects: BaseDefect[] = [];
+  if (v.baseDefects !== undefined) {
+    if (!Array.isArray(v.baseDefects)) return fail('verdict.baseDefects must be an array');
+    for (const [i, raw] of v.baseDefects.entries()) {
+      const at = `verdict.baseDefects[${i}]`, b = raw as Record<string, unknown>;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fail(`${at} must be an object`);
+      for (const k of ['check', 'command', 'signature', 'evidence'] as const) if (!nonempty(b[k])) return fail(`${at}.${k} must be a nonempty string`);
+      if (typeof b.baseSha !== 'string' || !/^[0-9a-f]{7,40}$/.test(b.baseSha)) return fail(`${at}.baseSha must be a commit sha`);
+      if (b.paths !== undefined && !(Array.isArray(b.paths) && b.paths.every(nonempty))) return fail(`${at}.paths must be an array of nonempty strings`);
+      baseDefects.push({ check: (b.check as string).trim(), command: (b.command as string).trim(), signature: (b.signature as string).trim(), baseSha: b.baseSha,
+        evidence: (b.evidence as string).trim(), ...(b.paths ? { paths: (b.paths as string[]).map((p) => p.trim()) } : {}) });
+    }
+  }
   if (v.lesson !== undefined && v.lesson !== null && typeof v.lesson !== 'string') return fail('verdict.lesson must be a string or null');
   const lesson = typeof v.lesson === 'string' && v.lesson.trim() ? v.lesson.trim() : null;
   // A blocking problem fails the feature even when every acceptance check is ok: the evaluator used to find real defects,
   // write them into a note or the lesson, and pass anyway.
-  const pass = v.pass && findings.length > 0 && findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0;
-  return { pass, findings, cheating, blocking, notes, lesson, ...(v.pass && !pass ? { error: 'pass:true contradicted by findings, cheating or blocking' } : {}) };
+  // A defect on base also prevents a merge, but is not a contradiction of pass:true by itself (see baseOnly).
+  const pass = v.pass && findings.length > 0 && findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0 && baseDefects.length === 0;
+  const contradicted = v.pass && !(findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0);
+  return { pass, findings, cheating, blocking, notes, lesson, ...(baseDefects.length ? { baseDefects } : {}), ...(contradicted ? { error: 'pass:true contradicted by findings, cheating or blocking' } : {}) };
+}
+
+// A rejection whose only failing content is defects reproduced on base: no cheating or blocking entry, and every failed finding
+// is explained by a base defect naming it. Such a rejection is not the feature's failure.
+export function baseOnly(v: Verdict): boolean {
+  const bd = v.baseDefects ?? [];
+  if (!bd.length || v.error || v.diagnostic || v.cheating.length || v.blocking.length) return false;
+  const explained = new Set(bd.map((d) => d.check));
+  return v.findings.filter((f) => f.ok !== true).every((f) => explained.has(f.check));
 }
 
 export function feedbackFromVerdict(v: Partial<Verdict>): string {
@@ -79,6 +103,7 @@ export function feedbackFromVerdict(v: Partial<Verdict>): string {
   for (const f of v.findings || []) if (f.ok !== true) lines.push(`FAILED ${f.check}: ${f.evidence}`);
   for (const c of v.cheating || []) lines.push(`CHEATING: ${c}`);
   for (const b of v.blocking || []) lines.push(`BLOCKING: ${b}`);
+  for (const d of v.baseDefects || []) lines.push(`BASE DEFECT (reproduced on ${d.baseSha.slice(0, 12)} too; not this feature's to fix): ${d.check}: ${d.signature} — \`${d.command}\`. ${d.evidence}`);
   if (v.diagnostic) lines.push(`\nUnvalidated evaluator output (diagnostic only):\n${v.diagnostic}`);
   return lines.join('\n') || 'Evaluator did not pass the feature.';
 }
@@ -243,6 +268,9 @@ export function builderPrompt(root: string, config: Config, f: Feature, branch: 
       hotHeld.map((h) => `- ${h}`).join('\n')}\nKeep your edits there small and additive (never reorder or reformat them); do not skip a change the feature needs.\n` : '',
     'Rules:', '- Commit your work on this branch (git add + git commit). Uncommitted changes are not evaluated.',
     '- Do not weaken or delete tests to make them pass.', '- Do not stub behavior the acceptance checks require.',
+    '- Before writing a helper, search the codebase with rg for an existing implementation and reuse or extend it. A multi-line copy of an',
+    '  existing production helper blocks evaluation. Duplicated test setup/helpers are reported as notes suggesting reuse; duplication alone',
+    '  does not block those tests.',
     '- You may run parallel subagents when that clearly helps. Give each one a disjoint set of files, so that no two ever',
     '  edit the same file. Only you commit on this branch: subagents never commit. Nobody, including you, merges, rebases,',
     '  pulls, resets or switches branches, except to complete a merge the foreman started or explicitly assigned in this worktree (resolve,',
@@ -324,8 +352,13 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     resolved ? `This branch resolved a merge conflict with ${config.base} in this pass. Also verify that the features merged into ` +
       `${config.base} it conflicted with still behave as their acceptance checks say (a failure there fails this feature):\n${resolved}\n` : '',
     `Diff ${config.base}...${branch}:\n\`\`\`diff\n${diff}\n\`\`\``, '',
+    `A failure that also happens on ${config.base} without this branch is not this feature's to fix. Only when you reproduced it on the base ` +
+    'commit too (same command, equivalent isolated setup, same failure signature) report it under "baseDefects": {"check": the failed ' +
+    'finding it explains, "command", "signature" (the normalized failure), "baseSha" (the base commit you ran), "evidence" (both runs), ' +
+    '"paths" (the files implicated)}, keep that finding failed, and do not repeat it under "blocking". A failure you did not reproduce on base ' +
+    'is the feature\'s. ' +
     'Answer with ONLY a JSON object: {"pass": boolean, "findings": [{"check": string, "ok": boolean, "evidence": string}], ' +
-    '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null}. One finding per acceptance check, plus one ' +
+    '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null, "baseDefects"?: [...]}. One finding per acceptance check, plus one ' +
     '"production wiring" finding; "pass" only if every finding is ok and cheating and blocking are empty. Evidence names files, ' +
     'lines, the tests you ran and what the mutation check showed.',
     edits.length ? `\nExisting tests this branch changes (tests that already exist on ${config.base}). Justify each change from the acceptance ` +
@@ -410,7 +443,8 @@ export function reviewFixPrompt(config: Config, feedback: string): string {
   return ['An independent evaluator rejected the work you just committed. Its findings:', '', feedback, '',
     'Fix the code so each reported behaviour is correct. Write or extend a test for each defect that fails before your fix. ' +
     'The acceptance checks are unchanged: do not narrow them, and do not skip, delete or weaken a test. If a finding cannot be met as ' +
-    'the feature is specified, say so plainly in your final message instead of working around it. Commit all your work and leave the ' +
+    'the feature is specified, say so plainly in your final message instead of working around it. Lines marked BASE DEFECT fail on ' +
+    `${config.base} too: do not try to fix them in this feature. Commit all your work and leave the ` +
     `worktree clean. The gate and a fresh evaluator run again afterwards. Only the foreman merges into ${config.base}. ` + FINISH_RULE,
   ].join('\n');
 }
@@ -1097,6 +1131,21 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       // An actionable rejection resumes the builder's session once per pass (config.reviewFixes), then the gate and a fresh
       // evaluator run again on the new commit; acceptance is unchanged. The superseded rejection's lesson is not compounded:
       // the final outcome's lesson policy applies.
+      // Only defects reproduced on base (each base commit verified on the base line): no attempt is spent, the build is held
+      // for revalidation, and a base-defect hold waits for base to change the implicated code (or an edit, or a release).
+      if (!v.pass && e.ok && baseOnly(v) && v.baseDefects!.every((d) => git(['merge-base', '--is-ancestor', d.baseSha, config.base], wt).code === 0)) {
+        const bd = v.baseDefects!, sigs = [...new Set(bd.map((d) => d.signature))].sort(), paths = [...new Set(bd.flatMap((d) => d.paths ?? []))].sort();
+        await edit(id, (x) => {
+          const stop = { attempt: (x.attempts || 0) + 1, counted: false };
+          Object.assign(x, { status: 'todo', stop, updatedAt: now(), lastFeedback: feedbackFromVerdict(v), envBuild: sha, envBuildInputs: builtInputs,
+            planningHold: { cause: 'base-defect', confidence: 'high', evidence: bd.map((d) => `${d.check}: ${d.signature} (\`${d.command}\`)`), review: `${id}/${tag}`,
+              passEnd: now(), inputs: holdInputs(root, config, x), ts: now(), base: baseSha, paths, signatures: sigs } });
+          log(root, id, 'failed', `${feedbackFromVerdict(v)}\n(rejected only for defects reproduced on ${config.base}; no attempt spent; held until ${config.base} changes ${paths.join(', ') || 'the implicated code'})`,
+            undefined, { stop, cause: 'base-defect', sha });
+        });
+        out(`base-hold ${id}: rejected only for defects already on ${config.base}; no attempt spent`);
+        return;
+      }
       if (!v.pass && builderSession && reviewsLeft > 0 && repairableRejection(e.ok, v)) {
         reviewsLeft--;
         if (await stopped()) return;
@@ -1370,6 +1419,24 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const parked = features.filter(isParked);
       if (parked.length && !stopping && !tampered() && !checkoutProblem()) { // then reload: dependents may be ready now
         for (const f of parked) await serial(() => retryMerge(f));
+        continue;
+      }
+      // A base-defect hold is rechecked when base changed one of its implicated paths since the hold, at most twice per set of
+      // failure signatures (persisted); without implicated paths, or after the cap, it waits for an edit or a release.
+      const touched = (from: string, paths: string[]) => from !== baseSha && paths.length > 0 &&
+        git(['diff', '--name-only', from, baseSha, '--', ...paths], root).out.trim() !== '';
+      const recheck = features.filter((f) => f.status === 'todo' && f.planningHold?.cause === 'base-defect' && f.planningHold.base &&
+        (f.baseRechecks?.[(f.planningHold.signatures || []).join('|')] ?? 0) < 2 && touched(f.planningHold.base, f.planningHold.paths || []));
+      if (recheck.length) {
+        await mutate(root, 'features', (d) => {
+          for (const f of d.features) {
+            if (!recheck.some((x) => x.id === f.id) || f.planningHold?.cause !== 'base-defect') continue;
+            const key = (f.planningHold.signatures || []).join('|'), n = (f.baseRechecks?.[key] ?? 0) + 1;
+            f.baseRechecks = { ...(f.baseRechecks || {}), [key]: n };
+            log(root, f.id, 'planning-hold-released', `${config.base} changed the code implicated in its base defect; recheck ${n} of 2`);
+            delete f.planningHold;
+          }
+        });
         continue;
       }
       // A planning hold whose inputs were edited since it was placed is released: the edited spec gets a fresh launch.

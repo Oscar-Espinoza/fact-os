@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
+import { parseVerdict, baseOnly, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
 
@@ -344,4 +344,15 @@ test('I06: builder and evaluator see the same on-mock tasks by id and scope; wit
     const bp = builderPrompt(root, cfg, f, 'ship/a', [task]);
     assert.match(bp, /ON MOCK/); assert.match(bp, /H-C44: Gudink partner API/); assert.match(bp, /confirm the partner API/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('baseDefects: parsed and validated; base-only means every failed finding is explained by a base defect and nothing blocks', () => {
+  const bd = { check: 'gate passes', command: 'pnpm test x.db.test.ts', signature: "Queue catalog.product-changed does not exist", baseSha: 'abcdef1234', evidence: 'fails on base and branch', paths: ['apps/worker/src/testing/echo-worker.ts'] };
+  const v = parseVerdict(JSON.stringify({ pass: false, findings: [{ check: 'gate passes', ok: false, evidence: 'x' }, { check: 'other', ok: true, evidence: 'y' }], cheating: [], blocking: [], baseDefects: [bd] }));
+  assert.equal(v.error, undefined); assert.deepEqual(v.baseDefects, [bd]); assert.equal(baseOnly(v), true);
+  assert.equal(baseOnly({ ...v, blocking: ['a real defect'] }), false, 'mixed: a blocking entry');
+  assert.equal(baseOnly({ ...v, findings: [...v.findings, { check: 'mine', ok: false, evidence: 'z' }] }), false, 'an unexplained failed finding');
+  assert.equal(parseVerdict(JSON.stringify({ pass: true, findings: [{ check: 'gate passes', ok: true, evidence: 'x' }], cheating: [], baseDefects: [bd] })).pass, false, 'a base defect prevents a merge');
+  assert.match(parseVerdict(JSON.stringify({ pass: false, findings: [{ check: 'a', ok: false, evidence: 'x' }], baseDefects: [{ ...bd, baseSha: 'main' }] })).error!, /baseSha/);
+  assert.match(feedbackFromVerdict(v), /^FAILED gate passes[\s\S]*BASE DEFECT \(reproduced on abcdef1234 too; not this feature's to fix\): gate passes: Queue catalog\.product-changed does not exist/m);
 });

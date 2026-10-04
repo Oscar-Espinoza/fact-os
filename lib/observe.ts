@@ -383,7 +383,9 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
     const tests = resolveTests(failingTests(e.detail || ''), files);
     // A typed cause from the foreman (a diagnosed environmental gate failure) wins over text matching: the foreman owns
     // those bounded retries, so the observer never resets them as an infrastructure failure.
-    const c = e.cause === 'environment' ? { cause: 'environment' as const, evidence: firstLine((e.detail || '').split('\nDiagnosis')[1] ?? e.detail ?? '') } : classify(e.detail || '', tests, changed, cfg.infraPatterns);
+    const c = e.cause === 'environment' ? { cause: 'environment' as const, evidence: firstLine((e.detail || '').split('\nDiagnosis')[1] ?? e.detail ?? '') }
+      : e.cause === 'base-defect' ? { cause: 'base-defect' as const, evidence: firstLine((e.detail || '').split('\n').find((l) => l.startsWith('BASE DEFECT')) ?? e.detail ?? '') }
+      : classify(e.detail || '', tests, changed, cfg.infraPatterns);
     const d: Diagnosis = { ts: e.ts, feature: e.feature, cause: c.cause, tests, evidence: c.evidence, action: e.event === 'failed' ? 'none: the foreman retries it' : '' };
     state.diagnoses.push(d);
     if (e.event === 'stuck') latestStuck.set(e.feature, d);
@@ -671,7 +673,7 @@ async function improvePass(root: string, config: Config, agent: RoleConfig, cfg:
 
 const at = (iso: string): string => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const CAUSE: Record<Cause, string> = { untouched: 'a test the feature does not change', infra: 'infrastructure', own: 'its own code or tests',
-  'conflict-loop': 'merge conflicts that keep coming back', setup: 'worktree or prepare setup', builder: 'the builder or evaluator run', environment: 'a test environment fault (diagnosed)', unknown: 'unrecognized' };
+  'conflict-loop': 'merge conflicts that keep coming back', setup: 'worktree or prepare setup', builder: 'the builder or evaluator run', environment: 'a test environment fault (diagnosed)', 'base-defect': 'a defect already on base', unknown: 'unrecognized' };
 
 export function renderReport(root: string, state: ObserverState, features: Feature[], tasks: HumanTask[], foreman: boolean): string {
   const count = (s: Feature['status'][]) => features.filter((f) => s.includes(f.status)).length;
@@ -693,7 +695,9 @@ export function renderReport(root: string, state: ObserverState, features: Featu
     ...(alerts.length || stuck.length || proposals.length || holds.length ? [
       ...alerts.map((a) => `- ${at(a.ts)}: ${a.text}`),
       ...stuck.map((f) => { const d = lastFor(f.id); return `- ${f.id} is stuck: ${d ? `${CAUSE[d.cause]} (${d.evidence})` : firstLine(f.lastFeedback || '')}`; }),
-      ...holds.map((f) => `- ${f.id} is on a planning hold: ${f.planningHold!.cause === 'spec-error' ? 'its spec' : 'its prompt'} cannot be met as written ` +
+      ...holds.map((f) => f.planningHold!.cause === 'base-defect'
+        ? `- ${f.id} is held for a defect already on base: ${f.planningHold!.evidence.join(' | ')}. It is rechecked when base changes ${(f.planningHold!.paths || []).join(', ') || 'the implicated paths'} (at most twice), or \`${NAME} release ${f.id}\`; queue a fix for the defect.`
+        : `- ${f.id} is on a planning hold: ${f.planningHold!.cause === 'spec-error' ? 'its spec' : 'its prompt'} cannot be met as written ` +
         `(${f.planningHold!.confidence}; ${f.planningHold!.evidence.join(' | ')}). Edit its description or acceptance to release it, or \`${NAME} release ${f.id}\` to launch it unchanged.`),
       ...proposals.map((t) => `- Proposal ${t.id}: ${t.title}`)] : ['Nothing.']), '',
     '## Last 24 hours', '',

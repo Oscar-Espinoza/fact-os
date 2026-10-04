@@ -104,7 +104,7 @@ export const PROMPT_CAUSES = ['prompt-missing-info', 'prompt-ambiguous', 'prompt
 export type PromptCause = typeof PROMPT_CAUSES[number];
 
 // What the observer decided about one stuck feature.
-export type Cause = 'untouched' | 'infra' | 'own' | 'conflict-loop' | 'setup' | 'builder' | 'environment' | 'unknown';
+export type Cause = 'untouched' | 'infra' | 'own' | 'conflict-loop' | 'setup' | 'builder' | 'environment' | 'base-defect' | 'unknown';
 export interface Diagnosis { ts: string; feature: string; cause: Cause; tests: string[]; evidence: string; action: string }
 
 export interface AttemptStop { attempt: number; counted: boolean }
@@ -113,8 +113,11 @@ export interface AttemptStop { attempt: number; counted: boolean }
 // saved prompt and outcome, that the spec or the prompt cannot be met as written. Not a person's pause: no attempt is spent, and
 // it is released by an edit of the feature's inputs (its fingerprint changes) or by a person (`release`), never by time.
 export interface PlanningHold {
-  cause: 'spec-error' | 'prompt-conflict';
+  cause: 'spec-error' | 'prompt-conflict' | 'base-defect';
   confidence: 'medium' | 'high';
+  base?: string;                      // base-defect: the base commit at the hold; a later base that changes `paths` rechecks it (at most twice per signature)
+  paths?: string[];                   // base-defect: the paths implicated in the defects
+  signatures?: string[];              // base-defect: the defects' failure signatures
   evidence: string[];                 // the reviewer's quotes, each found in the saved prompt or the outcome
   review: string;                     // the review key (<feature>/<tag>) of the failed pass
   passEnd: string;                    // ISO end of that pass
@@ -141,6 +144,7 @@ export interface Feature {
   envFailures?: number;               // gate failures diagnosed as environmental, after a same-build rerun; never attempts; cleared by a passing gate or a retry
   envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
   planningHold?: PlanningHold;
+  baseRechecks?: Record<string, number>; // automatic base-defect rechecks spent, by joined signatures (at most 2 each)
   rejected?: { sha: string; tree: string; inputs: string }; // the content an evaluator last rejected, and what it was validated against (validationInputs)
   envBuild?: string;
   envBuildInputs?: string;            // what envBuild was built for (spec, briefs, role instructions, mocks): reused only while equal                  // the commit held after an environmental gate failure: the next pass revalidates it instead of rebuilding
@@ -192,8 +196,11 @@ export interface StateFiles { features: FeaturesFile; human: HumanFile }
 export type StateName = keyof StateFiles;
 
 export interface Finding { check: string; ok: boolean; evidence: string }
+// A failure the evaluator reproduced on the base commit as well, with the same signature: not this feature's to fix.
+export interface BaseDefect { check: string; command: string; signature: string; baseSha: string; evidence: string; paths?: string[] }
 export interface Verdict {
   pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string;
+  baseDefects?: BaseDefect[]; // failures reproduced on base too; each names the failed finding (check) it explains
   diagnostic?: string; // bounded unvalidated original output, only on JSON/root/schema rejection
 }
 
@@ -202,7 +209,7 @@ export interface LogEvent {
   ts: string; feature: string | null; event: string; detail: string;
   stop?: AttemptStop;                 // failed/stuck event's try and whether it consumed a failed attempt
   attemptsReset?: boolean;           // resume/retry event: whether failed-attempt numbering restarted
-  cause?: 'environment';             // failed/stuck event: a typed cause (a diagnosed environmental gate failure)
+  cause?: 'environment' | 'base-defect'; // failed/stuck event: a typed cause (a diagnosed environmental gate failure, or a rejection only for defects on base)
   sha?: string;                      // the commit that cause was diagnosed on
   inputs?: string;                   // launch event: holdInputs of the launched spec (a planning hold must match it)
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.

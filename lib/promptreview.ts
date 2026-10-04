@@ -39,7 +39,7 @@ export interface Pass { feature: string; start: string; end: string; endEvent: s
 // failure (infrastructure, setup and merge-conflict loops are never a prompt's fault; a gate failure counts only on the feature's own tests).
 export function passKind(detail: string, endEvent: string, cause: Cause): PassKind | null {
   if (endEvent === 'resolve-failed') return /^keep-check:/.test(detail) ? 'keep-check' : 'resolver-failed'; // a resolver run's own keep-lines check
-  if (cause === 'infra' || cause === 'setup' || cause === 'conflict-loop' || cause === 'untouched' || cause === 'environment') return null;
+  if (cause === 'infra' || cause === 'setup' || cause === 'conflict-loop' || cause === 'untouched' || cause === 'environment' || cause === 'base-defect') return null;
   if (/^The merge resolution lost lines/.test(detail)) return 'keep-check';
   if (/^(builder failed|commit your work)/.test(detail)) return 'builder-failed'; // before the evaluator patterns: its stderr may have a line starting "FAILED "
   if (/^Evaluator: (evaluator failed|evaluator output is not|verdict needs|verdict\.)/.test(detail)) return 'evaluator-run-failed';
@@ -84,7 +84,7 @@ export function passesOf(events: Pick<LogEvent, 'ts' | 'feature' | 'event' | 'de
       if (e.event === 'merged' || e.event === 'ready') close(e.ts, e.event, e.detail, 'ok');
       else if (e.event === 'refreshed') close(e.ts, e.event, e.detail, evaluated ? 'ok' : 'other');
       else if (e.event === 'failed' || e.event === 'stuck' || e.event === 'resolve-failed') {
-        const k = Date.parse(e.ts) < since ? null : passKind(e.detail, e.event, e.event === 'resolve-failed' ? 'unknown' : e.cause === 'environment' ? 'environment' : causeOf(feature, e.detail)); // older passes are dropped: no classification (git) for them; a typed environment stop is no prompt failure
+        const k = Date.parse(e.ts) < since ? null : passKind(e.detail, e.event, e.event === 'resolve-failed' ? 'unknown' : e.cause === 'environment' || e.cause === 'base-defect' ? e.cause : causeOf(feature, e.detail)); // older passes are dropped: no classification (git) for them; a typed environment stop is no prompt failure
         close(e.ts, e.event, e.detail, k ? 'bad' : 'other', k ?? undefined);
       } else close(e.ts, e.event, e.detail, 'other');
     }
