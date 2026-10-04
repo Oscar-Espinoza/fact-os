@@ -61,13 +61,15 @@ export function resolveTests(names: string[], files: string[]): string[] {
 // A test counts as the feature's own when the feature changes it or a file in its directory.
 export function classify(detail: string, tests: string[], changed: string[], extra: string[] = []): { cause: Cause; evidence: string } {
   if (INVALID_VERDICT.test(detail)) return { cause: 'own', evidence: 'the evaluator did not pass it' };
-  // Setup output may name infrastructure (ECONNREFUSED, a database starting up), but the foreman owns setup retries (I05):
-  // classify it as setup before the infrastructure scan, so the observer never resets such a feature's attempts.
-  if (/^(prepare `|worktree:)/.test(detail)) return { cause: 'setup', evidence: firstLine(detail) };
+  // Prepare output may name infrastructure (ECONNREFUSED, a database starting up), but the foreman owns prepare retries
+  // (I05): classify it as setup before the infrastructure scan, so the observer never resets such a feature's attempts.
+  // Worktree failures still spend attempts and get no foreman retry, so they keep the infrastructure scan first.
+  if (/^prepare `/.test(detail)) return { cause: 'setup', evidence: firstLine(detail) };
   const low = detail.toLowerCase();
   const infra = [...INFRA, ...extra.map((p) => p.toLowerCase())].find((p) => p && low.includes(p));
   if (infra) return { cause: 'infra', evidence: infra };
   if (/too many base refreshes/.test(detail)) return { cause: 'conflict-loop', evidence: firstLine(detail) };
+  if (/^worktree:/.test(detail)) return { cause: 'setup', evidence: firstLine(detail) };
   if (/^(builder failed|commit your work|evaluator failed)/.test(detail)) return { cause: 'builder', evidence: firstLine(detail) };
   if (/^test command `/.test(detail)) {
     if (!tests.length) return { cause: 'unknown', evidence: 'test command failed; no failing test file recognized' };

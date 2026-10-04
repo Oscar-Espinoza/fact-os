@@ -729,3 +729,10 @@ test('observe --watch reports a failing pass and goes on with the next one', asy
     assert.equal(await done, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('classify: prepare output is setup even when it names infrastructure; a worktree failure keeps the infrastructure retry', () => {
+  assert.equal(classify('prepare `sh setup` exited 3:\nECONNREFUSED 127.0.0.1:5432', [], []).cause, 'setup');
+  assert.equal(classify('prepare `sh setup` exited 3:\nmy custom outage', [], [], ['my custom outage']).cause, 'setup');
+  assert.deepEqual(classify('worktree: fatal: could not create leading directories: No space left on device', [], []), { cause: 'infra', evidence: 'no space left on device' });
+  assert.equal(classify('worktree: dependency a is not a merged commit on main', [], []).cause, 'setup');
+});

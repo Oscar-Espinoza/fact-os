@@ -301,8 +301,9 @@ Each tick:
      stops, `--watch` polls. It survives restarts. `fact-os setup-resume` or the dashboard's Resume setup releases it
      (`setup-resumed`) and clears pending setup delays and counts of `todo` features; a person's `retry` clears a stuck
      feature's count. A deferred prepare that fails after a build loses that build (the next launch rebuilds); its note
-     says "after the build", so observer statistics count the launch as built, not as setup. The observer classifies any
-     prepare/worktree output as setup before its infrastructure patterns, so it never retries these. A delayed retry
+     says "after the build", so observer statistics count the launch as built, not as setup. The observer classifies
+     prepare output as setup before its infrastructure patterns, so it never retries these (worktree failures keep the
+     infrastructure scan first: they still spend attempts and rely on the observer's infrastructure retry). A delayed retry
      wakes the foreman only when the launch limit allows a launch (paused or 0 lanes: a run without `--watch` exits).
      `status` and the dashboard show the hold (reason, features) and each delayed retry, foreman running or not.
    - **Dependency import.** After branch creation/restoration, before `prepare` or building, verify every
