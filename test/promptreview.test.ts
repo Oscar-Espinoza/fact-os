@@ -307,3 +307,10 @@ test('holdDecision: a hold needs every quote found in the saved prompt or outcom
   assert.equal(holdDecision(r('spec-error', 'low', ['The retention document lists every table unchanged']), prompt, outcome), null);
   assert.equal(holdDecision(r('model-limitation', 'high', ['The retention document lists every table unchanged']), prompt, outcome), null);
 });
+
+test('review F7: a typed environment stop is no prompt failure, even when its text names an own test', () => {
+  const ev = (ts: string, event: string, detail = '', o: Record<string, unknown> = {}) => ({ ts, feature: 'a', event, detail, ...o });
+  const passes = passesOf([ev('2026-10-04T10:00:00Z', 'launch'), ev('2026-10-04T10:00:01Z', 'prompt', 'builder model=opus effort=high lessons=- briefs=-'),
+    ev('2026-10-04T10:05:00Z', 'failed', 'test command `gate` exited 1:\nFAIL src/a.test.ts', { cause: 'environment' })], () => 'own');
+  assert.equal(passes[0]!.outcome, 'other');
+});

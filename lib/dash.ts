@@ -55,6 +55,7 @@ export interface Stats { mergedAt: string[]; costToday: number; costYesterday: n
 export interface Run {
   n: number; tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
   provider?: string; unpriced?: boolean; // a Codex run: tokens recorded, USD unavailable (cost is null)
+  effort?: string; usage?: Record<string, number>;
   pass?: boolean; findings?: Finding[]; error?: string; text: string; summary: string;
 }
 export type OpenTask = HumanTask & { project: string; projectName: string; reach: number };
@@ -291,14 +292,15 @@ function featureRuns(dir: string, id: string): Run[] {
     const m = /^(\d+(?:\.\d+)?)-(build|eval|resolve|diagnose)\.json$/.exec(name);
     if (!m) continue;
     try {
-      const file = join(rd, name), raw = readFileSync(file, 'utf8'), j = tryJson(raw) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; stdout?: unknown; provider?: unknown; model?: unknown; cost_status?: unknown } | undefined;
+      const file = join(rd, name), raw = readFileSync(file, 'utf8'), j = tryJson(raw) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; stdout?: unknown; provider?: unknown; model?: unknown; cost_status?: unknown; effort?: unknown; usage?: unknown } | undefined;
       if (!j || typeof j !== 'object' || Array.isArray(j)) continue;
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
       const role = m[2] as Run['role'], provider = parseClaudeOutput(raw), text = provider.text || (typeof j.stdout === 'string' ? j.stdout : '');
       const unpriced = unpricedRun(j);
       const run: Run = { n: Number(m[1]!.split('.')[0]), tag: m[1]!, role, at: new Date(statSync(file).mtimeMs).toISOString(), ms: num(j.duration_ms), cost: unpriced ? null : num(j.total_cost_usd),
         turns: num(j.num_turns), model: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage)[0] ?? null : typeof j.model === 'string' ? j.model : null, text, summary: text.slice(0, 400),
-        ...(typeof j.provider === 'string' ? { provider: j.provider } : {}), ...(unpriced ? { unpriced: true } : {}) };
+        ...(typeof j.provider === 'string' ? { provider: j.provider } : {}), ...(unpriced ? { unpriced: true } : {}),
+        ...(typeof j.effort === 'string' ? { effort: j.effort } : {}), ...(j.usage && typeof j.usage === 'object' && !Array.isArray(j.usage) ? { usage: Object.fromEntries(Object.entries(j.usage as Record<string, unknown>).filter(([, v]) => typeof v === 'number')) as Record<string, number> } : {}) };
       if (role === 'eval') {
         const v = parseVerdict(provider.text);
         run.pass = provider.ok && v.pass;

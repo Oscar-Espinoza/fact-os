@@ -751,3 +751,10 @@ test('unpricedRun / runCosts: a Codex run has no USD (new or legacy artifact); a
   const eras = agentStats([], runs, 0);
   assert.equal(eras.reduce((n, e) => n + e.unpricedRuns, 0), 1);
 });
+
+test('review F13: a review repair counts the rejected evaluation, then continues the same pass to the fresh evaluation', () => {
+  const ev = (m: number, event: string, detail = '') => ({ ts: new Date(Date.parse('2026-10-04T10:00:00Z') + m * 60e3).toISOString(), feature: 'a', event, detail });
+  const [e] = agentStats([ev(0, 'launch'), ev(10, 'testing', 's1'), ev(20, 'evaluating'), ev(25, 'review-fix', 'resuming'), ev(40, 'testing', 's2'), ev(50, 'evaluating'), ev(52, 'merged')], [], 0);
+  assert.equal(e!.evaluated, 2); assert.equal(e!.passed, 1); assert.equal(e!.merged, 1); assert.equal(e!.built, 1, 'one build');
+  assert.equal(e!.evalMin, 3.5, 'only evaluator work is timed (5 and 2 minutes)');
+});

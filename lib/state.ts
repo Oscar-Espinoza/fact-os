@@ -404,7 +404,7 @@ export async function writeControl(root: string, patch: Partial<Pick<Control, 'p
 export const effectiveLimit = (c: Pick<Control, 'paused' | 'maxParallel'>, config: Pick<Config, 'maxParallel'>): number =>
   c.paused ? 0 : c.maxParallel ?? Math.max(1, config.maxParallel);
 
-export function log(root: string, feature: string | null, event: string, detail = '', lessonAppend?: LogEvent['lessonAppend'], metadata?: Pick<LogEvent, 'stop' | 'attemptsReset' | 'cause' | 'sha'>): void {
+export function log(root: string, feature: string | null, event: string, detail = '', lessonAppend?: LogEvent['lessonAppend'], metadata?: Pick<LogEvent, 'stop' | 'attemptsReset' | 'cause' | 'sha' | 'inputs'>): void {
   const e: LogEvent = { ts: new Date().toISOString(), feature, event, detail, ...(lessonAppend ? { lessonAppend } : {}), ...metadata };
   appendFileSync(paths(root).log, JSON.stringify(e) + '\n');
 }

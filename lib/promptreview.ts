@@ -60,7 +60,7 @@ const ENDS = ['merged', 'ready', 'failed', 'stuck', 'resolve-failed', 'interrupt
 // The passes of every feature in `events` (a pass: `launch` up to its end event), those that ended after `since`. A refresh before
 // the test that merged cleanly, or a conflict a resolver run takes over (`resolving` next), does not end the pass.
 // `causeOf` classifies a failure's detail (observe.ts classify, with the repo's files for the feature's own tests).
-export function passesOf(events: Pick<LogEvent, 'ts' | 'feature' | 'event' | 'detail'>[], causeOf: (feature: string, detail: string) => Cause, since = 0): Pass[] {
+export function passesOf(events: Pick<LogEvent, 'ts' | 'feature' | 'event' | 'detail' | 'cause'>[], causeOf: (feature: string, detail: string) => Cause, since = 0): Pass[] {
   const by = new Map<string, typeof events>();
   for (const e of events) if (e.feature) (by.get(e.feature) ?? by.set(e.feature, []).get(e.feature)!).push(e);
   const out: Pass[] = [];
@@ -84,7 +84,7 @@ export function passesOf(events: Pick<LogEvent, 'ts' | 'feature' | 'event' | 'de
       if (e.event === 'merged' || e.event === 'ready') close(e.ts, e.event, e.detail, 'ok');
       else if (e.event === 'refreshed') close(e.ts, e.event, e.detail, evaluated ? 'ok' : 'other');
       else if (e.event === 'failed' || e.event === 'stuck' || e.event === 'resolve-failed') {
-        const k = Date.parse(e.ts) < since ? null : passKind(e.detail, e.event, e.event === 'resolve-failed' ? 'unknown' : causeOf(feature, e.detail)); // older passes are dropped: no classification (git) for them
+        const k = Date.parse(e.ts) < since ? null : passKind(e.detail, e.event, e.event === 'resolve-failed' ? 'unknown' : e.cause === 'environment' ? 'environment' : causeOf(feature, e.detail)); // older passes are dropped: no classification (git) for them; a typed environment stop is no prompt failure
         close(e.ts, e.event, e.detail, k ? 'bad' : 'other', k ?? undefined);
       } else close(e.ts, e.event, e.detail, 'other');
     }
@@ -127,11 +127,11 @@ const runFiles = (dir: string): { name: string; mtime: number }[] => { try { ret
 
 // The key of a pass's review: `<feature>/<tag>` of its first saved prompt (a tag is one pass of an attempt); null when the
 // prompts were not saved (the run files are gone).
-export function reviewKey(runsDir: string, p: Pass): { key: string; tag: string; file: string } | null {
+export function reviewKey(runsDir: string, p: Pass): { key: string; tag: string; file: string; first: string } | null {
   const dir = join(runsDir, p.feature), files = runFiles(dir);
   const first = p.prompts[0], mine = p.role && p.prompts.filter((x) => x.role === p.role).at(-1);
   const a = first && promptFile(files, first.role, first.ts), b = mine && promptFile(files, mine.role, mine.ts);
-  return a && b ? { key: `${p.feature}/${a.tag}`, tag: b.tag, file: join(dir, b.name) } : null;
+  return a && b ? { key: `${p.feature}/${a.tag}`, tag: b.tag, file: join(dir, b.name), first: join(dir, a.name) } : null;
 }
 
 // ---- the review: prompt and answer ----
@@ -266,7 +266,8 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
     reviews[k.key] = 'error' in a ? { ...base, cause: null, evidence: [], confidence: null, suggestion: '', target: null, error: `invalid answer: ${a.error}` } : { ...base, ...a };
     delete tries[k.key];
     log(root, null, 'observer-review', `${k.key} ${p.role} ${used.model}: ${'error' in a ? `invalid answer (${a.error})` : `${a.cause} (${a.confidence})`}; $${c.cost.toFixed(2)}`);
-    if (!('error' in a)) await placeHold(root, config, p, k.key, a, input.prompt);
+    // Evidence is checked against the pass's first prompt too: a resumed prompt (a repair) does not repeat the spec.
+    if (!('error' in a)) await placeHold(root, config, p, k.key, a, k.first === k.file ? input.prompt : `${readFileSync(k.first, 'utf8')}\n${input.prompt}`);
     done++;
   };
   for (let i = 0; i < todo.length && !stopping(); i += PARALLEL) await Promise.all(todo.slice(i, i + PARALLEL).map(one));
@@ -302,14 +303,10 @@ export function holdDecision(r: Pick<PromptReview, 'cause' | 'confidence' | 'evi
   if (r.cause === 'prompt-conflict' && r.confidence === 'high' && verified && e.inPrompt >= 2) return 'hold';
   return 'alert';
 }
-// The saved prompt still carries the feature's current description and acceptance (it was not edited since that pass).
-const specIn = (prompt: string, f: Pick<Feature, 'description' | 'acceptance'>): boolean => {
-  const P = norm(prompt);
-  return [f.description || '', ...(f.acceptance || [])].map(norm).filter(Boolean).every((x) => P.includes(x));
-};
-const launchedSince = (root: string, id: string, since: string): boolean => {
-  let text = ''; try { text = readFileSync(paths(root).log, 'utf8'); } catch { return false; }
-  return text.split('\n').some((l) => { if (!l.includes('"launch"')) return false; try { const e = JSON.parse(l) as LogEvent; return e.feature === id && e.event === 'launch' && Date.parse(e.ts) > Date.parse(since); } catch { return false; } });
+// The feature's launches, oldest first, with the inputs fingerprint each launch recorded.
+const launches = (root: string, id: string): Pick<LogEvent, 'ts' | 'inputs'>[] => {
+  let text = ''; try { text = readFileSync(paths(root).log, 'utf8'); } catch { return []; }
+  return text.split('\n').flatMap((l) => { if (!l.includes('"launch"')) return []; try { const e = JSON.parse(l) as LogEvent; return e.feature === id && e.event === 'launch' ? [e] : []; } catch { return []; } });
 };
 // Places a planning hold for a review of `p`, rechecked under the state lock after the paid review: the feature is todo with
 // attempts left and no hold, `p` is its latest pass (no launch since it started), and the spec is the one that pass was given.
@@ -321,7 +318,10 @@ async function placeHold(root: string, config: Config, p: Pass, key: string, r: 
   const placed = await mutate(root, 'features', (data) => {
     const f = data.features.find((x) => x.id === p.feature);
     if (!f || f.status !== 'todo' || f.planningHold || (f.attempts || 0) >= config.maxAttempts) return null;
-    if (launchedSince(root, p.feature, p.start) || !specIn(prompt, f)) return null;
+    // The reviewed pass is the latest launch, and the inputs it was launched with are exactly the current ones (an edit made
+    // while the review ran is not held against the corrected spec).
+    const last = launches(root, p.feature).at(-1);
+    if (!last || last.ts !== p.start || !last.inputs || last.inputs !== holdInputs(root, config, f)) return null;
     const hold: PlanningHold = { cause: r.cause as PlanningHold['cause'], confidence: r.confidence as PlanningHold['confidence'], evidence: r.evidence, review: key, passEnd: p.end,
       inputs: holdInputs(root, config, f), ts: new Date().toISOString() };
     f.planningHold = hold;

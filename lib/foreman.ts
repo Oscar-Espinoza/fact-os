@@ -93,7 +93,7 @@ export function repairableRejection(runOk: boolean, v: Verdict): boolean {
 
 export function applyFailure(f: Feature, feedback: string, maxAttempts: number): void {
   delete f.sha; // counted failures rebuild; only unspent revalidation retains accepted build reuse
-  delete f.envBuild;
+  delete f.envBuild; delete f.envBuildInputs;
   delete f.pendingLesson;
   f.attempts = (f.attempts || 0) + 1;
   f.stop = { attempt: f.attempts, counted: true };
@@ -212,7 +212,7 @@ const readIf = (file: string): string | null => { try { return readFileSync(file
 // What a planning hold was judged on: the feature's description, acceptance and dependencies, and the project briefs. A
 // different fingerprint means the inputs were edited, which releases the hold for a fresh launch and review.
 export const holdInputs = (root: string, config: Config, f: Pick<Feature, 'title' | 'description' | 'acceptance' | 'deps'>): string =>
-  createHash('sha256').update(JSON.stringify({ title: f.title, description: f.description, acceptance: f.acceptance, deps: f.deps, briefs: briefs(root, config) })).digest('hex').slice(0, 16);
+  createHash('sha256').update(JSON.stringify({ title: f.title, description: f.description, acceptance: f.acceptance, deps: f.deps, briefs: briefs(root, config), roles: TEMPLATE_VERSION })).digest('hex').slice(0, 16);
 const briefs = (root: string, config: Config) => (config.briefFiles || []).map((f) => {
   const c = readIf(resolve(root, f));
   return c == null ? '' : `\n## Brief: ${f}\n\n${c}`;
@@ -270,17 +270,23 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
 }
 
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+const HOLD_RECHECK_MS = 60_000;
+// The fixed role instructions, by version: part of a planning hold's inputs, so a template fix releases a hold it caused.
+const TEMPLATE_VERSION = createHash('sha256').update(String(builderPrompt) + String(evaluatorPrompt) + String(resolverPrompt)).digest('hex').slice(0, 12);
 // The evaluator's fixed instructions, by version: a change of them is a change of validation inputs (the no-progress guard).
 const EVALUATOR_VERSION = createHash('sha256').update(String(evaluatorPrompt)).digest('hex').slice(0, 12);
 
-// A gate failure's identity, to tell whether a rerun failed the same way: the test files named on its failure lines
-// (vitest/jest FAIL, ×/✗, TAP "not ok", tables marked fail), else its last nonblank line without numbers (timings vary).
+// A gate failure's identity, to tell whether a rerun failed the same way: its failure lines (vitest/jest FAIL, ×/✗, TAP
+// "not ok", tables marked fail) and error lines (Error:, AssertionError, expected/received), with only volatile timings
+// normalized. Empty when nothing substantive is recognized: a bare footer (ELIFECYCLE …) never makes two failures the same.
 export function failureId(output: string): string {
-  const tests = new Set<string>();
-  for (const line of output.split('\n')) if (/\bFAIL\b|×|✗|\bnot ok\b|\(fail\)|\|\s*fail\s*\|/i.test(line))
-    for (const m of line.match(/[\w@.+-]+(?:\/[\w@.+-]+)*\.(?:test|spec)\.[cm]?[jt]sx?/g) || []) tests.add(m.replace(/^\.\//, ''));
-  if (tests.size) return [...tests].sort().join(',');
-  return (output.trim().split('\n').filter((l) => l.trim()).pop() ?? '').replace(/\d+(\.\d+)?/g, '#').trim();
+  const keep = new Set<string>();
+  for (const raw of output.split('\n')) {
+    const line = raw.replace(/\x1b\[[0-9;]*m/g, '').trim();
+    if (!/\bFAIL\b|×|✗|\bnot ok\b|\(fail\)|\|\s*fail\s*\||\b\w*Error\b:|AssertionError|\bExpected\b|\bReceived\b/i.test(line) || /ELIFECYCLE/.test(line)) continue;
+    keep.add(line.replace(/\b\d+(?:\.\d+)?\s?(?:ms|s|m)\b/g, '#ms').replace(/\[\d+(?:\.\d+)?\s?m?s\]/g, '[#ms]').replace(/\s+/g, ' '));
+  }
+  return [...keep].sort().join('\n');
 }
 
 export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = []): string {
@@ -756,7 +762,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (why || !k!.ok) {
         log(root, id, 'resolve-failed', why ?? `keep-check: ${k!.missing.length} lines lost`);
         out(`retry ${id}: ${why ?? 'the resolution lost lines one side added'}`);
-        const fb = why ? `${why}; finish it yourself.` : keepFeedback(config.base, k!.missing, k!.unmatched);
+        const fb = why ? `${why}; finish it yourself.` : keepFb(id, k!);
         await set(id, { status: 'todo', lastFeedback: `${cur.lastFeedback || ''}\n\nA resolver run tried first: ${fb}` });
         return null;
       }
@@ -832,7 +838,9 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // Reuse a parked evaluation that needs current-base validation, or an interrupted build,
     // only when the clean worktree still points to exactly that commit.
     const reevaluate = config.refreshBeforeTest ? f.sha : undefined;
-    const held = !reevaluate ? f.envBuild : undefined; // a build held after an environmental gate failure
+    // A build held after an environmental gate failure, reused only for the same inputs (spec, briefs, role instructions, mocks).
+    const buildInputs = () => createHash('sha256').update(JSON.stringify({ spec: holdInputs(root, config, f), mocks: mockList(mockTasks) })).digest('hex').slice(0, 16);
+    const held = !reevaluate && f.envBuild && f.envBuildInputs === buildInputs() ? f.envBuild : undefined;
     const built = reevaluate || held || builtWhenStopped(readLogEvents(P.log), id);
     const skipBuild = !!built && git(['rev-parse', branch], wt).out === built && !git(['status', '--porcelain'], wt).out &&
       git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code !== 0;
@@ -840,7 +848,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       ? `revalidating the previously evaluated ${built!.slice(0, 12)} against current base`
       : built === held ? `revalidating ${built!.slice(0, 12)}, held after an environmental gate failure`
       : `the foreman stopped after it built ${built!.slice(0, 12)}`);
-    if (f.envBuild && !skipBuild) await edit(id, (x) => { delete x.envBuild; }); // the held build no longer matches: rebuild
+    if (f.envBuild && !skipBuild) await edit(id, (x) => { delete x.envBuild; delete x.envBuildInputs; }); // no longer matches: rebuild
     // The builder's Claude session in this pass: a test-gate failure resumes it (config.gateFixes), so the fix keeps its context.
     // A skipped build has no session, so its gate failure stays an ordinary failure.
     let builderSession: string | null = null, builderNotes: string | null = null;
@@ -899,10 +907,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check). Lost
     // lines resume the builder's session with the feedback, config.keepFixes times per pass, before a counted failure; the
     // conflict record stays until a check passes, and the branch must still contain the recorded merge.
-    let rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
+    let rc = skipBuild ? { note: '' } as { lost?: string; note: string; parents?: boolean } : await checkResolution(id, branch, wt);
     let keepsLeft = config.keepFixes;
     while (rc.lost) {
-      if (!builderSession || keepsLeft <= 0) return fail(rc.lost);
+      if (!builderSession || keepsLeft <= 0 || rc.parents) return fail(rc.lost); // lost parents: a counted failure, not a keep repair
       keepsLeft--;
       if (await stopped()) return;
       const rec = loadState(root).features.find((x) => x.id === id)?.conflict;
@@ -931,8 +939,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // builder's session config.progressFixes times per pass; still unchanged, a counted failure with no gate and no evaluation.
     // Intentional revalidations (skipBuild) are exempt; different inputs justify validating identical code.
     const treeOf = (rev: string) => git(['rev-parse', `${rev}^{tree}`], wt).out;
-    const validationInputs = () => createHash('sha256').update(JSON.stringify({ acceptance: f.acceptance, test: config.test, base: baseSha,
-      mocks: mockTasks.map((t) => t.id).sort(), evaluator: EVALUATOR_VERSION })).digest('hex').slice(0, 16);
+    const validationInputs = () => createHash('sha256').update(JSON.stringify({ spec: holdInputs(root, config, f), test: config.test, base: baseSha,
+      mocks: mockList(mockTasks), evaluator: EVALUATOR_VERSION, notes: notesFor('evaluator') ?? '' })).digest('hex').slice(0, 16);
     const unchanged = () => !skipBuild && !!f.rejected && treeOf(branch) === f.rejected.tree && f.rejected.inputs === validationInputs();
     let progressLeft = config.progressFixes;
     while (unchanged()) {
@@ -993,14 +1001,16 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // 'env': the diagnosis found an environment fault (the caller reruns the same build once, then stops uncounted). The
     // diagnosis does not need a builder session (a revalidated build has none); only a builder fix does.
     let envDiag: Diagnosis | null = null;
-    const afterGateFailure = async (failure: string): Promise<'retry' | 'fail' | 'done' | 'env'> => {
+    let diagSha = ''; // the commit diagNote was diagnosed on: it is attached only to that commit's failures
+    const diagFor = (sha: string) => (sha === diagSha ? diagNote : '');
+    const afterGateFailure = async (failure: string, sha: string): Promise<'retry' | 'fail' | 'done' | 'env'> => {
       if (builderSession && fixesLeft > 0) { fixesLeft--; return resumeFix(failure, null); }
       if (!config.diagnoser || diagnosed) return 'fail';
       diagnosed = true;
       const d = await diagnose(failure);
       if (d === 'stopped') return 'done';
       if (!d) return 'fail';
-      diagNote = `\n\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}`;
+      diagNote = `\n\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}`; diagSha = sha;
       if (d.fault === 'environment') { envDiag = d; return 'env'; }
       return builderSession ? resumeFix(failure, d) : 'fail';
     };
@@ -1013,7 +1023,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const delays = config.setupRetryDelaysSec, n = (x.envFailures || 0) + 1, stuck = n > delays.length;
       const stop = { attempt: (x.attempts || 0) + 1, counted: false };
       const fb = `${failure}${diagNote}`;
-      Object.assign(x, { status: stuck ? 'stuck' : 'todo', envFailures: n, stop, updatedAt: now(), envBuild: sha,
+      Object.assign(x, { status: stuck ? 'stuck' : 'todo', envFailures: n, stop, updatedAt: now(), envBuild: sha, envBuildInputs: buildInputs(),
         envRetryAt: stuck ? undefined : new Date(Date.now() + delays[n - 1]! * 1000).toISOString(),
         lastFeedback: `${fb}\n\nThe gate failed the same way when rerun on the same build, and the diagnosis found an environment fault: no attempt was spent and the build is kept.` });
       log(root, id, stuck ? 'stuck' : 'failed', `${fb}\n(environment failure ${n} of ${delays.length + 1}, after a rerun of the same build; ${stuck ? 'no more retries' : `retry after ${delays[n - 1]}s`}; no attempt spent)`,
@@ -1040,12 +1050,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (t.code !== 0) {
         const failure = `test command \`${config.test}\` exited ${t.code}:\n${test.tail}`;
         if (envRerun) { // the rerun of an environment-diagnosed build failed too
-          const same = envRerun.sha === sha && envRerun.id === failureId(test.tail);
+          const same = envRerun.sha === sha && envRerun.id !== '' && envRerun.id === failureId(test.tail);
           envRerun = null;
           if (same) return envStop(failure, sha);
-          return fail(failure + diagNote);
+          return fail(failure + diagFor(sha));
         }
-        const next = await afterGateFailure(failure);
+        const next = await afterGateFailure(failure, sha);
         if (next === 'env') {
           envRerun = { sha, id: failureId(test.tail) };
           log(root, id, 'env-rerun', `environment fault diagnosed (${envDiag!.evidence.split('\n')[0]!.slice(0, 200)}); rerunning the gate on the same build`);
@@ -1054,11 +1064,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         }
         if (next === 'retry') continue;
         if (next === 'done') return;
-        return fail(failure + diagNote);
+        return fail(failure + diagFor(sha));
       }
 
-      envRerun = null;
-      if (loadState(root).features.find((x) => x.id === id)?.envFailures) await edit(id, (x) => { delete x.envFailures; delete x.envRetryAt; });
+      envRerun = null; diagNote = ''; diagSha = ''; // a passing gate resolves an earlier diagnosis: it never labels a later failure
+      { const cur = loadState(root).features.find((x) => x.id === id); // a passing gate also consumes a held build: later passes build again
+        if (cur?.envFailures || cur?.envBuild) await edit(id, (x) => { delete x.envFailures; delete x.envRetryAt; delete x.envBuild; delete x.envBuildInputs; }); }
       await set(id, { status: 'evaluating' });
       log(root, id, 'evaluating', '');
       const range = `${config.base}...${sha}`, d = (...a: string[]) => git(['diff', '--text', '--no-ext-diff', '--no-textconv', ...a], wt).out;
@@ -1067,6 +1078,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         ? d('--name-only', range, '--', ...config.evaluatorDiffExclude.map((p) => `:(glob)${p}`)).split('\n').filter(Boolean) : [];
       const diff = evaluatorDiff(d('--stat=160', range), names.map((p) => ({ path: p, diff: excluded.includes(p) ? '' : d(range, '--', p) })), excluded);
       const en = notesFor('evaluator');
+      const inputsAtEval = validationInputs(); // what this evaluation is given: a rejection is bound to it, not to state after the paid run
       const edits = testEdits(wt, git(['merge-base', config.base, sha], wt).out, sha);
       if (edits.length) log(root, id, 'test-edits', edits.join('; '));
       const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks);
@@ -1100,7 +1112,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (!v.pass) {
         if (lesson) await serial(() => compound(id, lesson));
         // A valid verdict's rejected content: the next build must change it (the no-progress guard).
-        if (e.ok && !v.error && !v.diagnostic) await edit(id, (x) => { x.rejected = { sha, tree: treeOf(sha), inputs: validationInputs() }; });
+        if (e.ok && !v.error && !v.diagnostic) await edit(id, (x) => { x.rejected = { sha, tree: treeOf(sha), inputs: inputsAtEval }; });
         return fail(feedbackFromVerdict(v));
       }
       if (config.merge === 'manual') {
@@ -1127,14 +1139,27 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
 
   // The keep-lines check of a conflicted refresh the builder resolved and committed (conflictBrief or resolver on): `lost` is
   // feedback when lines one side added are gone; `note` tells the evaluator what else to check after a good resolution.
-  async function checkResolution(id: string, branch: string, wt: string): Promise<{ lost?: string; note: string }> {
+  // The keep-lines feedback; over 100 lost lines, every copyable record also goes to a file the feedback names.
+  function keepFb(id: string, k: { missing: Parameters<typeof keepFeedback>[1]; unmatched: Parameters<typeof keepFeedback>[2] }): string {
+    let full: string | undefined;
+    if (k.missing.length > 100) {
+      full = join(P.runs, id, 'keep-records.txt');
+      try { mkdirSync(join(P.runs, id), { recursive: true }); writeFileSync(full, k.missing.map((m) => `dropped: ${m.file}: ${m.line.trim()}`).join('\n') + '\n'); } catch { full = undefined; }
+    }
+    return keepFeedback(config.base, k.missing, k.unmatched, 100, full);
+  }
+  async function checkResolution(id: string, branch: string, wt: string): Promise<{ lost?: string; note: string; parents?: boolean }> {
     const rec = loadState(root).features.find((x) => x.id === id)?.conflict;
     if (!rec || !(config.conflictBrief || config.resolver)) return { note: '' }; // both turned off: a pending record is ignored
     const tip = git(['rev-parse', branch], wt).out, has = (c: string) => git(['merge-base', '--is-ancestor', c, tip], wt).code === 0;
-    if (!has(rec.ours) || !has(rec.theirs)) { log(root, id, 'keep-check', `skipped: ${branch} does not contain the conflicted merge`); await set(id, { conflict: undefined }); return { note: '' }; }
+    if (!has(rec.ours) || !has(rec.theirs)) { // abandoned or rewritten history: nothing was kept, and the conflict record stays
+      log(root, id, 'keep-check', `failed: ${branch} does not contain the conflicted merge`);
+      return { lost: `The branch no longer contains the merge of ${config.base} it had to finish (${rec.ours.slice(0, 12)} with ${rec.theirs.slice(0, 12)}): ` +
+        'its history was rewritten or the merge was abandoned. Merge it again, keeping both sides, and commit the merge.', note: '', parents: true };
+    }
     const k = keepCheck(wt, rec.ours, rec.theirs, tip, rec.files);
     log(root, id, 'keep-check', k.ok ? `ok: ${rec.files.join(', ')}${k.changed.length ? `; ${k.changed.length} lines changed` : ''}` : `${k.missing.length} lines lost`);
-    if (!k.ok) return { lost: keepFeedback(config.base, k.missing, k.unmatched), note: '' };
+    if (!k.ok) return { lost: keepFb(id, k), note: '' };
     await set(id, { conflict: undefined });
     return { note: [pendingBrief.get(id)?.others || `(conflicts were in ${rec.files.join(', ')})`, changedNote(k.changed), declaredNote(k.declared)].filter(Boolean).join('\n') };
   }
@@ -1421,7 +1446,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           busy.add(g);
           launched++;
           if (claims) claims.held.push([id, filesOf(f)]);
-          log(root, id, 'launch', mockTasks.length ? 'onMock' : '');
+          log(root, id, 'launch', mockTasks.length ? 'onMock' : '', undefined, { inputs: holdInputs(root, config, f) });
           out(`building ${id}${mockTasks.length ? ' (on mock)' : ''}`);
           inflight.set(id, pipeline(f, config, mockTasks, hotHeld, control.profile ?? null)
             .catch((e: unknown) => { log(root, id, 'error', (e as Error | undefined)?.stack || String(e)); return set(id, { status: 'todo' }); })
@@ -1460,7 +1485,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         await sleep(Number(envVar('POLL_MS')) || 5000);
         continue;
       }
-      if (overBudget) { log(root, null, 'budget', `spent $${spent.toFixed(2)} of $${config.budgetUsdTotal}`); out('budget reached'); }
+      if (overBudget) { log(root, null, 'budget', `spent $${spent.toFixed(2)} reported USD of $${config.budgetUsdTotal} (Codex usage is unpriced and not included)`); out('budget reached (reported USD)'); }
       if (stopping || onceDone || capped() || overBudget || halted) break;
       if (opts.watch && parked.length) { // poll: cleaning the checkout touches no state file
         if (parked.map((f) => f.id).join() !== lastParked) out(`waiting for a clean ${config.base} checkout to merge: ${(lastParked = parked.map((f) => f.id).join())}`);
@@ -1476,7 +1501,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (setupHold) { if (!opts.watch) break; await sleep(Number(envVar('POLL_MS')) || 5000); continue; }
       // A delayed setup retry is pending work in either mode: wait for it (bounded by config.setupRetryDelaysSec).
       if (nextRetry != null) { await waitForChange(P, seen, () => stopping, nextRetry); continue; }
-      if (!(opts.watch && (a.waiting.length || manualWaiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
+      if (!(opts.watch && (a.waiting.length || a.held.length || manualWaiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
       if (manualWaiting.length && manualWaiting.join() !== lastManualWaiting) {
         lastManualWaiting = manualWaiting.join();
         log(root, null, 'waiting-merge', manualWaiting.join(', ')); out(`waiting for manual merges before: ${manualWaiting.join(', ')}`);
@@ -1486,7 +1511,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         log(root, null, 'waiting', a.waiting.join(', '));
         out(`waiting on human tasks for: ${a.waiting.join(', ')}`);
       }
-      await waitForChange(P, seen, () => stopping);
+      // A planning hold is released by an edit of its inputs, and a brief edit writes no watched file: recheck every minute.
+      await waitForChange(P, seen, () => stopping, a.held.length ? Date.now() + HOLD_RECHECK_MS : null);
     }
     const { features } = loadState(root);
     const counts: Record<string, number> = {};

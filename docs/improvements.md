@@ -358,3 +358,21 @@ Two more features stuck while this was built (the lanes were paused until the fi
 8. Every builder prompt, first and resumed, says to wait for every command acceptance needs, check its exit status and
    commit the code and evidence before the final reply, and to report a gate run that cannot complete rather than
    replacing it with partial checks.
+
+Review (a fresh Codex Sol session, 13 findings, all fixed with regression tests):
+
+- P1: a held environment build outlived a passing gate, so a later send-back (a merge hook) could skip the builder forever.
+  A passing gate now consumes it, and reuse is bound to the build's inputs (spec, briefs, role instructions, mocks).
+- P2: a hold-only `run --watch` exited, and a brief edit was never rechecked (holds now keep the watcher waiting and are
+  rechecked every minute); a hold could be placed on a spec corrected during the paid review (the launch now records its
+  inputs fingerprint, which must still equal the current one, and the fingerprint includes the role instructions); a review of
+  a resumed prompt could not verify evidence (the pass's first prompt is checked too); environment identity used only the
+  test file (now the failure and error lines, timings normalized; a bare footer identifies nothing); a typed environment stop
+  still counted as a prompt failure in pass statistics; a resolved diagnosis note was attached to a later code failure (now
+  bound to the diagnosed commit and cleared by a passing gate); the no-progress inputs missed the description, briefs,
+  evaluator notes and mock scope and were captured after the paid run (now a snapshot taken before the evaluation); a
+  builder that abandoned the foreman's merge passed the keep-lines check as "skipped" (now a counted failure, record kept).
+- P3: declaration reasons (`Reason:` lines) now reach the evaluator, over 100 lost lines go to `runs/<id>/keep-records.txt`;
+  feature, day and budget totals say reported USD; the run API carries Codex usage and effort; agent statistics treat a
+  review repair as a continuation of the pass.
+- `reviewFixes` stays opt-in (default 0, like `gateFixes`); the reviewer accepted that as a documented policy.

@@ -142,7 +142,8 @@ export interface Feature {
   envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
   planningHold?: PlanningHold;
   rejected?: { sha: string; tree: string; inputs: string }; // the content an evaluator last rejected, and what it was validated against (validationInputs)
-  envBuild?: string;                  // the commit held after an environmental gate failure: the next pass revalidates it instead of rebuilding
+  envBuild?: string;
+  envBuildInputs?: string;            // what envBuild was built for (spec, briefs, role instructions, mocks): reused only while equal                  // the commit held after an environmental gate failure: the next pass revalidates it instead of rebuilding
   refreshes?: number;
   lastFeedback?: string;
   costUsd?: number;
@@ -203,6 +204,7 @@ export interface LogEvent {
   attemptsReset?: boolean;           // resume/retry event: whether failed-attempt numbering restarted
   cause?: 'environment';             // failed/stuck event: a typed cause (a diagnosed environmental gate failure)
   sha?: string;                      // the commit that cause was diagnosed on
+  inputs?: string;                   // launch event: holdInputs of the launched spec (a planning hold must match it)
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
   lessonAppend?: { file: string; before: string; after: string };
 }

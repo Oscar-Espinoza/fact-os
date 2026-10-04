@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { procStart } from '../lib/foreman.ts';
+import { procStart, holdInputs, failureId } from '../lib/foreman.ts';
 import { startDash, conflictTimeline, type ProjectState } from '../lib/dash.ts';
 import { agentStats, observeOnce } from '../lib/observe.ts';
 import { passesOf } from '../lib/promptreview.ts';
 import type { Config, Feature, FeaturesFile, LogEvent, Verdict } from '../lib/types.ts';
 import { reap } from './reap.ts';
-import { mutate, writeControl } from '../lib/state.ts';
+import { mutate, writeControl, loadConfig } from '../lib/state.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.ts', import.meta.url));
@@ -1113,6 +1113,7 @@ test('refreshBeforeTest defaults to false: the test runs on the branch as built,
 
 // ---- I01: inline gate fix, diagnosis and test-edit evidence (docs/improvements.md) ----
 const GATE = 'test ! -f broken.txt'; // the fake builder's "break" flag commits broken.txt; a fix removes it
+const GATE_OUT = 'test ! -f broken.txt || { echo "FAIL src/receipt.test.ts > settles"; echo "Error: timed out waiting for the receipt to settle"; exit 1; }'; // with failure lines (an environment rerun compares them)
 const events = (s: { log: () => string }, id: string) => s.log().split('\n').filter(Boolean).map((l) => JSON.parse(l) as LogEvent).filter((e) => e.feature === id);
 const DIAG = { model: 'opus', effort: 'high', permissionMode: 'auto' };
 
@@ -1158,7 +1159,7 @@ test('I01: after the diagnosis-driven fix also fails, the failure counts once wi
 });
 
 test('I01: an environment diagnosis gets no builder fix; the same failure on a same-build rerun stops without spending an attempt', (t) => {
-  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG, setupRetryDelaysSec: [] }, scenario: { a: 'break,fix:noop' } });
+  const s = setup(t, { features: [F('a')], config: { test: GATE_OUT, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG, setupRetryDelaysSec: [] }, scenario: { a: 'break,fix:noop' } });
   const file = join(s.repo, '..', 'diagnoses.json'); (s.env as Record<string, string>).FAKE_DIAGNOSES = file;
   writeFileSync(file, JSON.stringify({ a: [{ fault: 'environment', evidence: 'the database refused connections', fix: 'restart postgres' }] }));
   assert.equal(s.cli('run').status, 2);
@@ -1196,7 +1197,7 @@ test('environment: a rerun that fails differently is an ordinary counted failure
 });
 
 test('environment: the held build is revalidated after the delay without a rebuild; the next episode past the delays is an uncounted stuck the observer leaves alone', async (t) => {
-  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, diagnoser: DIAG, setupRetryDelaysSec: [1] }, scenario: { a: 'break' } });
+  const s = setup(t, { features: [F('a')], config: { test: GATE_OUT, maxAttempts: 1, diagnoser: DIAG, setupRetryDelaysSec: [1] }, scenario: { a: 'break' } });
   scriptDiagnoses(s, { a: ENV_DIAG(2) });
   const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
   const a = s.feature('a');
@@ -1712,8 +1713,9 @@ test('reviewFixes: a second rejection counts once; cheating, an invalid verdict 
 });
 
 // ---- no-progress guard (progressFixes) ----
+const REJECT_NL = { ...REJECT, lesson: null }; // a lesson commit moves base, which is a changed validation input
 test('no progress: a build that leaves the rejected content unchanged resumes once; the new commit is gated and evaluated', (t) => {
-  const s = setup(t, { features: [F('a')], config: { maxAttempts: 2 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT] } });
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 2 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT_NL] } });
   const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').rejected], ['merged', 1, undefined]);
   const [fix] = s.calls('fix', 'a');
@@ -1725,7 +1727,7 @@ test('no progress: a build that leaves the rejected content unchanged resumes on
 
 test('no progress: unchanged after the resume (or only an empty commit) is a counted failure with no gate and no evaluation', (t) => {
   for (const flag of ['fix:noop', 'fix:empty']) {
-    const s = setup(t, { features: [F('a')], config: { maxAttempts: 2 }, scenario: { a: `same-again,${flag}` }, verdicts: { a: [REJECT] } });
+    const s = setup(t, { features: [F('a')], config: { maxAttempts: 2 }, scenario: { a: `same-again,${flag}` }, verdicts: { a: [REJECT_NL] } });
     assert.equal(s.cli('run').status, 2);
     assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 2], flag);
     assert.match(s.feature('a').lastFeedback!, /^no progress: the branch still has the content of [0-9a-f]{12}, which the evaluator rejected/);
@@ -1743,4 +1745,67 @@ test('no progress: changed validation inputs (edited acceptance) justify validat
   const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(s.feature('a').status, 'merged');
   assert.equal(s.calls('eval', 'a').length, 2, 'the unchanged code was validated against the edited acceptance');
+});
+
+// ---- regressions from the Codex review of the stuck-feature fixes ----
+test('review F1: a gate that passes consumes the held environment build; a later send-back builds again', (t) => {
+  const gate = 'n=$(cat ../g-$FACTOS_FEATURE 2>/dev/null || echo 0); echo $((n+1)) > ../g-$FACTOS_FEATURE; [ "$n" -ge 2 ] || { echo "FAIL apps/worker/src/process-webhook.db.test.ts > settles"; echo "Error: timed out waiting for the receipt to settle"; exit 1; }';
+  const s = setup(t, { features: [F('a')], config: { test: gate, maxAttempts: 2, diagnoser: DIAG, setupRetryDelaysSec: [1] }, verdicts: { a: [REJECT] } });
+  scriptDiagnoses(s, { a: ENV_DIAG(1) });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(s.feature('a').envBuild, undefined);
+  assert.equal(s.calls('build', 'a').length, 2, 'the held build was revalidated once; after its rejection the next pass built again');
+});
+
+test('review F2: --watch waits on a planning hold and launches it when a person releases it', async (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 2 } });
+  const config = loadConfig(s.repo), file = join(s.repo, '.fact-os', 'features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
+  d.features[0]!.planningHold = { cause: 'spec-error', confidence: 'high', evidence: ['x'], review: 'a/1', passEnd: '', inputs: holdInputs(s.repo, config, d.features[0]!), ts: '' };
+  writeFileSync(file, JSON.stringify(d));
+  const run = s.start('--watch');
+  await sleep(1500);
+  assert.equal(run.cp.exitCode, null, `still watching: ${run.out()}`); assert.equal(s.calls('build', 'a').length, 0);
+  assert.equal(s.cli('release', 'a').status, 0);
+  assert.ok(await until(() => s.feature('a').status === 'merged'), run.out());
+  run.cp.kill('SIGINT'); await run.exit;
+});
+
+test('review F6: a different error in the same test file, or a bare footer, is not the same environment failure', () => {
+  const a = failureId('FAIL src/orders.test.ts > receipt\nError: timed out waiting for the receipt to settle (30054ms)\n ELIFECYCLE Command failed with exit code 1.');
+  assert.equal(a, failureId('FAIL src/orders.test.ts > receipt\nError: timed out waiting for the receipt to settle (30881ms)\n ELIFECYCLE Command failed with exit code 1.'), 'only timings differ');
+  assert.notEqual(a, failureId('FAIL src/orders.test.ts > tenant isolation\nAssertionError: expected 403 to be 200'));
+  assert.equal(failureId(' ELIFECYCLE Command failed with exit code 1.'), '', 'a bare footer identifies nothing');
+});
+
+test('review F8: a resolved environment diagnosis is not attached to a later code failure', (t) => {
+  const gate = 'if [ ! -f ../g1-$FACTOS_FEATURE ]; then touch ../g1-$FACTOS_FEATURE; echo "FAIL x.test.ts"; echo "Error: ECONNREFUSED receipt backlog"; exit 1; fi; test ! -f $FACTOS_FEATURE-review-fix.txt';
+  const s = setup(t, { features: [F('a')], config: { test: gate, maxAttempts: 1, diagnoser: DIAG, reviewFixes: 1 }, verdicts: { a: [REJECT] } });
+  scriptDiagnoses(s, { a: [{ fault: 'environment', evidence: 'ECONNREFUSED on the relay', fix: 'restart' }] });
+  assert.equal(s.cli('run').status, 2);
+  const a = s.feature('a');
+  assert.deepEqual([a.status, a.attempts], ['stuck', 1]);
+  assert.doesNotMatch(a.lastFeedback!, /Diagnosis/, 'the old environment note does not label the new failure');
+});
+
+test('review F9: an edited brief is a changed validation input; identical code is validated again', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 3, progressFixes: 0 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT] } });
+  s.cli('run', '--max-features', '1');
+  assert.ok(s.feature('a').rejected);
+  writeFileSync(join(s.repo, 'BRIEF.md'), 'a.txt may hold any content\n');
+  const cfg = join(s.repo, '.fact-os', 'config.json'); writeFileSync(cfg, JSON.stringify({ ...JSON.parse(readFileSync(cfg, 'utf8')), briefFiles: ['BRIEF.md'] }));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.calls('eval', 'a').length, 2);
+});
+
+test('review F10: a builder that abandons the foreman\'s merge fails the keep-lines check (counted), no keep repair', (t) => {
+  const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
+    config: { maxAttempts: 1, maxParallel: 1, conflictBrief: true, keepFixes: 1 }, scenario: { a: 'abandon-merge' } });
+  conflict(s, 'b', { branch: 'from b\n' });
+  conflict(s, 'a', { branch: 'from a\n' });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.match(s.feature('a').lastFeedback!, /no longer contains the merge of main/);
+  assert.equal(s.calls('fix', 'a').length, 0);
+  assert.ok(s.feature('a').conflict, 'the conflict record is kept');
 });

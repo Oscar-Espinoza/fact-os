@@ -250,11 +250,20 @@ test('planning hold: an evidenced spec-error review of the latest failed pass ho
   writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), maxAttempts: 3, observer: { promptReview: { everyMinutes: 0 } } }));
   writeFileSync(state('features.json'), JSON.stringify({ features: [F('a', { acceptance: ['the registry document lists every table unchanged', 'parallel additions merge without editing that document'] })] }));
   writeFileSync(env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'parallel additions', ok: false, evidence: 'the document comparison fails after two parallel additions' }], cheating: [] }] }));
-  writeFileSync(env.FAKE_REVIEWS, JSON.stringify({ a: [{ cause: 'spec-error', confidence: 'high', suggestion: '', target: 'lessons',
-    evidence: ['the registry document lists every table unchanged', 'parallel additions merge without editing that document'] }] }));
+  const SPEC_ERROR = { cause: 'spec-error', confidence: 'high', suggestion: '', target: 'lessons',
+    evidence: ['the registry document lists every table unchanged', 'parallel additions merge without editing that document'] };
+  writeFileSync(env.FAKE_REVIEWS, JSON.stringify({ a: [SPEC_ERROR, SPEC_ERROR] }));
 
   let r = cli('run', '--max-features', '1');
   assert.deepEqual([feature().status, feature().attempts], ['todo', 1], r.stdout + r.stderr);
+  // An edit while the review would run: the review of the old spec places no hold on the corrected one.
+  const before = JSON.parse(readFileSync(state('features.json'), 'utf8')) as FeaturesFile, saved = JSON.stringify(before);
+  before.features[0]!.acceptance = [...before.features[0]!.acceptance, 'one more check'];
+  writeFileSync(state('features.json'), JSON.stringify(before));
+  r = cli('observe', '--agent'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(feature().planningHold, undefined, 'inputs changed since that launch');
+  writeFileSync(state('features.json'), saved);
+  const obsFile = state('observer.json'), obs = JSON.parse(readFileSync(obsFile, 'utf8')); obs.promptReviews = {}; writeFileSync(obsFile, JSON.stringify(obs)); // review it again
   r = cli('observe', '--agent'); assert.equal(r.status, 0, r.stdout + r.stderr);
   const hold = feature().planningHold!;
   assert.ok(hold, readFileSync(state('log.jsonl'), 'utf8'));

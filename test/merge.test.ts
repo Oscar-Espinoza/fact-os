@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { checkLines, claimBlock, conflictBrief, conflictFiles, conflictHunks, declaredDrops, declaredNote, declares, featureFiles, hotScores, hotTest, keepCheck, keepFeedback, lineToken, missingLines, DEFAULT_CLAIMS } from '../lib/merge.ts';
+import { checkLines, claimBlock, conflictBrief, conflictFiles, conflictHunks, declaredDrops, declaredNote, declares, dropRecords, featureFiles, hotScores, hotTest, keepCheck, keepFeedback, lineToken, missingLines, DEFAULT_CLAIMS } from '../lib/merge.ts';
 import { runTag } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
 import type { LogEvent } from '../lib/types.ts';
@@ -284,4 +284,10 @@ test('keepCheck: a lost line whose token is elsewhere at the tip stays lost, wit
 test('runTag counts resolver run files, so a resolution pass never overwrites an earlier pass', () => {
   assert.equal(runTag(['1-build.json', '1-eval.json', '1.2-resolve.json'], 1), '1.3');
   assert.equal(runTag(['1-build.json', '1-eval.json'], 1), '1.2');
+});
+
+test('review F11: a declaration\'s Reason line travels with it to the evaluator', () => {
+  const [r] = dropRecords("merge\n\ndropped: src/errors.ts: | 'X'\nReason: moved to src/errors/x.ts as X: 422\n");
+  assert.deepEqual(r, { file: 'src/errors.ts', payload: "| 'X'", reason: 'moved to src/errors/x.ts as X: 422' });
+  assert.match(declaredNote([{ file: 'src/errors.ts', line: "| 'X'", payload: "| 'X'", reason: r!.reason }]), /Reason: moved to src\/errors\/x\.ts/);
 });

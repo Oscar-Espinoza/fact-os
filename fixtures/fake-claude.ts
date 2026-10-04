@@ -61,6 +61,9 @@ if (mode === 'resolve') {
   if (has('budget')) extra = { subtype: 'error_max_budget_usd', is_error: true, result: '' };
   else if (has('noop')) {} // no changes, no commit
   else if (has('same-again') && existsSync(log) && readFileSync(log, 'utf8').split('\n').some((l) => l.includes('"mode":"build"') && l.includes(`"id":"${id}"`))) {} // later builds change nothing
+  else if (has('abandon-merge') && existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) { // abort the foreman's merge, commit other work
+    git('merge', '--abort'); commit(`${id}.txt`, `built ${id} without the merge\n`);
+  }
   else if ((has('resolve-drop') || has('resolve-drop-bt')) && existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
     // finish the merge keeping only this branch's side (loses base's lines); "resolve-drop-bt" also declares them the way
     // a builder did in the field: the line in backticks with the reason after it on the same line
