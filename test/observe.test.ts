@@ -772,3 +772,9 @@ test('recheck2: a diagnosis note in a failure detail is builder context, never i
   assert.equal(c.cause, 'own', JSON.stringify(c));
   assert.equal(classify('test command `gate` exited 1:\nError: connect ECONNREFUSED 127.0.0.1:5433', [], []).cause, 'infra', 'current evidence still counts');
 });
+
+test('recheck3: a delimited diagnosis note with a multi-line fix is stripped whole', () => {
+  const detail = 'test command `gate` exited 1:\nFAIL src/orders/tenant.test.ts > isolation\nAssertionError: expected 403 to be 200' +
+    '\n\n[diagnosis]\nDiagnosis (gpt-6.1-sol): code: wrong port\nSuggested fix: Use port 5433.\nIf ECONNREFUSED persists, restart the relay.\n[/diagnosis]';
+  assert.equal(classify(detail, ['src/orders/tenant.test.ts'], ['src/orders/tenant.ts']).cause, 'own');
+});

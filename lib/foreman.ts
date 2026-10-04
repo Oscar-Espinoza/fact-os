@@ -1017,7 +1017,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const d = await diagnose(failure);
       if (d === 'stopped') return 'done';
       if (!d) return 'fail';
-      diagNote = `\n\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}`; diagSha = sha; diagId = failureId(failure); diagEnv = d.fault === 'environment';
+      diagNote = `\n\n[diagnosis]\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}\n[/diagnosis]`; diagSha = sha; diagId = failureId(failure); diagEnv = d.fault === 'environment'; // the note is delimited: context, never evidence
       if (d.fault === 'environment') { envDiag = d; return 'env'; }
       return builderSession ? resumeFix(failure, d) : 'fail';
     };
