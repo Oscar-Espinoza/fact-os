@@ -758,3 +758,9 @@ test('review F13: a review repair counts the rejected evaluation, then continues
   assert.equal(e!.evaluated, 2); assert.equal(e!.passed, 1); assert.equal(e!.merged, 1); assert.equal(e!.built, 1, 'one build');
   assert.equal(e!.evalMin, 3.5, 'only evaluator work is timed (5 and 2 minutes)');
 });
+
+test('recheck R13: a resumed builder that fails during a review repair counts as a builder failure', () => {
+  const ev = (m: number, event: string, detail = '') => ({ ts: new Date(Date.parse('2026-10-04T10:00:00Z') + m * 60e3).toISOString(), feature: 'a', event, detail });
+  const [e] = agentStats([ev(0, 'launch'), ev(10, 'testing', 's1'), ev(20, 'evaluating'), ev(25, 'review-fix', 'resuming'), ev(30, 'failed', 'builder failed: exit 1')], [], 0);
+  assert.equal(e!.evaluated, 1); assert.deepEqual(e!.builderFailures.map(([r]) => r), ['builder failed']);
+});

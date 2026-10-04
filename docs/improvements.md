@@ -376,3 +376,10 @@ Review (a fresh Codex Sol session, 13 findings, all fixed with regression tests)
   feature, day and budget totals say reported USD; the run API carries Codex usage and effort; agent statistics treat a
   review repair as a continuation of the pass.
 - `reviewFixes` stays opt-in (default 0, like `gateFixes`); the reviewer accepted that as a documented policy.
+
+Re-check by the same reviewer: 5 fixed, 8 partly. Then closed: holds are rechecked during in-flight waits too; the role
+instruction version covers every prompt function and the rules they embed; the reviewer sees a resumed pass's first prompt;
+held-build inputs are captured when the build is made; a failure identity needs an error line (FAIL headers alone are
+ambiguous); an environment note is bound to its commit and failure (code/test diagnoses stay as context); day costs count
+unpriced Codex runs; a builder failing during a review repair counts as a builder failure. The base revision stays a
+validation input (accepted by the reviewer): any base movement, lesson commits included, lets identical code be revalidated.

@@ -235,9 +235,9 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
     // A review repair (reviewFixes): the rejected evaluation counts, timed up to the repair; the builder's fix, its gate and
     // the fresh evaluation continue the same pass, and only evaluator work is timed as evaluation.
     if (e.event === 'review-fix' && cur.stage === 'eval') { E.evaluated++; E.v.push(min(cur.at, ms)); E.rej.push('(repaired in the same session)'); Object.assign(cur, { stage: 'fix', at: ms }); continue; }
-    if (cur.stage === 'fix') {
+    if (cur.stage === 'fix') { // a resumed builder (a gate or review repair) that fails before its gate is a builder failure
       if (e.event === 'testing') Object.assign(cur, { stage: 'test', at: ms });
-      else if (['failed', 'stuck', 'interrupted'].includes(e.event)) open.delete(e.feature);
+      else if (['failed', 'stuck', 'interrupted'].includes(e.event)) { if (e.event !== 'interrupted') E.bf.push(firstLine(e.detail).replace(/[:(].*$/, '').slice(0, 60)); open.delete(e.feature); }
       continue;
     }
     if (e.event === 'testing' && cur.stage === 'build') { E.built++; E.b.push(min(cur.at, ms)); Object.assign(cur, { stage: 'test', at: ms }); }

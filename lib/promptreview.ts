@@ -150,7 +150,7 @@ export const isPromptCause = (c: unknown): c is PromptCause => typeof c === 'str
 export type Target = 'template' | 'briefs' | 'lessons';
 export type Confidence = 'low' | 'medium' | 'high';
 
-export interface ReviewInput { feature: string; title: string; role: Role; model: string; effort: string; kind: PassKind; outcome: string; diffStat: string; next: string; prompt: string; file: string }
+export interface ReviewInput { feature: string; title: string; role: Role; model: string; effort: string; kind: PassKind; outcome: string; diffStat: string; next: string; prompt: string; file: string; first?: { prompt: string; file: string } }
 const middle = (s: string, head: number, end: number): string => (s.length <= head + end ? s : `${s.slice(0, head)}\n\n[… ${s.length - head - end} characters omitted; the full prompt is in the file above …]\n\n${s.slice(-end)}`);
 
 export function reviewPrompt(i: ReviewInput): string {
@@ -168,7 +168,8 @@ export function reviewPrompt(i: ReviewInput): string {
     'For the other causes the suggestion may be an empty string.', '',
     'Answer with ONLY a JSON object: {"cause": string, "evidence": string[], "confidence": "low" | "medium" | "high", "suggestion": string, "target": "template" | "briefs" | "lessons"}. ' +
     '"evidence" holds one to four short quotes, from the prompt and from the outcome, that show the cause.', '',
-    `The prompt the ${i.role} was given (${i.file}):`, '', '````', middle(i.prompt, 16000, 6000), '````'].join('\n');
+    `The prompt the ${i.role} was given (${i.file}):`, '', '````', middle(i.prompt, 16000, 6000), '````',
+    ...(i.first ? ['', `That prompt resumed a session. The pass started with this prompt, which holds the full feature spec (${i.first.file}):`, '', '````', middle(i.first.prompt, 12000, 4000), '````'] : [])].join('\n');
 }
 
 export interface ParsedReview { cause: PromptCause; evidence: string[]; confidence: Confidence; suggestion: string; target: Target | null }
@@ -250,7 +251,8 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
     const k = keyOf(p)!, used = p.prompts.filter((x) => x.role === p.role).at(-1)!, branch = feature(p.feature).branch;
     const has = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root).code === 0;
     const input: ReviewInput = { feature: p.feature, title: feature(p.feature).title, role: p.role!, model: used.model, effort: used.effort, kind: p.kind!, outcome: p.detail || '(no detail logged)',
-      diffStat: has ? git(['diff', '--stat=120', `${config.base}...${branch}`], root).out : '(the branch no longer exists)', next: nextResult(passes, p), prompt: readFileSync(k.file, 'utf8'), file: k.file };
+      diffStat: has ? git(['diff', '--stat=120', `${config.base}...${branch}`], root).out : '(the branch no longer exists)', next: nextResult(passes, p), prompt: readFileSync(k.file, 'utf8'), file: k.file,
+      ...(k.first !== k.file ? { first: { prompt: readFileSync(k.first, 'utf8'), file: k.first } } : {}) };
     if (stopping()) return;
     if (!started) { state.promptReviewAt = now(); started = true; }
     state.promptReviewRuns!.push(now());
@@ -267,7 +269,7 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
     delete tries[k.key];
     log(root, null, 'observer-review', `${k.key} ${p.role} ${used.model}: ${'error' in a ? `invalid answer (${a.error})` : `${a.cause} (${a.confidence})`}; $${c.cost.toFixed(2)}`);
     // Evidence is checked against the pass's first prompt too: a resumed prompt (a repair) does not repeat the spec.
-    if (!('error' in a)) await placeHold(root, config, p, k.key, a, k.first === k.file ? input.prompt : `${readFileSync(k.first, 'utf8')}\n${input.prompt}`);
+    if (!('error' in a)) await placeHold(root, config, p, k.key, a, input.first ? `${input.first.prompt}\n${input.prompt}` : input.prompt);
     done++;
   };
   for (let i = 0; i < todo.length && !stopping(); i += PARALLEL) await Promise.all(todo.slice(i, i + PARALLEL).map(one));

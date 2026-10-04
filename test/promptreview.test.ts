@@ -314,3 +314,9 @@ test('review F7: a typed environment stop is no prompt failure, even when its te
     ev('2026-10-04T10:05:00Z', 'failed', 'test command `gate` exited 1:\nFAIL src/a.test.ts', { cause: 'environment' })], () => 'own');
   assert.equal(passes[0]!.outcome, 'other');
 });
+
+test('recheck R4: a review of a resumed prompt also shows the pass\'s first prompt', () => {
+  const i = { feature: 'a', title: 'A', role: 'builder', model: 'opus', effort: 'high', kind: 'gate-failed', outcome: 'x', diffStat: '', next: 'n', prompt: 'The test gate failed', file: 'f2',
+    first: { prompt: 'You are the builder\n- the document lists every table unchanged', file: 'f1' } } as never;
+  assert.match(reviewPrompt(i), /That prompt resumed a session[\s\S]*the document lists every table unchanged/);
+});

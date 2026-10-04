@@ -51,7 +51,7 @@ export interface Conflict {
   feature: string; title?: string; ts: string; files: string[]; resolvedBy: 'resolver' | 'builder' | null; resolving?: boolean; note?: string;
   outcome: 'merged' | 'resolved' | 'resolved then stuck' | 'failed' | 'conflicted again' | 'still open'; outcomeTs?: string; stuckCause?: string; ms: number;
 }
-export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
+export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number; unpricedToday?: number; unpricedYesterday?: number } // costs: reported USD; unpriced: Codex runs
 export interface Run {
   n: number; tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
   provider?: string; unpriced?: boolean; // a Codex run: tokens recorded, USD unavailable (cost is null)
@@ -137,14 +137,15 @@ function statsOf(dir: string): Stats {
   const hit = statsCache.get(dir);
   if (hit && Date.now() - hit.at < 60000) return hit.stats;
   const now = Date.now(), midnight = new Date(now).setHours(0, 0, 0, 0), yesterday = new Date(midnight - 12 * 3600000).setHours(0, 0, 0, 0);
-  let costToday = 0, costYesterday = 0;
+  let costToday = 0, costYesterday = 0, unpricedToday = 0, unpricedYesterday = 0;
   for (const { file, mtime } of runFiles(dir)) {
     if (mtime < yesterday) continue;
-    const c = (readJson(file, {}) as { total_cost_usd?: unknown }).total_cost_usd;
+    const j = readJson(file, {}) as { total_cost_usd?: unknown; cost_status?: unknown; provider?: unknown }, c = j.total_cost_usd;
+    if (unpricedRun(j)) { if (mtime >= midnight) unpricedToday++; else unpricedYesterday++; continue; }
     if (typeof c === 'number' && Number.isFinite(c)) mtime >= midnight ? (costToday += c) : (costYesterday += c);
   }
   const mergedAt = readLog(dir, 2000).filter((e) => e.event === 'merged' && Date.parse(e.ts) >= now - 48 * 3600000).map((e) => e.ts);
-  const stats = { mergedAt, costToday, costYesterday };
+  const stats = { mergedAt, costToday, costYesterday, unpricedToday, unpricedYesterday };
   statsCache.set(dir, { at: now, stats });
   return stats;
 }

@@ -212,7 +212,7 @@ const readIf = (file: string): string | null => { try { return readFileSync(file
 // What a planning hold was judged on: the feature's description, acceptance and dependencies, and the project briefs. A
 // different fingerprint means the inputs were edited, which releases the hold for a fresh launch and review.
 export const holdInputs = (root: string, config: Config, f: Pick<Feature, 'title' | 'description' | 'acceptance' | 'deps'>): string =>
-  createHash('sha256').update(JSON.stringify({ title: f.title, description: f.description, acceptance: f.acceptance, deps: f.deps, briefs: briefs(root, config), roles: TEMPLATE_VERSION })).digest('hex').slice(0, 16);
+  createHash('sha256').update(JSON.stringify({ title: f.title, description: f.description, acceptance: f.acceptance, deps: f.deps, briefs: briefs(root, config), roles: TEMPLATE_VERSION_OF() })).digest('hex').slice(0, 16);
 const briefs = (root: string, config: Config) => (config.briefFiles || []).map((f) => {
   const c = readIf(resolve(root, f));
   return c == null ? '' : `\n## Brief: ${f}\n\n${c}`;
@@ -271,8 +271,11 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
 
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 const HOLD_RECHECK_MS = 60_000;
-// The fixed role instructions, by version: part of a planning hold's inputs, so a template fix releases a hold it caused.
-const TEMPLATE_VERSION = createHash('sha256').update(String(builderPrompt) + String(evaluatorPrompt) + String(resolverPrompt)).digest('hex').slice(0, 12);
+// The fixed role instructions (every prompt function and the rules they embed), by version: part of a planning hold's inputs,
+// so a template fix releases a hold it caused.
+let templateVersion = '';
+const TEMPLATE_VERSION_OF = (): string => templateVersion ||= createHash('sha256').update([builderPrompt, evaluatorPrompt, resolverPrompt, gateFixPrompt, commitFixPrompt,
+  keepFixPrompt, reviewFixPrompt, progressFixPrompt, diagnosisPrompt, keepFeedback].map(String).join('\n') + FINISH_RULE + DROP_PROTOCOL).digest('hex').slice(0, 12);
 // The evaluator's fixed instructions, by version: a change of them is a change of validation inputs (the no-progress guard).
 const EVALUATOR_VERSION = createHash('sha256').update(String(evaluatorPrompt)).digest('hex').slice(0, 12);
 
@@ -286,7 +289,8 @@ export function failureId(output: string): string {
     if (!/\bFAIL\b|×|✗|\bnot ok\b|\(fail\)|\|\s*fail\s*\||\b\w*Error\b:|AssertionError|\bExpected\b|\bReceived\b/i.test(line) || /ELIFECYCLE/.test(line)) continue;
     keep.add(line.replace(/\b\d+(?:\.\d+)?\s?(?:ms|s|m)\b/g, '#ms').replace(/\[\d+(?:\.\d+)?\s?m?s\]/g, '[#ms]').replace(/\s+/g, ' '));
   }
-  return [...keep].sort().join('\n');
+  // FAIL headers alone do not tell two failures apart (the same file can fail for another reason): no error line, no identity.
+  return [...keep].some((l) => /\b\w*Error\b:|AssertionError|\bExpected\b|\bReceived\b/i.test(l)) ? [...keep].sort().join('\n') : '';
 }
 
 export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = []): string {
@@ -849,6 +853,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       : built === held ? `revalidating ${built!.slice(0, 12)}, held after an environmental gate failure`
       : `the foreman stopped after it built ${built!.slice(0, 12)}`);
     if (f.envBuild && !skipBuild) await edit(id, (x) => { delete x.envBuild; delete x.envBuildInputs; }); // no longer matches: rebuild
+    const builtInputs = skipBuild && built === held ? f.envBuildInputs! : buildInputs(); // what this build is for, captured now
     // The builder's Claude session in this pass: a test-gate failure resumes it (config.gateFixes), so the fix keeps its context.
     // A skipped build has no session, so its gate failure stays an ordinary failure.
     let builderSession: string | null = null, builderNotes: string | null = null;
@@ -1001,8 +1006,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // 'env': the diagnosis found an environment fault (the caller reruns the same build once, then stops uncounted). The
     // diagnosis does not need a builder session (a revalidated build has none); only a builder fix does.
     let envDiag: Diagnosis | null = null;
-    let diagSha = ''; // the commit diagNote was diagnosed on: it is attached only to that commit's failures
-    const diagFor = (sha: string) => (sha === diagSha ? diagNote : '');
+    // An environment diagnosis labels only the commit and failure it diagnosed (the observer reads infrastructure from it);
+    // a code or test diagnosis stays useful context for the next builder whatever failed after it.
+    let diagSha = '', diagId = '', diagEnv = false;
+    const diagFor = (sha: string, id: string) => (!diagEnv || (sha === diagSha && id === diagId) ? diagNote : '');
     const afterGateFailure = async (failure: string, sha: string): Promise<'retry' | 'fail' | 'done' | 'env'> => {
       if (builderSession && fixesLeft > 0) { fixesLeft--; return resumeFix(failure, null); }
       if (!config.diagnoser || diagnosed) return 'fail';
@@ -1010,7 +1017,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const d = await diagnose(failure);
       if (d === 'stopped') return 'done';
       if (!d) return 'fail';
-      diagNote = `\n\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}`; diagSha = sha;
+      diagNote = `\n\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}`; diagSha = sha; diagId = failureId(failure); diagEnv = d.fault === 'environment';
       if (d.fault === 'environment') { envDiag = d; return 'env'; }
       return builderSession ? resumeFix(failure, d) : 'fail';
     };
@@ -1023,7 +1030,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const delays = config.setupRetryDelaysSec, n = (x.envFailures || 0) + 1, stuck = n > delays.length;
       const stop = { attempt: (x.attempts || 0) + 1, counted: false };
       const fb = `${failure}${diagNote}`;
-      Object.assign(x, { status: stuck ? 'stuck' : 'todo', envFailures: n, stop, updatedAt: now(), envBuild: sha, envBuildInputs: buildInputs(),
+      Object.assign(x, { status: stuck ? 'stuck' : 'todo', envFailures: n, stop, updatedAt: now(), envBuild: sha, envBuildInputs: builtInputs,
         envRetryAt: stuck ? undefined : new Date(Date.now() + delays[n - 1]! * 1000).toISOString(),
         lastFeedback: `${fb}\n\nThe gate failed the same way when rerun on the same build, and the diagnosis found an environment fault: no attempt was spent and the build is kept.` });
       log(root, id, stuck ? 'stuck' : 'failed', `${fb}\n(environment failure ${n} of ${delays.length + 1}, after a rerun of the same build; ${stuck ? 'no more retries' : `retry after ${delays[n - 1]}s`}; no attempt spent)`,
@@ -1053,7 +1060,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           const same = envRerun.sha === sha && envRerun.id !== '' && envRerun.id === failureId(test.tail);
           envRerun = null;
           if (same) return envStop(failure, sha);
-          return fail(failure + diagFor(sha));
+          return fail(failure + diagFor(sha, failureId(test.tail)));
         }
         const next = await afterGateFailure(failure, sha);
         if (next === 'env') {
@@ -1064,10 +1071,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         }
         if (next === 'retry') continue;
         if (next === 'done') return;
-        return fail(failure + diagFor(sha));
+        return fail(failure + diagFor(sha, failureId(failure)));
       }
 
-      envRerun = null; diagNote = ''; diagSha = ''; // a passing gate resolves an earlier diagnosis: it never labels a later failure
+      envRerun = null; diagNote = ''; diagSha = ''; diagId = ''; // a passing gate resolves an earlier diagnosis: it never labels a later failure
       { const cur = loadState(root).features.find((x) => x.id === id); // a passing gate also consumes a held build: later passes build again
         if (cur?.envFailures || cur?.envBuild) await edit(id, (x) => { delete x.envFailures; delete x.envRetryAt; delete x.envBuild; delete x.envBuildInputs; }); }
       await set(id, { status: 'evaluating' });
@@ -1472,7 +1479,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         const free = !stopping && !onceDone && !capped() && !overBudget && busyCount() < limit;
         const files = { features: P.features, human: P.human }, done = () => stopping || woke;
         // A timer for the next delayed setup retry, cancelled when the race settles: a stray one would keep the process alive.
-        const retryWake = nextRetry != null && free ? timer(Math.max(0, nextRetry - Date.now()) + 50) : null;
+        const wakeAt = Math.min(nextRetry != null ? nextRetry : Infinity, a.held.length ? Date.now() + HOLD_RECHECK_MS : Infinity); // also recheck planning holds
+        const retryWake = Number.isFinite(wakeAt) && free ? timer(Math.max(0, wakeAt - Date.now()) + 50) : null;
         await Promise.race([...inflight.values(), ...(free ? [waitForChange(files, stamp(files), done)] : []),
           ...(!stopping && !onceDone ? [waitForChange({ control: P.control }, ctlSeen, done)] : []),
           ...(orphans.length && !free ? [sleep(Number(envVar('POLL_MS')) || 5000)] : []),
@@ -1500,7 +1508,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       // A setup hold: --watch polls for `setup-resume` (it writes no watched file); a run without --watch stops here.
       if (setupHold) { if (!opts.watch) break; await sleep(Number(envVar('POLL_MS')) || 5000); continue; }
       // A delayed setup retry is pending work in either mode: wait for it (bounded by config.setupRetryDelaysSec).
-      if (nextRetry != null) { await waitForChange(P, seen, () => stopping, nextRetry); continue; }
+      if (nextRetry != null) { await waitForChange(P, seen, () => stopping, a.held.length ? Math.min(nextRetry, Date.now() + HOLD_RECHECK_MS) : nextRetry); continue; }
       if (!(opts.watch && (a.waiting.length || a.held.length || manualWaiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
       if (manualWaiting.length && manualWaiting.join() !== lastManualWaiting) {
         lastManualWaiting = manualWaiting.join();

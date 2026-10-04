@@ -1737,7 +1737,7 @@ test('no progress: unchanged after the resume (or only an empty commit) is a cou
 });
 
 test('no progress: changed validation inputs (edited acceptance) justify validating identical code', (t) => {
-  const s = setup(t, { features: [F('a')], config: { maxAttempts: 3, progressFixes: 0 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT] } });
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 3, progressFixes: 0 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT_NL] } });
   s.cli('run', '--max-features', '1');
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts, !!s.feature('a').rejected], ['todo', 1, true]);
   const file = join(s.repo, '.fact-os', 'features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
@@ -1776,6 +1776,7 @@ test('review F6: a different error in the same test file, or a bare footer, is n
   assert.equal(a, failureId('FAIL src/orders.test.ts > receipt\nError: timed out waiting for the receipt to settle (30881ms)\n ELIFECYCLE Command failed with exit code 1.'), 'only timings differ');
   assert.notEqual(a, failureId('FAIL src/orders.test.ts > tenant isolation\nAssertionError: expected 403 to be 200'));
   assert.equal(failureId(' ELIFECYCLE Command failed with exit code 1.'), '', 'a bare footer identifies nothing');
+  assert.equal(failureId('FAIL src/orders.test.ts > receipt\nreceipt did not settle'), '', 'a FAIL header without an error line is ambiguous');
 });
 
 test('review F8: a resolved environment diagnosis is not attached to a later code failure', (t) => {
@@ -1789,7 +1790,7 @@ test('review F8: a resolved environment diagnosis is not attached to a later cod
 });
 
 test('review F9: an edited brief is a changed validation input; identical code is validated again', (t) => {
-  const s = setup(t, { features: [F('a')], config: { maxAttempts: 3, progressFixes: 0 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT] } });
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 3, progressFixes: 0 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT_NL] } });
   s.cli('run', '--max-features', '1');
   assert.ok(s.feature('a').rejected);
   writeFileSync(join(s.repo, 'BRIEF.md'), 'a.txt may hold any content\n');
@@ -1808,4 +1809,13 @@ test('review F10: a builder that abandons the foreman\'s merge fails the keep-li
   assert.match(s.feature('a').lastFeedback!, /no longer contains the merge of main/);
   assert.equal(s.calls('fix', 'a').length, 0);
   assert.ok(s.feature('a').conflict, 'the conflict record is kept');
+});
+
+test('recheck R8: an environment note is not attached to a different failure on the same commit', (t) => {
+  const gate = 'if [ ! -f ../g1-$FACTOS_FEATURE ]; then touch ../g1-$FACTOS_FEATURE; echo "FAIL src/x.test.ts > relay"; echo "Error: connect ECONNREFUSED 127.0.0.1:5433"; else echo "FAIL src/x.test.ts > tenant"; echo "AssertionError: expected 403 to be 200"; fi; exit 1';
+  const s = setup(t, { features: [F('a')], config: { test: gate, maxAttempts: 1, diagnoser: DIAG } });
+  scriptDiagnoses(s, { a: [{ fault: 'environment', evidence: 'ECONNREFUSED: the database refused connections', fix: 'restart' }] });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.doesNotMatch(s.feature('a').lastFeedback!, /Diagnosis/);
 });
