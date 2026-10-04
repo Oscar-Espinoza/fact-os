@@ -187,7 +187,7 @@ export function promptFingerprint(role: Role, r: { model?: string; effort?: stri
 
 // The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
 // `testing <sha>` of the same pass), or null. The next pass can skip the builder if the branch is still exactly there.
-const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked', 'gate-fix', 'commit-fix', 'keep-fix', 'review-fix'];
+const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked', 'gate-fix', 'commit-fix', 'keep-fix', 'review-fix', 'progress-fix'];
 export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'detail'>[], id: string): string | null {
   let sha: string | null = null, last = '', before: { sha: string | null; last: string } | null = null;
   for (const e of events) {
@@ -248,6 +248,7 @@ export function builderPrompt(root: string, config: Config, f: Feature, branch: 
     '  pulls, resets or switches branches, except to complete a merge the foreman started or explicitly assigned in this worktree (resolve,',
     '  git add, git commit); the foreman alone merges into ' + config.base + '.',
     `- The test command \`${config.test}\` must pass.`,
+    `- ${FINISH_RULE}`,
     lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config), notes].join('\n');
 }
 
@@ -269,6 +270,8 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
 }
 
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+// The evaluator's fixed instructions, by version: a change of them is a change of validation inputs (the no-progress guard).
+const EVALUATOR_VERSION = createHash('sha256').update(String(evaluatorPrompt)).digest('hex').slice(0, 12);
 
 // A gate failure's identity, to tell whether a rerun failed the same way: the test files named on its failure lines
 // (vitest/jest FAIL, ×/✗, TAP "not ok", tables marked fail), else its last nonblank line without numbers (timings vary).
@@ -356,7 +359,7 @@ export function gateFixPrompt(config: Config, failure: string, d: Diagnosis | nu
     'The gate\'s output:', '```', failure, '```', '',
     'Fix the code, not the tests. Change an existing test only when the test itself is wrong, and then name that test and say why in the ' +
     'commit message: an independent evaluator sees every edit to an existing test. Never skip, delete or weaken a test to make the gate pass. ' +
-    'Run the failing tests before you finish, commit all your work and leave the worktree clean. Only the foreman merges.',
+    'Run the failing tests before you finish, commit all your work and leave the worktree clean. Only the foreman merges. ' + FINISH_RULE,
     d ? `\nA read-only diagnosis of this failure${diagnoserModel ? ` (${diagnoserModel})` : ''} found a ${d.fault} fault.\nEvidence: ${d.evidence}\nFix: ${d.fix}\n` +
       (d.fault === 'test' ? 'Change only the test it names, as it describes, and keep everything that test checks that is still right.' : 'Change the code; leave the tests as they are.') : '',
   ].join('\n');
@@ -367,15 +370,28 @@ export function commitFixPrompt(config: Config, problem: string): string {
   return [`The foreman found that your work is not committed, so the test gate cannot run on it yet:`, '', problem, '',
     'Finish only the existing work: commit all of it (git add, git commit). If a merge the foreman started is pending, resolve it ' +
     'and commit the merge; never abort it and never start another merge or rebase. Do not start new work, do not weaken or delete ' +
-    `tests and do not discard changes that belong to this feature. Leave the worktree clean. Only the foreman merges into ${config.base}.`,
+    `tests and do not discard changes that belong to this feature. Leave the worktree clean. Only the foreman merges into ${config.base}. ` + FINISH_RULE,
   ].join('\n');
+}
+
+// Every builder prompt, first and resumed: a reply ends the run, and work still pending then is not evaluated.
+export const FINISH_RULE = 'Before your final reply, wait for every command needed for acceptance to complete, inspect its exit status, and commit all ' +
+  'required code and evidence. Prefer foreground commands; if a tool backgrounds a long command, poll or wait within this run until it finishes. ' +
+  'Never finish with required work or evidence still pending. Keep any acceptance requirement for a complete gate run: do not replace it with ' +
+  'partial checks; if it cannot complete here, say so plainly with the actual limitation.';
+
+// Sent to the builder's own resumed session when its build left the content the evaluator rejected unchanged (config.progressFixes).
+export function progressFixPrompt(config: Config, rejection: string): string {
+  return ['Your branch still has exactly the content the evaluator rejected, so the gate and the evaluator would only repeat the same verdict. The rejection:', '',
+    rejection, '', 'Do the missing work now and commit it. An empty commit or a commit that changes nothing does not count. ' + FINISH_RULE +
+    ` Do not weaken or delete tests. Leave the worktree clean. Only the foreman merges into ${config.base}.`].join('\n');
 }
 
 // Sent to the builder's own resumed session when its committed merge resolution lost lines one side added (config.keepFixes).
 export function keepFixPrompt(config: Config, feedback: string): string {
   return ['The foreman checked the merge you resolved and committed, and it lost lines one side added:', '', feedback, '',
     'Fix only that: restore each line, or declare it in a new commit exactly as shown. Keep the merge commit; do not abort, redo or ' +
-    `rewrite it and do not start another merge or rebase. Do not weaken or delete tests. Commit your work and leave the worktree clean. Only the foreman merges into ${config.base}.`,
+    `rewrite it and do not start another merge or rebase. Do not weaken or delete tests. Commit your work and leave the worktree clean. Only the foreman merges into ${config.base}. ` + FINISH_RULE,
   ].join('\n');
 }
 
@@ -385,7 +401,7 @@ export function reviewFixPrompt(config: Config, feedback: string): string {
     'Fix the code so each reported behaviour is correct. Write or extend a test for each defect that fails before your fix. ' +
     'The acceptance checks are unchanged: do not narrow them, and do not skip, delete or weaken a test. If a finding cannot be met as ' +
     'the feature is specified, say so plainly in your final message instead of working around it. Commit all your work and leave the ' +
-    `worktree clean. The gate and a fresh evaluator run again afterwards. Only the foreman merges into ${config.base}.`,
+    `worktree clean. The gate and a fresh evaluator run again afterwards. Only the foreman merges into ${config.base}. ` + FINISH_RULE,
   ].join('\n');
 }
 
@@ -910,6 +926,33 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     let resolved = rc.note; // after a resolution in this pass: what the evaluator must also check
     // Gate-failure recovery, bounded per pass: config.gateFixes resumed fixes, then (config.diagnoser) one read-only diagnosis
     // and one more fix with its brief. 'retry' re-runs the gate; 'fail' counts the failure; 'done' means stopped or already failed.
+    // No progress: a build that leaves exactly the content an evaluator rejected (same tree), validated against the same inputs
+    // (acceptance, test command, base, mock allowance, evaluator instructions), would only get the same verdict. Resume the
+    // builder's session config.progressFixes times per pass; still unchanged, a counted failure with no gate and no evaluation.
+    // Intentional revalidations (skipBuild) are exempt; different inputs justify validating identical code.
+    const treeOf = (rev: string) => git(['rev-parse', `${rev}^{tree}`], wt).out;
+    const validationInputs = () => createHash('sha256').update(JSON.stringify({ acceptance: f.acceptance, test: config.test, base: baseSha,
+      mocks: mockTasks.map((t) => t.id).sort(), evaluator: EVALUATOR_VERSION })).digest('hex').slice(0, 16);
+    const unchanged = () => !skipBuild && !!f.rejected && treeOf(branch) === f.rejected.tree && f.rejected.inputs === validationInputs();
+    let progressLeft = config.progressFixes;
+    while (unchanged()) {
+      const rejection = f.lastFeedback || '(the previous evaluator rejection)';
+      if (!builderSession || progressLeft <= 0)
+        return fail(`no progress: the branch still has the content of ${f.rejected!.sha.slice(0, 12)}, which the evaluator rejected, so the gate and the evaluator were not run again.\n\n${rejection}`);
+      progressLeft--;
+      if (await stopped()) return;
+      tag = runTag(readdirSync(runDir), attempt);
+      await set(id, { status: 'building' });
+      log(root, id, 'progress-fix', `resuming the builder: the branch still has the content the evaluator rejected (${f.rejected!.sha.slice(0, 12)})`);
+      out(`fix ${id}: no change since the rejected commit; resuming the builder`);
+      const pp = progressFixPrompt(config, rejection);
+      recordPrompt('builder', pp, builderNotes);
+      const r = await claude('builder', pp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
+      if (await stopped()) return;
+      if (!r.ok) return fail(`builder failed: ${r.error}`);
+      if (r.sessionId) builderSession = r.sessionId;
+      if (!await ensureCommitted()) return;
+    }
     let fixesLeft = config.gateFixes, diagnosed = false, diagNote = '', reviewsLeft = config.reviewFixes;
     const resumeFix = async (failure: string, d: Diagnosis | null): Promise<'retry' | 'done'> => {
       if (await stopped()) return 'done';
@@ -1056,17 +1099,19 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       }
       if (!v.pass) {
         if (lesson) await serial(() => compound(id, lesson));
+        // A valid verdict's rejected content: the next build must change it (the no-progress guard).
+        if (e.ok && !v.error && !v.diagnostic) await edit(id, (x) => { x.rejected = { sha, tree: treeOf(sha), inputs: validationInputs() }; });
         return fail(feedbackFromVerdict(v));
       }
       if (config.merge === 'manual') {
         if (lesson) await serial(() => compound(id, lesson));
         log(root, id, 'ready', branch); out(`ready ${id} (${branch})`);
-        return set(id, { status: 'ready', sha, lastFeedback: undefined });
+        return set(id, { status: 'ready', sha, lastFeedback: undefined, rejected: undefined });
       }
       const merged = await serial(async () => {
         // Keep the accepted commit and lesson across parking or a crash after Git
         // merges but before feature state is recorded. Never promote it while ready.
-        await set(id, { sha, pendingLesson: lesson ? { sha, text: lesson } : undefined });
+        await set(id, { sha, pendingLesson: lesson ? { sha, text: lesson } : undefined, rejected: undefined });
         return merge(f, branch, sha, fail, inline);
       });
       if (merged === 'revalidate') {

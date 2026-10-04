@@ -1710,3 +1710,37 @@ test('reviewFixes: a second rejection counts once; cheating, an invalid verdict 
   assert.deepEqual([s.feature('b').status, s.calls('fix', 'b').length], ['stuck', 0]);
   assert.deepEqual([s.feature('c').status, s.calls('fix', 'c').length], ['stuck', 0], 'an invalid verdict is not a repair brief');
 });
+
+// ---- no-progress guard (progressFixes) ----
+test('no progress: a build that leaves the rejected content unchanged resumes once; the new commit is gated and evaluated', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 2 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT] } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').rejected], ['merged', 1, undefined]);
+  const [fix] = s.calls('fix', 'a');
+  assert.ok(fix); assert.match(fix.prompt, /^Your branch still has exactly the content the evaluator rejected/); assert.match(fix.prompt, /GET credit returns 409/);
+  assert.ok(events(s, 'a').some((e) => e.event === 'progress-fix'));
+  assert.equal(s.calls('eval', 'a').length, 2);
+  for (const c of [...s.calls('build', 'a'), fix]) assert.match(c.prompt, /wait for every command needed for acceptance to complete/, 'the finish rule, first and resumed');
+});
+
+test('no progress: unchanged after the resume (or only an empty commit) is a counted failure with no gate and no evaluation', (t) => {
+  for (const flag of ['fix:noop', 'fix:empty']) {
+    const s = setup(t, { features: [F('a')], config: { maxAttempts: 2 }, scenario: { a: `same-again,${flag}` }, verdicts: { a: [REJECT] } });
+    assert.equal(s.cli('run').status, 2);
+    assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 2], flag);
+    assert.match(s.feature('a').lastFeedback!, /^no progress: the branch still has the content of [0-9a-f]{12}, which the evaluator rejected/);
+    assert.equal(s.calls('eval', 'a').length, 1, `${flag}: no second evaluation`);
+    assert.equal(events(s, 'a').filter((e) => e.event === 'testing').length, 1, `${flag}: no second gate`);
+  }
+});
+
+test('no progress: changed validation inputs (edited acceptance) justify validating identical code', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 3, progressFixes: 0 }, scenario: { a: 'same-again' }, verdicts: { a: [REJECT] } });
+  s.cli('run', '--max-features', '1');
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, !!s.feature('a').rejected], ['todo', 1, true]);
+  const file = join(s.repo, '.fact-os', 'features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
+  d.features[0]!.acceptance = ['a.txt exists, with any content']; writeFileSync(file, JSON.stringify(d));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(s.calls('eval', 'a').length, 2, 'the unchanged code was validated against the edited acceptance');
+});

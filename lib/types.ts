@@ -63,6 +63,7 @@ export interface Config {
   gateFixes: number;                  // safe integer >= 0: resumed builder fixes after a test-gate failure, per pass (0 = none)
   commitFixes: number;                // safe integer >= 0: resumes per pass to commit work the builder left uncommitted (0 = none)
   keepFixes: number;                  // safe integer >= 0: resumes per pass to restore or declare lines the builder's merge resolution lost (0 = none)
+  progressFixes: number;              // safe integer >= 0: resumes per pass when a build left the content the evaluator rejected unchanged, before a counted failure with no gate or evaluation (0 = none)
   reviewFixes: number;                // safe integer >= 0: resumes per pass to fix an actionable evaluator rejection, then a fresh gate and evaluation (0 = none)
   setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
   classifier: ClassifierConfig | null; // I07: TypeSafe Jev tier/split judgments, shadow mode only (records, never changes a feature)
@@ -140,6 +141,7 @@ export interface Feature {
   envFailures?: number;               // gate failures diagnosed as environmental, after a same-build rerun; never attempts; cleared by a passing gate or a retry
   envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
   planningHold?: PlanningHold;
+  rejected?: { sha: string; tree: string; inputs: string }; // the content an evaluator last rejected, and what it was validated against (validationInputs)
   envBuild?: string;                  // the commit held after an environmental gate failure: the next pass revalidates it instead of rebuilding
   refreshes?: number;
   lastFeedback?: string;

@@ -18,7 +18,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I05 | done | Setup failures spend no attempts: delayed retries, then a sticky launch hold until setup-resume |
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
 | I07 | v2 shadow done | Jev classifier: 32 narrow questions → review requirements, workload, attention, planning; Sol escalation for unsure cases; shadow only |
-| I08 | done | Five stuck features: keep-lines declarations, uncounted environment stops, inherited mock allowance, planning holds, review repair, unpriced Codex cost |
+| I08 | done | Seven stuck features: keep-lines declarations, uncounted environment stops, inherited mock allowance, planning holds, review repair, unpriced Codex cost, no-progress guard |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -344,3 +344,17 @@ Changes (designed with the Codex partner, each amended by its review; `/tmp/herd
 5. `reviewFixes` (default 0, opt-in like `gateFixes`): an actionable rejection (valid verdict, no cheating, concrete failed
    findings or blocking entries) resumes the builder once per pass, then the gate and a fresh evaluator run again.
 6. Codex runs are recorded as unpriced (`cost_status`), not $0; totals are labelled reported USD.
+
+Two more features stuck while this was built (the lanes were paused until the fix):
+
+- One was the mock gap above again (a sign-in dependency's mocked mail provider, three levels up); item 4 covers it.
+- In the other, the builder started a long gate run in the background, replied that it was waiting for it, and committed
+  nothing; the foreman gated and evaluated the same commit three times.
+
+7. No-progress guard: a valid rejection records the rejected commit's tree and its validation inputs (acceptance, test
+   command, base, mock allowance, evaluator instructions). A later build that leaves the same tree under the same inputs
+   resumes the builder's session (`progressFixes`, default 1); still unchanged (an empty commit does not count), it is a
+   counted failure without a gate or an evaluation. Revalidations (`skipBuild`) are exempt; a person's `retry` clears it.
+8. Every builder prompt, first and resumed, says to wait for every command acceptance needs, check its exit status and
+   commit the code and evidence before the final reply, and to report a gate run that cannot complete rather than
+   replacing it with partial checks.

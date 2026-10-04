@@ -95,6 +95,10 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   resume its session that many times per pass with copyable `dropped:` records before a counted failure) and
   `reviewFixes` (0; after an actionable evaluator rejection — a valid verdict, no cheating, concrete failed findings —
   resume the builder's session that many times per pass, then the gate and a fresh evaluator run on the new commit).
+  `progressFixes` (1; when a build leaves exactly the content an evaluator rejected — same tree, same acceptance, test
+  command, base, mock allowance and evaluator instructions — resume the builder's session that many times per pass;
+  still unchanged, a counted failure without running the gate or the evaluator again). Every builder prompt asks it
+  to wait for every command acceptance needs, and commit the evidence, before its final reply.
   A diagnoser `environment` fault reruns the gate once on the same build; if it fails the same way the pass stops
   without spending an attempt and the build is revalidated after `setupRetryDelaysSec` (one more episode after the
   last delay is an uncounted stuck). A feature also gets the mock allowance of the open mockable human tasks of its

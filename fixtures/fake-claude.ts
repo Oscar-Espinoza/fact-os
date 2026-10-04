@@ -60,6 +60,7 @@ if (mode === 'resolve') {
   }
   if (has('budget')) extra = { subtype: 'error_max_budget_usd', is_error: true, result: '' };
   else if (has('noop')) {} // no changes, no commit
+  else if (has('same-again') && existsSync(log) && readFileSync(log, 'utf8').split('\n').some((l) => l.includes('"mode":"build"') && l.includes(`"id":"${id}"`))) {} // later builds change nothing
   else if ((has('resolve-drop') || has('resolve-drop-bt')) && existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
     // finish the merge keeping only this branch's side (loses base's lines); "resolve-drop-bt" also declares them the way
     // a builder did in the field: the line in backticks with the reason after it on the same line
@@ -120,10 +121,12 @@ if (mode === 'resolve') {
   const fixes = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'fix' && e.id === id; }).length : 0;
   const commitOnly = prompt.startsWith('The foreman found that your work is not committed');
   const keepFix = prompt.startsWith('The foreman checked the merge you resolved'), reviewFix = prompt.startsWith('An independent evaluator rejected');
+  const progressFix = prompt.startsWith('Your branch still has exactly the content the evaluator rejected');
   if (keepFix) { // declare every lost line exactly as the feedback shows it
     const recs = [...prompt.matchAll(/^ {2}(dropped: .+)$/gm)].map((m) => m[1]!);
     if (!has('noop') && recs.length) git('commit', '-q', '--allow-empty', '-m', ['declare the lines the merge dropped', ...recs.flatMap((r) => [r, 'Reason: moved'])].join('\n'));
   } else if (reviewFix) { if (!has('noop')) commit(`${id}-review-fix.txt`, 'fixed what the evaluator found\n'); }
+  else if (progressFix) { if (has('empty')) git('commit', '-q', '--allow-empty', '-m', 'an empty commit'); else if (!has('noop')) commit(`${id}-progress.txt`, 'the missing work\n'); }
   else if (!has('noop') && !(has('noop1') && fixes === 0)) {
     if (existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
       for (const f of conflicted()) { writeFileSync(f, git('show', `:2:${f}`) + '\n' + git('show', `:3:${f}`) + '\n'); git('add', f); }
