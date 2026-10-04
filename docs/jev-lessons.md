@@ -79,6 +79,9 @@ not send. Typed output guarantees the interface, not the truth.
 - Keep agent answers as proposals beside Jev's; never average booleans into probabilities or train on them unadjudicated.
 - Let an agent add caution (a review proposal) but not remove it: a "false" is a disagreement to inspect, because no check can
   prove a quote really excludes the mechanism.
+- Mechanical quote checks need explicit quoting instructions: without them Sol's repo quotes failed exact matching for 2 of 4
+  answers; "copy a short fragment from ONE line, exact spacing, give its 1-based number" brought it to 0 of 4. Reject a bad
+  reference per answer, not the whole response.
 - Isolate the agent from the user's tool config (`codex exec --ignore-user-config`): a read-only shell sandbox does not
   confine MCP tools or hooks.
 - OpenAI strict structured outputs reject `const` without `type`, length and pattern keywords: send a simplified schema to

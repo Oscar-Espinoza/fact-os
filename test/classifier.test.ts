@@ -1,7 +1,7 @@
 // I07 v2: the shadow classifier against a local fake TypeSafe server (no real provider calls).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assess, classify, classifierState, codeFeatures, compositeFeatures, cooldown, loadScorer, questionsFor, readRecords, report, retryAfterMs, score,
@@ -403,4 +403,17 @@ test('I07 v3 review: the sent glossary is kept by content so inputs can be recon
   assert.deepEqual(JSON.parse(readFileSync(kept, 'utf8')), { money: 'immutable context expected' });
   const [again] = await classify(root, cfg({ glossary: 'glossary.json' }), [a], () => {}, 'manual', noKey, roles('opus'));
   assert.equal(seen.length, 1); assert.equal(again!.attempts, 0); assert.equal(again!.roles!.builder.model, 'opus');
+});
+
+
+test('I07 v4 review: the scorer must declare the anyRework target and the exact ordered features (V406); a credential-looking glossary is not used (V407)', async (t) => {
+  const root = project(t), file = join(root, 's.json'), { scorer } = parity(), expect = { model: MODEL, glossaryHash: null };
+  writeFileSync(file, JSON.stringify({ ...scorer, target: 'log(totalCost+.05)' })); assert.match((loadScorer(file, expect) as any).error, /target/);
+  writeFileSync(file, JSON.stringify({ ...scorer, features: scorer.features.map(() => scorer.features[0]) })); assert.match((loadScorer(file, expect) as any).error, /order or membership/);
+  const a = F('a'), r2 = project(t, [a]);
+  writeFileSync(join(r2, 'glossary.json'), JSON.stringify({ note: 'api_key: abcdefgh12345678' }));
+  const seen = fakeTypesafe(t, [body(a)]), lines: string[] = [];
+  const [rec] = await classify(r2, cfg({ glossary: 'glossary.json' }), [a], (s) => lines.push(s), 'manual', fakeKey);
+  assert.ok(lines.some((l) => /looks like it contains a credential/.test(l))); assert.equal(seen[0]!.body.state.codebase, undefined);
+  assert.equal((rec!.input as any).glossaryHash, null); assert.ok(!existsSync(join(r2, '.fact-os', 'classifier-context')));
 });

@@ -256,7 +256,18 @@ model, so a cached answer is never reused across providers. Answers are
 `retrospectiveCurrentBase`. First real runs: Sol read the repository and cited a migration and the audit package with verified
 quotes (102 s, mostly cached input); Opus fallback answered in about 20 s for $0.27. After the third review (d9f3ffe: 14 P2 + 2 P3,
 all fixed), a real Sol run on F05-09 with the hardened runner cited checkout, orders and architecture files and recorded one
-disagreement (authoritative amount) beside five review proposals, in 138 s.
+disagreement (authoritative amount) beside five review proposals, in 138 s. Fourth review (aa9f10d: 10 P2 + 3 P3, all fixed):
+a Codex cooldown no longer consumes a start; human task steps and waiting-on facts are sent, bound into identity and compared;
+a lease records the agent's process group and start time, so a crashed caller's live agent keeps its claim; the snapshot is
+written from blob bytes (no git-archive export attributes); every request is kept under classifier-context/ and linked from its
+records; the scorer must declare the anyRework target and the exact ordered features; a glossary that is oversized or looks like
+it holds a credential is not used at all; eligibility is rechecked under the reservation lock; an already-aborted signal starts
+nothing; the final-message file is watched while the agent runs; publication waits at most until the deadline and journals the
+result before releasing the claim; every requested feature gets a journal entry (excluded, cached, deferred, skipped); u03 is
+not sent when an open non-mockable human task must supply the fact. A failed evidence check now rejects only that answer (kept
+with the offending reference, never composed) instead of discarding the whole response: the first real run lost 2 of 4 answers
+to inexact repo quotes; after adding explicit quoting guidance (one short exact line, 1-based line numbers) the next real run
+kept 4 of 4 with no rejections, in 86 s. The ecommerce pilot cap is `maxPerDay: 10`.
 
 **Configuration (ecommerce):** `classifier: {provider: "typesafe", mode: "shadow", glossary: ".shipyard/classifier/glossary.json",
 scorer: ".shipyard/classifier/scorer-v2.1.json"}`; key in `TYPESAFE_API_KEY` or fact-os's `.env`. The scorer is fitted to

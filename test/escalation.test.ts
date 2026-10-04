@@ -81,12 +81,19 @@ test('escalation: the snapshot excludes untracked files, factory state, credenti
 
 test('escalation: repo evidence must cite an allowed snapshot file with an exact quote; the parent attaches the blob id (V309)', async (t) => {
   const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }], { tracked: { '.shipyard/notes.md': 'refund writes the ledger' } });
+  // A failed evidence check rejects that answer only (kept with its reason, never composed); the escalation still completes.
+  const rejected = async (rx: RegExp) => { const [r] = terminal(await run(root, ['a'])); assert.equal(r!.status, 'completed');
+    assert.match(r!.response!.rejected!.s02_funds_effect!, rx); assert.deepEqual(r!.derivation!.reviewProposals, []); assert.deepEqual(r!.derivation!.rejectedEvidence, ['s02_funds_effect']); };
   fakeAgents(t, { codex: { values: { s02_funds_effect: true }, evidence: { repo: { kind: 'repo', path: '.shipyard/notes.md', startLine: 1, endLine: 1, quote: 'refund' } } } });
-  let [rec] = terminal(await run(root, ['a'])); assert.equal(rec!.status, 'invalid'); assert.match(rec!.reason!, /not an allowed file/);
+  await rejected(/not an allowed file/);
+  writeFileSync(join(root, '.fact-os', 'classifier.jsonl'), readFileSync(join(root, '.fact-os', 'classifier.jsonl'), 'utf8').split('\n').filter((l) => !l.includes('"kind":"escalation"')).join('\n'));
   fakeAgents(t, { codex: { values: { s02_funds_effect: true }, evidence: { repo: { kind: 'repo', path: 'src/refunds.ts', startLine: 2, endLine: 2, quote: '  writeLedger  ' } } } });
-  [rec] = terminal(await run(root, ['a'])); assert.match(rec!.reason!, /not found exactly/);
+  await rejected(/not found exactly/);
+  writeFileSync(join(root, '.fact-os', 'classifier.jsonl'), readFileSync(join(root, '.fact-os', 'classifier.jsonl'), 'utf8').split('\n').filter((l) => !l.includes('"kind":"escalation"')).join('\n'));
   fakeAgents(t, { codex: { values: { s02_funds_effect: true }, evidence: 'forged' } });
-  [rec] = terminal(await run(root, ['a'])); assert.match(rec!.reason!, /spec quote not found exactly/);
+  await rejected(/spec quote not found exactly/);
+  writeFileSync(join(root, '.fact-os', 'classifier.jsonl'), readFileSync(join(root, '.fact-os', 'classifier.jsonl'), 'utf8').split('\n').filter((l) => !l.includes('"kind":"escalation"')).join('\n'));
+  let rec;
   fakeAgents(t, { codex: { values: { s02_funds_effect: true }, evidence: { repo: { kind: 'repo', path: 'src/refunds.ts', startLine: 2, endLine: 2, quote: 'writeLedger' } } } });
   [rec] = terminal(await run(root, ['a'])); assert.equal(rec!.status, 'completed');
   const repoRef = rec!.response!.answers.s02_funds_effect!.evidence.find((e) => e.kind === 'repo') as any;
@@ -149,7 +156,7 @@ test('escalation: per-day caps count starts; a completed assessment is reused, r
   await run(root, ['a', 'b'], esc({ maxPerRun: 1 }));
   await run(root, ['a', 'b'], esc({ maxPerRun: 5, maxPerDay: 2 }));
   assert.equal(fake.calls().length, 2);
-  assert.equal(terminal(await run(root, ['a', 'b'], esc({ maxPerRun: 5, maxPerDay: 2 }))).length, 0);
+  assert.deepEqual((await run(root, ['a', 'b'], esc({ maxPerRun: 5, maxPerDay: 2 }))).map((r) => r.status), ['cached', 'cached']);
   // A different fallback model is a different requested identity: asked again.
   const config = loadConfig(root); (config.codex.fallback as any).model = 'sonnet';
   await escalate(root, config, config.classifier!, esc({ maxPerDay: 10 }), ['a'], () => {});
@@ -260,4 +267,92 @@ test('escalation: the report summary tolerates records from older escalation ver
   writeFileSync(join(root, '.fact-os', 'classifier.jsonl'), JSON.stringify({ schema: 2, kind: 'escalation', assessmentId: 'old', status: 'completed', deferred: [],
     derivation: { reviewProposals: [], resolvedFalse: ['s01'] } }) + '\n');
   assert.match(escalationSummary(root)!, /1 completed/);
+});
+
+
+test('escalation v4: an active Codex cooldown reserves only the fallback start (V401)', async (t) => {
+  const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }]);
+  writeFileSync(join(root, '.fact-os', 'codex.json'), JSON.stringify({ until: new Date(Date.now() + 60e3).toISOString() }));
+  const fake = fakeAgents(t, { claude: { values: {} } });
+  const [rec] = terminal(await run(root, ['a'], esc({ maxPerRun: 1 })));
+  assert.equal(rec!.status, 'completed'); assert.equal(rec!.provider, 'claude'); assert.equal(fake.calls().length, 1);
+  assert.equal(JSON.parse(readFileSync(join(root, '.fact-os', 'classifier-escalation-usage.json'), 'utf8')).starts, 1);
+});
+
+test('escalation v4: human task steps are sent, kept in the request file, and a change to them makes the answer stale (V402, V405)', async (t) => {
+  const f = F('a'), task = { id: 'h1', title: 'Configure provider', steps: ['The provider owns authorization'], unblocks: ['a'], mockable: true, status: 'open' as const };
+  const root = project(t, [{ f, over: { s05_authorization: 0.5 } }], { tasks: [task] });
+  fakeAgents(t, { codex: { values: { s05_authorization: true }, touch: [join(root, '.fact-os', 'human.json'), { tasks: [{ ...task, steps: ['The repository owns authorization'] }] }] } });
+  const recs = await run(root, ['a']);
+  const final = terminal(recs)[0]!;
+  assert.equal(final.status, 'stale');
+  const kept = JSON.parse(readFileSync(join(root, '.fact-os', recs.find((r) => r.status === 'started')!.requestFile!), 'utf8'));
+  assert.deepEqual(kept.humanTasks[0].steps, ['The provider owns authorization']);
+});
+
+test('escalation v4: a crashed caller\'s live agent keeps its claim past the lease time (V403)', async (t) => {
+  const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }]);
+  const fake = fakeAgents(t, { codex: { values: {} } });
+  // A sleeping process group stands in for the orphaned agent of a dead caller (pid 2^22 - 1 is not running).
+  const orphan = Bun.spawn(['sh', '-c', 'sleep 30'], { stdio: ['ignore', 'ignore', 'ignore'] });
+  t.after(() => orphan.kill());
+  const config = loadConfig(root);
+  // Pre-compute the assessment id by running selection once with a cap of zero starts.
+  await run(root, ['a'], esc({ maxPerRun: 0 }));
+  const usage = { day: new Date().toISOString().slice(0, 10), starts: 0, inflight: {} as Record<string, unknown> };
+  const id = readEscalations(root).find((e) => e.status === 'deferred')!.assessmentId;
+  usage.inflight[id] = { until: new Date(Date.now() - 60e3).toISOString(), owner: 'dead-1', pid: 4194303, agentPid: orphan.pid, agentStart: null };
+  writeFileSync(join(root, '.fact-os', 'classifier-escalation-usage.json'), JSON.stringify(usage));
+  const recs = await escalate(root, config, config.classifier!, esc(), ['a'], () => {});
+  assert.equal(fake.calls().length, 0); assert.match(recs.at(-1)!.reason!, /already running/);
+});
+
+test('escalation v4: the snapshot is written from blob bytes, ignoring export-ignore and export-subst (V404)', async (t) => {
+  const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }], { tracked: { '.gitattributes': 'src/refunds.ts export-ignore\nsrc/ver.ts export-subst\n', 'src/ver.ts': 'const v = "$Format:%H$";\n' } });
+  const dir = mkdtempSync(join(tmpdir(), 'probe-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const probe = join(dir, 'agent'); writeFileSync(probe, `#!/bin/sh\ncat src/refunds.ts > "${dir}/refunds"; cat src/ver.ts > "${dir}/ver"; exit 1\n`); chmodSync(probe, 0o755);
+  for (const k of ['FACTOS_CODEX', 'FACTOS_CLAUDE']) { const p = process.env[k]; process.env[k] = k === 'FACTOS_CODEX' ? probe : '/bin/false'; t.after(() => { if (p === undefined) delete process.env[k]; else process.env[k] = p; }); }
+  await run(root, ['a'], esc({ timeoutMin: 0.2 }));
+  assert.match(readFileSync(join(dir, 'refunds'), 'utf8'), /writeLedger/); assert.equal(readFileSync(join(dir, 'ver'), 'utf8'), 'const v = "$Format:%H$";\n');
+});
+
+test('escalation v4: a feature tiered while waiting for the reservation starts nothing (V408); a pre-aborted signal starts nothing (V409)', async (t) => {
+  const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }]);
+  const fake = fakeAgents(t, { codex: { values: {} } });
+  const holder = withLock(root, async () => { await Bun.sleep(300); writeJsonAtomic(join(root, '.fact-os', 'features.json'), { features: [{ ...f, tier: 'hard' }] }); });
+  await Bun.sleep(30);
+  const recs = await run(root, ['a']);
+  await holder;
+  assert.equal(fake.calls().length, 0); assert.match(recs.at(-1)!.reason!, /changed since it was selected/);
+  const root2 = project(t, [{ f, over: { s02_funds_effect: 0.5 } }]);
+  const ac = new AbortController(); ac.abort();
+  await run(root2, ['a'], esc(), ac.signal);
+  assert.equal(fake.calls().length, 0);
+});
+
+test('escalation v4: a final-message file that outgrows the cap stops the agent while it runs (V410)', async (t) => {
+  const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }]);
+  const dir = mkdtempSync(join(tmpdir(), 'grow-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const grow = join(dir, 'agent');
+  writeFileSync(grow, `#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\nhead -c 2000000 /dev/zero > "$out"; sleep 30\n`); chmodSync(grow, 0o755);
+  for (const k of ['FACTOS_CODEX', 'FACTOS_CLAUDE']) { const p = process.env[k]; process.env[k] = k === 'FACTOS_CODEX' ? grow : '/bin/false'; t.after(() => { if (p === undefined) delete process.env[k]; else process.env[k] = p; }); }
+  const started = Date.now();
+  const [rec] = terminal(await run(root, ['a']));
+  assert.equal(rec!.reason, 'oversized'); assert.ok(Date.now() - started < 10_000, `took ${Date.now() - started} ms`);
+});
+
+test('escalation v4: the journal covers every requested feature, including those left when the daily cap stops the run (V412)', async (t) => {
+  const a = F('a'), b = F('b'), c = F('c'), root = project(t, [{ f: a, over: { s02_funds_effect: 0.5 } }, { f: b, over: { s02_funds_effect: 0.45 } }, { f: c, over: { s02_funds_effect: 0.4 } }]);
+  fakeAgents(t, { codex: { values: {} } });
+  const recs = await run(root, ['a', 'b', 'c', 'missing'], esc({ maxPerDay: 1, maxPerRun: 5 }));
+  const last = new Map(recs.map((r) => [r.feature, r.status]));
+  assert.deepEqual(Object.fromEntries(last), { missing: 'excluded', a: 'completed', b: 'skipped', c: 'skipped' });
+});
+
+test('escalation v4: u03 is not sent when a person must supply the external fact (V413); scorer target/order and glossary credentials are checked (V406, V407)', async (t) => {
+  const f = F('a', { title: 'Private vendor contract' });
+  const root = project(t, [{ f, over: { u03_unverified_external_contract: 0.9 } }], { tasks: [{ id: 'h', title: 'Obtain the vendor contract', steps: [], unblocks: ['a'], mockable: false, status: 'open' }] });
+  const fake = fakeAgents(t, { codex: { values: {} } });
+  await run(root, ['a']);
+  assert.equal(fake.calls().length, 0);
 });

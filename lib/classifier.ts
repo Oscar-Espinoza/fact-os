@@ -182,6 +182,9 @@ export interface Scorer { version: string; target: string; battery: string; batt
   reference: { scores: number[]; tailFraction: number; threshold: number } }
 // The extraction contracts this code implements; an artifact naming another one is not scored.
 export const SUPPORTED_SCORERS = ['i07-v2.1-rework-devfit'];
+// The exact ordered feature vector and target each supported contract was fitted on.
+const CONTRACT_FEATURES = ['acc_chars', 'coupling_max', 'coupling_mean', 'deliverables_expected', 'desc_chars', 'kw_hits', 'mitigation_max', 'mitigation_mean', 'n_acceptance',
+  'n_deps', 'n_packages', 'n_touches', 'stakes_max', 'stakes_mean', 'surface_ui', 'touches_missing', 'uncertainty_max', 'uncertainty_mean', 'verification_max', 'verification_mean'];
 const FROZEN_FAMILIES: Record<string, string> = { stakes: 's', uncertainty: 'u', coupling: 'c', mitigation: 'm', verification: 'v' };
 const FROZEN_EXCLUDED = ['m03_existing_writer_delegation', 'm04_verified_extension_seam'];
 // numpy.quantile(scores, q, method='higher'): the smallest sorted value at or above position q * (n - 1).
@@ -216,6 +219,8 @@ export function loadScorer(file: string, expect: { model: string; glossaryHash: 
   }
   if ([...k.excludedWithoutFacts].sort().join() !== FROZEN_EXCLUDED.join()) return fail('evidence-dependent exclusions differ from the frozen extraction');
   if (s.features.some((f) => !names.has(f))) return fail('feature names do not match the extraction');
+  if (s.features.join() !== CONTRACT_FEATURES.join()) return fail('feature order or membership differs from the supported contract');
+  if (typeof s.target !== 'string' || !s.target.startsWith('anyRework')) return fail('target is not the supported anyRework contract');
   const r = s.reference;
   if (!r || !Array.isArray(r.scores) || !r.scores.length || r.scores.some((x) => typeof x !== 'number' || !(x >= 0 && x <= 1)) || typeof r.threshold !== 'number' || !(r.threshold >= 0 && r.threshold <= 1))
     return fail('reference scores or threshold out of range');
@@ -340,13 +345,24 @@ export function readRecords(root: string): ClassifierRecord[] {
 }
 
 interface Context { glossary: unknown; glossaryHash: string | null; scorer: Scorer | null; scorerHash: string | null; scorerError?: string; policy: string }
-export function loadContext(root: string, cfg: ClassifierConfig): Context {
-  let glossary: unknown = null, glossaryHash: string | null = null;
-  if (cfg.glossary) { try { const raw = readFileSync(resolve(root, cfg.glossary)); glossary = JSON.parse(raw.toString('utf8')); glossaryHash = sha(raw); } catch { glossary = null; } }
+// The glossary is sent to providers and kept on disk, so it must be small and must not look like it carries a credential; one that
+// fails either check is not used at all (never silently redacted, so what is kept is exactly what was sent).
+export const MAX_GLOSSARY = 16 * 1024;
+const CREDENTIAL = /(sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(api[_-]?key|secret|password|token)\s*["']?\s*[:=]\s*["']?[^\s"']{8,})/i;
+export function loadContext(root: string, cfg: ClassifierConfig): Context & { glossaryError?: string } {
+  let glossary: unknown = null, glossaryHash: string | null = null, glossaryError: string | undefined;
+  if (cfg.glossary) {
+    try {
+      const raw = readFileSync(resolve(root, cfg.glossary)), text = raw.toString('utf8'), key = typesafeKey();
+      if (raw.length > MAX_GLOSSARY) glossaryError = `glossary larger than ${MAX_GLOSSARY} bytes; not used`;
+      else if (CREDENTIAL.test(text) || (key && text.includes(key))) glossaryError = 'glossary looks like it contains a credential; not used';
+      else { glossary = JSON.parse(text); glossaryHash = sha(raw); }
+    } catch { glossary = null; glossaryError = 'glossary unreadable; not used'; }
+  }
   let scorer: Scorer | null = null, scorerHash: string | null = null, scorerError: string | undefined;
   if (cfg.scorer) { const s = loadScorer(resolve(root, cfg.scorer), { model: cfg.model, glossaryHash }); if (s.ok) { scorer = s.scorer; scorerHash = s.hash; } else scorerError = s.error; }
   const policy = sha(JSON.stringify({ POLICY_VERSION, HI, DIRECT, DIRECT_AXES, MECHANISM_AXES, PLANNING, scorer: scorerHash, scorerError: scorerError ?? null }));
-  return { glossary, glossaryHash, scorer, scorerHash, scorerError, policy };
+  return { glossary, glossaryHash, scorer, scorerHash, scorerError, policy, ...(glossaryError ? { glossaryError } : {}) };
 }
 // A bounded, secret-free copy of what was asked: the state sent, with the glossary replaced by its hash. The glossary itself is
 // kept once per content under classifier-context/, so every recorded input can be reconstructed.
@@ -367,6 +383,7 @@ export async function classify(root: string, cfg: ClassifierConfig, targets: Fea
   keyOf: () => string | null = typesafeKey, rolesOf: (f: Feature) => Roles | null = () => null): Promise<ClassifierRecord[]> {
   const ctx = loadContext(root, cfg);
   if (ctx.scorerError) out(`attention score unavailable: ${ctx.scorerError}`);
+  if (ctx.glossaryError) out(ctx.glossaryError);
   keepGlossary(root, ctx);
   const written: ClassifierRecord[] = [], done = new Set<string>();
   let key: string | null | undefined, stop = false;
