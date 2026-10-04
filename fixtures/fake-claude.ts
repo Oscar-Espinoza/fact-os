@@ -97,15 +97,22 @@ if (mode === 'resolve') {
       }
   }
 } else if (mode === 'fix') {
-  // default: commit leftover work, then delete broken.txt (what makes the guard tests' gate fail); "noop": change nothing;
-  // "noop1": change nothing on this feature's first fix only
+  // A resumed builder session. Commit-only prompts (I04) commit leftover work, or finish a pending foreman merge keeping both
+  // sides, and nothing else; gate-fix prompts (I01) also delete broken.txt (what makes the guard tests' gate fail).
+  // "noop": change nothing; "noop1": nothing on this feature's first resume; "dirty1": the first resume leaves new work
+  // uncommitted; "gatedirty": every gate fix leaves new work uncommitted.
   const fixes = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'fix' && e.id === id; }).length : 0;
+  const commitOnly = prompt.startsWith('The foreman found that your work is not committed');
   if (!has('noop') && !(has('noop1') && fixes === 0)) {
-    // commit work the build left behind (a commit-fix), then remove broken.txt (a gate fix)
+    if (existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
+      for (const f of conflicted()) { writeFileSync(f, git('show', `:2:${f}`) + '\n' + git('show', `:3:${f}`) + '\n'); git('add', f); }
+      git('add', '-A'); git('commit', '-q', '--no-edit');
+    }
     if (git('status', '--porcelain')) { git('add', '-A'); git('commit', '-qm', `fix ${id}: commit the leftover work`); }
-    if (existsSync('broken.txt')) { git('rm', '-q', 'broken.txt'); git('commit', '-qm', `fix ${id}: remove broken.txt`); }
+    if (!commitOnly && existsSync('broken.txt')) { git('rm', '-q', 'broken.txt'); git('commit', '-qm', `fix ${id}: remove broken.txt`); }
   }
-  if (has('dirty1') && fixes === 0) writeFileSync('leftover-fix.txt', 'not committed by the first fix\n'); // "dirty1": the first fix leaves work uncommitted
+  if (has('dirty1') && fixes === 0) writeFileSync('leftover-fix.txt', 'not committed by the first resume\n');
+  if (has('gatedirty') && !commitOnly) writeFileSync('leftover-gate.txt', 'not committed by the gate fix\n');
 } else if (mode === 'diagnose') {
   // answers with the next scripted diagnosis from $FAKE_DIAGNOSES, default a code fault; "edit": also commits a file (it must not)
   if (has('edit')) commit('diagnoser.txt', 'edited by the diagnosis\n');

@@ -1319,3 +1319,41 @@ test('I04: the commit allowance is spent once per pass', (t) => {
   assert.equal(s.calls('fix', 'a').length, 1, 'the resume left new dirt; no second resume');
   assert.match(s.feature('a').lastFeedback!, /leftover-fix\.txt/);
 });
+
+test('I04 review: lost dependency ancestry is not resumed even when the worktree is also dirty', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1, commitFixes: 1 } });
+  staleDependency(s, { conflict: true });
+  const provider = join(s.repo, '.fact-os/provider.sh'), calls = join(s.repo, '.fact-os/calls');
+  writeFileSync(provider, `#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "$*" >> '${calls}'\ncase "$*" in\n  *--resume*) git add -A; git commit -qm leftover ;;\n` +
+    `  *) git merge --abort; echo built > b.txt; git add b.txt; git commit -qm built; echo leftover > leftover.txt ;;\nesac\n` +
+    `printf '%s' '{"type":"result","is_error":false,"result":"done","session_id":"original","total_cost_usd":0}'\n`, { mode: 0o755 });
+  s.env.FACTOS_CLAUDE = provider;
+  assert.equal(s.cli('run').status, 2);
+  assert.match(s.feature('b').lastFeedback!, /declared merged dependencies/);
+  assert.equal(readFileSync(calls, 'utf8').trim().split('\n').length, 1, 'no paid resume for a failure a commit cannot repair');
+});
+
+test('I04 review: an unfinished foreman merge is committed by the resume before deferred setup runs', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1, commitFixes: 1, conflictBrief: true,
+    prepare: '! git rev-parse --quiet --verify MERGE_HEAD && test -f a.txt' }, scenario: { b: 'noop' } });
+  staleDependency(s, { conflict: true });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('b').status, s.feature('b').attempts], ['ready', 0]);
+  assert.equal(s.calls('fix', 'b').length, 1);
+  assert.ok(events(s, 'b').some((e) => e.event === 'commit-fix'));
+  assert.ok(events(s, 'b').some((e) => e.event === 'keep-check' && /^ok/.test(e.detail)), 'the keep-lines check still runs on the resolution');
+});
+
+test('I04 review: a commit-only resume does not repair the gate; the gate fix still runs with its own allowance', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, commitFixes: 1 }, scenario: { a: 'dirty,break' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.deepEqual(events(s, 'a').map((e) => e.event).filter((e) => e === 'gate-fix' || e === 'commit-fix'), ['commit-fix', 'gate-fix']);
+});
+
+test('I04 review: the commit allowance spent after the build is not available to a later gate fix', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, commitFixes: 1 }, scenario: { a: 'dirty,break,fix:gatedirty' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('fix', 'a').length, 2, 'one commit resume, one gate fix, no second commit resume');
+  assert.match(s.feature('a').lastFeedback!, /leftover-gate\.txt/);
+});

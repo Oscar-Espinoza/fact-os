@@ -738,19 +738,22 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (!b.ok) return fail(`builder failed: ${b.error}`);
     builderSession = b.sessionId ?? null; builderNotes = bn;
     }
-    if (prepareDeferred && !await prepare()) return;
     // Any commit beyond base counts as the builder's, including the merge commit that completes a base refresh.
     // `resumable`: work exists but is not committed (dirty files or a pending merge). No commits at all, or lost dependency
     // ancestry, cannot be repaired by asking the builder to commit.
+    // Lost dependency ancestry is checked first: dirty files must not earn a resume a commit cannot repair. While a foreman merge
+    // is pending, a dependency counts when the branch or that merge contains it (as before the build).
     const commitProblem = (): { text: string; resumable: boolean } | null => {
+      const pending = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt);
+      const has = (sha: string, ref: string) => git(['merge-base', '--is-ancestor', sha, ref], wt).code === 0;
+      if (required.some((sha) => !has(sha, branch) && !(pending.code === 0 && has(sha, pending.out))))
+        return { text: 'commit your work: the branch no longer contains its declared merged dependencies', resumable: false };
       const status = git(['status', '--porcelain'], wt).out.split('\n').filter(Boolean);
       const listed = status.slice(0, 40).join('\n') + (status.length > 40 ? `\n… ${status.length - 40} more` : '');
-      const merging = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 ? `the merge of ${config.base} the foreman started is not committed; ` : '';
+      const merging = pending.code === 0 ? `the merge of ${config.base} the foreman started is not committed; ` : '';
       if (merging || status.length || git(['rev-list', '--count', `${config.base}..${branch}`], wt).out === '0')
         return { text: `commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`,
           resumable: !!merging || status.length > 0 };
-      if (required.some((sha) => git(['merge-base', '--is-ancestor', sha, branch], wt).code !== 0))
-        return { text: 'commit your work: the branch no longer contains its declared merged dependencies', resumable: false };
       return null;
     };
     // Uncommitted work after a build or a fix: resume the builder's session to commit it, config.commitFixes times per pass
@@ -774,7 +777,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         if (r.sessionId) builderSession = r.sessionId;
       }
     };
+    // The build's own work (and a pending foreman merge) is committed before deferred setup runs, which needs the finished
+    // merge; whatever setup leaves behind must be committed too (the same per-pass allowance).
     if (!await ensureCommitted()) return;
+    if (prepareDeferred && (!await prepare() || !await ensureCommitted())) return;
     // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
     const rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
     if (rc.lost) return fail(rc.lost);
