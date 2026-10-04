@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { paths, log, envVar, mutate, NAME } from './state.ts';
+import { childEnv, paths, log, envVar, mutate, NAME } from './state.ts';
 import { git, exec, claudeArgs, parseClaudeOutput } from './foreman.ts';
 import { NOTE_MAX, clipNote, noteBullets, mergeNotes, fitNotes, overCap, renderNotes, parseNotes, notesFile, notesArchive, notesDir } from './notes.ts';
 import { PROMPT_CAUSES, type Cause, type Config, type HumanTask, type LogEvent, type PromptCause, type PromptReviewConfig, type Role, type RoleConfig } from './types.ts';
@@ -254,7 +254,7 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
     if (stopping()) return;
     if (!started) { state.promptReviewAt = now(); started = true; }
     state.promptReviewRuns!.push(now());
-    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: process.env, input: reviewPrompt(input), children, timeoutMin: reviewTimeoutMin(config) });
+    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: childEnv(), input: reviewPrompt(input), children, timeoutMin: reviewTimeoutMin(config) });
     const c = parseClaudeOutput(r.out);
     state.promptReviewCost = Math.round(((state.promptReviewCost ?? 0) + c.cost) * 1e6) / 1e6;
     if (!c.ok) { // not recorded: asked again next time, at most MAX_TRIES runs in all (a run the observer's own stop killed does not count)
@@ -322,7 +322,7 @@ async function tidyNotes(root: string, config: Config, agent: RoleConfig, cfg: P
     `- At most ${cfg.notesMaxBytes} bytes in total, each note one or two plain sentences starting with "- ". No headings, no dates.`,
     '- Merge duplicates and near-duplicates into one rule. Keep concrete paths, commands and names. Drop notes that only describe one feature.',
     '- Do not use tools; answer from the text below.', '', 'The notes:', '', bullets.join('\n'), '', 'Answer with the notes only, between <notes> and </notes>.'].join('\n');
-  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, agent, root), { cwd: root, env: process.env, input: prompt, children, timeoutMin: reviewTimeoutMin(config) });
+  const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, agent, root), { cwd: root, env: childEnv(), input: prompt, children, timeoutMin: reviewTimeoutMin(config) });
   const p = parseClaudeOutput(r.out), n = p.ok ? parseNotes(p.text, cfg.notesMaxBytes) : { error: p.error };
   return 'bullets' in n ? n.bullets : null;
 }

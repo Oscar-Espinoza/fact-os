@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
+import { childEnv, paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole, tierApplies } from './profiles.ts';
@@ -606,7 +606,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   async function pipeline(f: Feature, config: Config, mockTasks: HumanTask[], hotHeld: string[], profile: string | null): Promise<unknown> {
     const id = f.id, attempt = (f.attempts || 0) + 1, branch = f.branch || config.branchPrefix + id;
     const wt = resolve(root, config.worktreesDir, id), runDir = join(P.runs, id);
-    const env = { ...process.env, ...featureEnv({ FEATURE: id }) };
+    const env = { ...childEnv(), ...featureEnv({ FEATURE: id }) };
     const onSpawn = (pid: number) => edit(id, (x) => { Object.assign(x, { pid, pidStart: procStart(pid) ?? undefined, foremanPid: process.pid }); }).catch(() => {}); // lets a later foreman see the child is alive
     const fail = failer(id);
     const stopped = async () => { if (!stopping) return false; await set(id, { status: 'todo', pendingLesson: undefined }); log(root, id, 'interrupted'); return true; };
@@ -1106,7 +1106,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       return refresh(f, branch, fail, false, inline) as Promise<void | 'conflicted'>; // 'clean' only comes back with beforeTest
     }
     if (hook) { // e.g. assigns migration numbers; what it stages becomes part of the merge commit
-      const h = await exec('sh', ['-c', `exec 2>&1\n${hook}`], { cwd: root, env: { ...process.env, ...featureEnv({ FEATURE: id, BRANCH: branch }) }, children, timeoutMin: config.timeoutMin });
+      const h = await exec('sh', ['-c', `exec 2>&1\n${hook}`], { cwd: root, env: { ...childEnv(), ...featureEnv({ FEATURE: id, BRANCH: branch }) }, children, timeoutMin: config.timeoutMin });
       const c = h.code === 0 ? git(['commit', '-q', '-m', msg], root) : null;
       if (h.code !== 0 || c!.code !== 0) {
         if (git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], root).code === 0) git(['merge', '--abort'], root);
@@ -1118,7 +1118,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     }
     baseSha = baseHead();
     if (config.postMerge) {
-      const r = await exec('sh', ['-c', `exec 2>&1\n${config.postMerge}`], { cwd: root, env: { ...process.env, ...featureEnv({ FEATURE: id, BRANCH: branch }) }, children, timeoutMin: config.timeoutMin });
+      const r = await exec('sh', ['-c', `exec 2>&1\n${config.postMerge}`], { cwd: root, env: { ...childEnv(), ...featureEnv({ FEATURE: id, BRANCH: branch }) }, children, timeoutMin: config.timeoutMin });
       log(root, id, 'post-merge', `exit ${r.code}: ${tail(r.out, 1000)}`);
       baseSha = baseHead();
     }

@@ -1,11 +1,11 @@
 // I07 phase 1: the shadow classifier against a local fake TypeSafe server (no real provider calls).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { askJev, classify, classifierState, decide, inputHash, readRecords, report, typesafeKey, QUESTIONS, type JevAnswer } from '../lib/classifier.ts';
-import { CLASSIFIER_DEFAULTS, DEFAULT_CONFIG, loadConfig } from '../lib/state.ts';
+import { CLASSIFIER_DEFAULTS, DEFAULT_CONFIG, childEnv, loadConfig } from '../lib/state.ts';
 import type { Feature } from '../lib/types.ts';
 
 // Never reach the real TypeSafe API from a test: every request goes to a dead local port unless a fake server replaces it,
@@ -123,4 +123,15 @@ test('I07: config: classifier is off by default; shadow is the only mode; defaul
   for (const c of [{ provider: 'openai' }, { mode: 'apply' }, { minConfidence: 1.5 }, { timeoutMs: 10 }, { maxRetries: 9 }, 'x']) {
     set({ classifier: c }); assert.throws(() => loadConfig(root), /config\.classifier/, JSON.stringify(c));
   }
+});
+
+test('I07: factory secrets never reach agents, hooks or scripts', () => {
+  const prev = process.env.TYPESAFE_API_KEY; process.env.TYPESAFE_API_KEY = 'sentinel-secret';
+  try { assert.equal(childEnv().TYPESAFE_API_KEY, undefined); assert.equal(process.env.TYPESAFE_API_KEY, 'sentinel-secret'); }
+  finally { if (prev === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = prev; }
+  // Every child process takes childEnv(); a raw process.env spread would hand the key to an agent.
+  const lib = join(import.meta.dir, '..', 'lib');
+  for (const f of readdirSync(lib).filter((f) => f.endsWith('.ts')))
+    for (const [i, line] of readFileSync(join(lib, f), 'utf8').split('\n').entries())
+      if (/env: process\.env|\.\.\.process\.env/.test(line) && !/const env = \{ \.\.\.process\.env \};/.test(line)) assert.fail(`${f}:${i + 1} passes process.env to a child`);
 });

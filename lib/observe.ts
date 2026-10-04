@@ -10,7 +10,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, o
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
-import { paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, withSupervisor, withCheckoutLock, errCode, errMsg, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
+import { childEnv, paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, withSupervisor, withCheckoutLock, errCode, errMsg, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
 import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
 import { SLUG } from './ready.ts';
@@ -533,7 +533,7 @@ async function curateLessons(root: string, config: Config, agent: RoleConfig, cf
   if (stopping()) return;
   checkpointAgentStart(root, state, 'lessonsAt');
   const r = await exec(envVar('CLAUDE') || 'claude', args,
-    { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
+    { cwd: root, env: childEnv(), input: prompt, children, timeoutMin: config.timeoutMin });
   if (stopping()) return;
   const p = parseClaudeOutput(r.out), c = p.ok ? parseCurated(p.text, cfg.lessonsMaxBytes) : { error: `agent failed: ${p.error}` };
   if ('error' in c) { log(root, null, 'observer-lessons', `not curated: ${c.error}`); out(`observer: lessons not curated: ${c.error}`); return; }
@@ -621,7 +621,7 @@ async function improvePass(root: string, config: Config, agent: RoleConfig, cfg:
   if (stopping()) return;
   checkpointAgentStart(root, state, 'improveAt');
   const r = await exec(envVar('CLAUDE') || 'claude', args,
-    { cwd: root, env: process.env, input: prompt, children, timeoutMin: config.timeoutMin });
+    { cwd: root, env: childEnv(), input: prompt, children, timeoutMin: config.timeoutMin });
   if (stopping()) return;
   const p = parseClaudeOutput(r.out), a = parseImprover(p.ok ? p.text : '');
   const room = cfg.maxOpenImprovements - open.length, queued: string[] = [];

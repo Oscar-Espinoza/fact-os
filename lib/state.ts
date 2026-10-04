@@ -27,6 +27,14 @@ export const stateDirName = (root: string): string => STATE_DIRS.find((d) => exi
 
 // FACTOS_<NAME>, falling back to the pre-rename SHIPYARD_<NAME>.
 export const envVar = (name: string): string | undefined => process.env[`FACTOS_${name}`] ?? process.env[`SHIPYARD_${name}`];
+// Secrets only the factory itself uses: never handed to agents, hooks or scripts, so they cannot read or echo them into
+// saved run output.
+export const FACTORY_SECRETS = ['TYPESAFE_API_KEY'] as const;
+export function childEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const k of FACTORY_SECRETS) delete env[k];
+  return env;
+}
 // Child env for a feature: both spellings, so hooks and scripts written for either keep working.
 export const featureEnv = (vars: Record<string, string>): Record<string, string> =>
   Object.fromEntries(Object.entries(vars).flatMap(([k, v]) => [[`FACTOS_${k}`, v], [`SHIPYARD_${k}`, v]]));
