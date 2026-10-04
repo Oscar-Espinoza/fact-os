@@ -426,3 +426,27 @@ test('I07 v5 review: a credential hidden by JSON escapes in the glossary is stil
   await classify(root, cfg({ glossary: 'glossary.json' }), [a], (s) => lines.push(s), 'manual', fakeKey);
   assert.ok(lines.some((l) => /looks like it contains a credential/.test(l)));
 });
+
+test('I07 auto: the observer\'s batch classifies only open features without a current assessment, quietly repeats nothing, and backs off after failures', async (t) => {
+  const a = F('a'), b = F('b', { status: 'merged' }), c = F('c'), root = project(t, [a, b, c]);
+  writeFileSync(join(root, '.fact-os', 'config.json'), JSON.stringify({ ...DEFAULT_CONFIG, test: 'true', classifier: { provider: 'typesafe' } }));
+  const seen = fakeTypesafe(t, [body(a), 422]);
+  const prev = process.env.TYPESAFE_API_KEY; process.env.TYPESAFE_API_KEY = 'test-key';
+  t.after(() => { if (prev === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = prev; });
+  const { autoClassify } = await import('../lib/observe.ts');
+  const lines: string[] = [];
+  await autoClassify(root, (s) => lines.push(s));
+  assert.deepEqual(seen.map((x) => x.body.state.feature.id), ['a', 'c'], 'merged features are not classified');
+  assert.ok(lines.some((l) => /assessing 2 new or changed/.test(l)));
+  lines.length = 0;
+  await autoClassify(root, (s) => lines.push(s));
+  assert.equal(seen.length, 2, 'a is current and c failed recently: nothing is asked again'); assert.deepEqual(lines, []);
+  writeFeatures(root, [{ ...a, description: 'edited' }, b, c]);
+  fakeTypesafe(t, [body(a)]);
+  await autoClassify(root, () => {});
+  assert.equal(readRecords(root).filter((r) => r.feature === 'a' && r.status === 'assessed').length, 2, 'an edited feature is assessed again');
+  writeFileSync(join(root, '.fact-os', 'config.json'), JSON.stringify({ ...DEFAULT_CONFIG, test: 'true', classifier: { provider: 'typesafe', auto: false } }));
+  writeFeatures(root, [a, b, c, F('d')]);
+  await autoClassify(root, () => {});
+  assert.ok(!readRecords(root).some((r) => r.feature === 'd'), 'auto: false turns it off');
+});

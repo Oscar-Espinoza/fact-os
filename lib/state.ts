@@ -7,7 +7,7 @@ import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } f
 
 // Shadow classifier operating bounds (I07 v2). The model is pinned: the battery and scorer were evaluated on jev-1.13.0.
 export const CLASSIFIER_DEFAULTS: ClassifierConfig = { provider: 'typesafe', model: 'jev-1.13.0', mode: 'shadow', timeoutMs: 20000, maxRetries: 1,
-  maxRequestsPerDay: 500, glossary: null, scorer: null, escalation: null };
+  maxRequestsPerDay: 500, glossary: null, scorer: null, escalation: null, auto: true };
 // Small pilot limits (agreed with the Codex partner), not learned thresholds.
 export const ESCALATION_DEFAULTS: EscalationConfig = { enabled: false, model: 'gpt-6.1-sol', effort: 'high', maxPerDay: 6, maxPerRun: 2, timeoutMin: 5,
   maxQuestions: 6, fallbackMaxBudgetUsd: 2, reviewPlanning: false };
@@ -245,6 +245,7 @@ function configProblems(raw: unknown): string[] {
       field(k, 'config.classifier', 'maxRetries', (x) => uint(x) && (x as number) <= 2, 'a safe integer from 0 to 2');
       field(k, 'config.classifier', 'maxRequestsPerDay', uint, 'a safe integer >= 0');
       for (const key of ['glossary', 'scorer']) field(k, 'config.classifier', key, (x) => x === null || str(x), 'a path relative to the project root, or null');
+      field(k, 'config.classifier', 'auto', (x) => typeof x === 'boolean', 'a boolean');
       if (Object.hasOwn(k, 'escalation') && k.escalation !== null) {
         const e = obj(k.escalation, 'config.classifier.escalation');
         if (e) {

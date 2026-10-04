@@ -6,9 +6,9 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { childEnv, paths, DEFAULT_CONFIG, ESCALATION_DEFAULTS, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold, readSetupState } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
-import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask, type RoleConfig } from './types.ts';
+import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
-import { profileNames, profileLabel, roleTable, riskyOpen, resolveRole } from './profiles.ts';
+import { profileNames, profileLabel, roleTable, riskyOpen } from './profiles.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const USAGE = `usage: ${NAME} <command>
@@ -250,10 +250,8 @@ try {
       const targets = o.all ? features : positionals.map((id) => features.find((f) => f.id === id) ?? (() => { throw new Error(`unknown feature: ${id}`); })());
       if (!targets.length) throw new Error(`usage: ${NAME} classify <feature-id>... | --all | --report`);
       // The roles each feature would get today, recorded beside the shadow candidate for comparison.
-      const ctl = readControlFile(root, config), profile = ctl.ok ? ctl.control.profile ?? null : null;
-      const pick = (r: RoleConfig) => ({ provider: r.provider ?? 'claude', model: r.model, effort: r.effort });
-      await classify(root, config.classifier, targets, (s) => console.log(s), 'manual', undefined,
-        (f) => ({ builder: pick(resolveRole(config, profile, 'builder', { feature: f })), evaluator: pick(resolveRole(config, profile, 'evaluator', { feature: f })) }));
+      const ctl = readControlFile(root, config), { rolesFor } = await import('./classifier.ts');
+      await classify(root, config.classifier, targets, (s) => console.log(s), 'manual', undefined, rolesFor(config, ctl.ok ? ctl.control.profile ?? null : null));
       // Escalation is opt-in: config.classifier.escalation.enabled, or --escalate for this run (defaults when unconfigured).
       const esc = config.classifier.escalation;
       if (o.escalate || esc?.enabled) {

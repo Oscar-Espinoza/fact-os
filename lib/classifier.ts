@@ -9,8 +9,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } fro
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, envVar, withLock, readJson, writeJsonAtomic, loadState } from './state.ts';
-import { isRisky } from './profiles.ts';
-import type { ClassifierConfig, Feature, RoleConfig, Tier } from './types.ts';
+import { isRisky, resolveRole } from './profiles.ts';
+import type { ClassifierConfig, Config, Feature, RoleConfig, Tier } from './types.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const DEFAULT_URL = 'https://api.typesafe.ai/v1/systemone';
@@ -330,6 +330,19 @@ export function assess(f: Feature, answers: Record<string, number>, features: Fe
 
 // ---- records ----
 
+// The builder and evaluator a feature would get today under the given profile, recorded beside the shadow candidate.
+export const rolesFor = (config: Config, profile: string | null) => (f: Feature): Roles => {
+  const pick = (r: RoleConfig) => ({ provider: r.provider ?? 'claude', model: r.model, effort: r.effort });
+  return { builder: pick(resolveRole(config, profile, 'builder', { feature: f })), evaluator: pick(resolveRole(config, profile, 'evaluator', { feature: f })) };
+};
+// Open features whose current input has no validated assessment yet: new features, and features whose scope changed. An input
+// whose last attempt failed within `backoffMs` waits, so an outage is not retried every observer pass.
+export function needingAssessment(root: string, cfg: ClassifierConfig, features: Feature[], backoffMs = 60 * 60_000): Feature[] {
+  const ctx = loadContext(root, cfg), recs = readRecords(root), now = Date.now();
+  const have = new Set(recs.filter((r) => r.status === 'assessed' && r.answers).map((r) => r.inputHash));
+  const failed = new Set(recs.filter((r) => r.status === 'error' && now - Date.parse(r.ts) < backoffMs).map((r) => r.inputHash));
+  return features.filter((f) => { if (f.status === 'merged') return false; const h = inputHash(cfg.model, classifierState(f, features, ctx.glossary), questionsFor(f)); return !have.has(h) && !failed.has(h); });
+}
 export type Roles = { builder: Pick<RoleConfig, 'provider' | 'model' | 'effort'>; evaluator: Pick<RoleConfig, 'provider' | 'model' | 'effort'> };
 export interface ClassifierRecord {
   schema: 2; ts: string; feature: string; purpose: string; battery: string; inputHash: string; policy: string; scorer: string | null;

@@ -12,8 +12,10 @@ export type Role = 'builder' | 'evaluator' | 'resolver';
 export type Provider = 'claude' | 'codex';
 // I07 v2 shadow classifier. `timeoutMs` bounds a whole decision (every attempt and backoff); `glossary` and `scorer` are paths
 // relative to the project root (a codebase glossary sent as context; a frozen rework scorer for the attention priority).
+// `auto`: the running observer classifies every open feature that has no current assessment (new or edited), then escalates its
+// unsure answers when escalation is enabled. Shadow only either way.
 export interface ClassifierConfig { provider: 'typesafe'; model: string; mode: 'shadow'; timeoutMs: number; maxRetries: number; maxRequestsPerDay: number;
-  glossary: string | null; scorer: string | null; escalation: EscalationConfig | null }
+  glossary: string | null; scorer: string | null; escalation: EscalationConfig | null; auto: boolean }
 // Unsure assessments go to a reasoning agent that reads the code read-only (Codex; config.codex.fallback when Codex is
 // unavailable); shadow only, explicit classify runs only. maxPerRun/maxPerDay count actual agent starts, fallback included.
 export interface EscalationConfig { enabled: boolean; model: string; effort: string; maxPerDay: number; maxPerRun: number; timeoutMin: number;

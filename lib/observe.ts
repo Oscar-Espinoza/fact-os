@@ -698,6 +698,26 @@ export function renderReport(root: string, state: ObserverState, features: Featu
 
 // ---- the loop ----
 
+let noKeyWarned = false;
+// One automatic classification batch: the open features without a current assessment, then escalation of their unsure answers
+// when it is enabled. Quiet when there is nothing new.
+export async function autoClassify(root: string, out: (s: string) => void, signal?: AbortSignal): Promise<void> {
+  const config = loadConfig(root), cfg = config.classifier;
+  if (!cfg || !cfg.auto) return;
+  const { classify, needingAssessment, rolesFor, typesafeKey } = await import('./classifier.ts');
+  const targets = needingAssessment(root, cfg, load(root).features);
+  if (!targets.length || signal?.aborted) return;
+  if (!typesafeKey()) { if (!noKeyWarned) out('classifier: no TypeSafe API key (TYPESAFE_API_KEY or fact-os/.env); automatic classification is waiting'); noKeyWarned = true; return; }
+  out(`classifier: assessing ${targets.length} new or changed feature(s)`);
+  const cr = readControlFile(root, config);
+  const recs = await classify(root, cfg, targets, (s) => out(`classifier: ${s}`), 'auto', undefined, rolesFor(config, cr.ok ? cr.control.profile ?? null : null));
+  const assessed = recs.filter((r) => r.status === 'assessed').map((r) => r.feature);
+  if (cfg.escalation?.enabled && assessed.length && !signal?.aborted) {
+    const { escalate } = await import('./escalation.ts');
+    await escalate(root, config, cfg, cfg.escalation, assessed, (s) => out(`classifier: ${s}`), signal);
+  }
+}
+
 export function observe(root: string, opts: ObserveOptions & { watch?: boolean } = {}): Promise<number> {
   return withSupervisor(root, 'observer', () => observeOwned(root, opts));
 }
@@ -706,6 +726,8 @@ async function observeOwned(root: string, opts: ObserveOptions & { watch?: boole
   const O = observerPaths(root), out = opts.out || ((s: string) => console.log(s));
   const children = new Set<ChildProcess>();
   let stopping = false;
+  let classifying: Promise<void> | null = null;
+  const classifyStop = new AbortController();
   const killOwned = (signal: NodeJS.Signals) => { for (const c of children) { try { process.kill(-c.pid!, signal); } catch {} } };
   const onSignal = () => {
     if (stopping) { killOwned('SIGKILL'); process.exit(130); }
@@ -719,6 +741,9 @@ async function observeOwned(root: string, opts: ObserveOptions & { watch?: boole
     const profile = { last: null as string | null };
     let pollSec = DEFAULT_OBSERVER.pollSec;
     for (;;) {
+      // I07: new or edited open features are classified (and their unsure answers escalated) in the background, one batch at
+      // a time, so a slow escalation never delays a pass. Shadow only: no tier, feature or queue changes.
+      if (opts.watch && !classifying) classifying = autoClassify(root, out, classifyStop.signal).catch((e) => out(`classifier: ${firstLine(String((e as Error).message ?? e))}`)).finally(() => { classifying = null; });
       try { await observeOnce(root, { ...opts, out, children, profile, stopping: () => stopping }); } catch (e) {
         if (!opts.watch) throw e;
         const why = firstLine(String((e as Error).message ?? e)); // a bad pass must not end a watching observer: report it and try again at the next poll
@@ -731,6 +756,8 @@ async function observeOwned(root: string, opts: ObserveOptions & { watch?: boole
       if (stopping) break;
     }
   } finally {
+    classifyStop.abort();
+    await classifying;
     // Retain ownership and signal handlers until every still-owned child closes.
     // Ordinary passes already drain exec(); exceptional exits need this backstop.
     const drained = [...children].map((c) => new Promise<void>((r) => c.once('close', () => r())));

@@ -288,6 +288,11 @@ author's label disagree (a refund screen over an existing API). The attention sc
 (development evidence only: the v2.1 holdout had been used). All 226 re-classified: normal 129, multi 10, hard 26, risky 61; 90
 features have an unsure review answer (was 68), which is what escalation acts on.
 
+**Automatic classification (Oscar, 2026-10-04).** The running observer (`fact-os observe --watch`) now classifies, in the
+background on every poll, each open feature whose current text has no assessment (new features from intake, and edited ones), then
+escalates their unsure answers to Sol when `escalation.enabled` is on. It never delays an observer pass or a launch, never changes
+a tier or a feature, retries a failed input only after an hour, and is quiet when nothing is new. `classifier.auto: false` turns it off.
+
 **Status and stopping point.** Five fresh reviews took the stage from 9 to 16 to 13 to 12 findings, each round narrower
 (crash recovery, cancellation timing, credential edge cases). The classifier itself (Jev battery, scorer, projection, report)
 converged by the third review. Escalation stays opt-in and disabled by default (`escalation.enabled: false`); further
