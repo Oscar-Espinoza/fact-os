@@ -571,13 +571,13 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     return r.alive;
   });
 
-  const setupFailed = async (id: string, msg: string): Promise<void> => {
+  const setupFailed = async (id: string, msg: string, afterBuild = false): Promise<void> => {
     const delays = config.setupRetryDelaysSec;
     await edit(id, (x) => {
       const n = (x.setupFailures || 0) + 1, stuck = n > delays.length, stop = { attempt: (x.attempts || 0) + 1, counted: false };
       Object.assign(x, { status: stuck ? 'stuck' : 'todo', setupFailures: n, stop, updatedAt: now(),
         setupRetryAt: stuck ? undefined : new Date(Date.now() + delays[n - 1]! * 1000).toISOString(), ...(stuck ? { lastFeedback: msg } : {}) });
-      log(root, id, stuck ? 'stuck' : 'failed', `${msg}\n(setup failure ${n} of ${delays.length + 1}; ${stuck ? 'no more retries' : `retry after ${delays[n - 1]}s`}; no attempt spent)`, undefined, { stop });
+      log(root, id, stuck ? 'stuck' : 'failed', `${msg}\n(setup failure ${n} of ${delays.length + 1}${afterBuild ? ', after the build' : ''}; ${stuck ? 'no more retries' : `retry after ${delays[n - 1]}s`}; no attempt spent)`, undefined, { stop });
       out(`${stuck ? 'stuck' : 'setup failed'} ${id}: ${msg.split('\n')[0]}${stuck ? '' : ` (retry after ${delays[n - 1]}s)`}`);
     });
     const opened = await updateSetupState(root, (st) => {
@@ -761,11 +761,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // A failed setup is the environment's fault more often than the builder's: it spends no attempt. The feature is retried
     // after config.setupRetryDelaysSec, then goes stuck as an uncounted stop; repeated failures across features open a launch
     // hold (setupFailed). A good setup clears the feature's count and, while no hold is open, the cross-feature streak.
-    const prepare = async (): Promise<boolean> => {
+    const prepare = async (afterBuild = false): Promise<boolean> => {
       if (!config.prepare) return true;
       const pr = await exec('sh', ['-c', `exec 2>&1\n${config.prepare}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
       if (await stopped()) return false;
-      if (pr.code !== 0) { await setupFailed(id, `prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`); return false; }
+      if (pr.code !== 0) { await setupFailed(id, `prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`, afterBuild); return false; }
       await setupSucceeded(id);
       return true;
     };
@@ -834,7 +834,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // The build's own work (and a pending foreman merge) is committed before deferred setup runs, which needs the finished
     // merge; whatever setup leaves behind must be committed too (the same per-pass allowance).
     if (!await ensureCommitted()) return;
-    if (prepareDeferred && (!await prepare() || !await ensureCommitted())) return;
+    if (prepareDeferred && (!await prepare(true) || !await ensureCommitted())) return;
     // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
     const rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
     if (rc.lost) return fail(rc.lost);
@@ -1190,7 +1190,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         const held: string[] = []; // ready, but the launch limit is reached
         for (const id of a.ready) {
           const retryAt = Date.parse(features.find((x) => x.id === id)!.setupRetryAt ?? '');
-          if (retryAt > Date.now()) { nextRetry = Math.min(nextRetry ?? retryAt, retryAt); continue; }
+          if (retryAt > Date.now()) { if (limit > 0) nextRetry = Math.min(nextRetry ?? retryAt, retryAt); continue; }
           const g = groupOf(features.find((x) => x.id === id)!, config.groupBy);
           if (inflight.has(id) || (g != null && busy.has(g))) continue; // its group is in flight: try the next-best one
           // The limit counts this foreman's own launches in flight; a feature that went back to todo mid-pipeline is a new
@@ -1266,10 +1266,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         // A live orphan holding a lane frees it without touching any state file: poll for that.
         const free = !stopping && !onceDone && !capped() && !overBudget && busyCount() < limit;
         const files = { features: P.features, human: P.human }, done = () => stopping || woke;
+        // A timer for the next delayed setup retry, cancelled when the race settles: a stray one would keep the process alive.
+        const retryWake = nextRetry != null && free ? timer(Math.max(0, nextRetry - Date.now()) + 50) : null;
         await Promise.race([...inflight.values(), ...(free ? [waitForChange(files, stamp(files), done)] : []),
           ...(!stopping && !onceDone ? [waitForChange({ control: P.control }, ctlSeen, done)] : []),
           ...(orphans.length && !free ? [sleep(Number(envVar('POLL_MS')) || 5000)] : []),
-          ...(nextRetry != null && free ? [sleep(Math.max(0, nextRetry - Date.now()) + 50)] : [])]);
+          ...(retryWake ? [retryWake.done] : [])]).finally(() => retryWake?.cancel());
         woke = true;
         continue;
       }
@@ -1322,6 +1324,12 @@ export const stamp = (P: Watched): string => [P.features, P.human, P.control].ma
 
 // Sleep until the given state files (features.json, human.json, control.json) differ from `since` (a stamp taken before the
 // caller read them).
+// A cancellable sleep: `cancel` clears the timer so it cannot keep the process alive.
+export function timer(ms: number): { done: Promise<void>; cancel: () => void } {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  return { done: new Promise((r) => { t = setTimeout(r, ms); }), cancel: () => clearTimeout(t) };
+}
+
 export async function waitForChange(P: Watched, since: string, isStopping: () => boolean, until: number | null = null): Promise<void> {
   const ms = Number(envVar('POLL_MS')) || 5000;
   while (!isStopping() && stamp(P) === since && (until == null || Date.now() < until)) await sleep(until == null ? ms : Math.max(1, Math.min(ms, until - Date.now())));

@@ -4,7 +4,7 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold } from './state.ts';
+import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold, readSetupState } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
 import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
@@ -70,12 +70,15 @@ function status(): void {
   const a = analyze(features, tasks, config.merge);
   const rows = [['id', 'status', 'tries', 'cost', 'deps', 'notes'], ...features.map((f) => [f.id, f.status, String(f.attempts || 0),
     f.costUsd ? `$${f.costUsd.toFixed(2)}` : '', (f.deps || []).join(','), [f.onMock && 'onMock', a.ready.includes(f.id) && 'next',
-      a.waiting.includes(f.id) && 'waiting-on-human', a.bad.has(f.id) && 'INVALID'].filter(Boolean).join(' ')])];
+      a.waiting.includes(f.id) && 'waiting-on-human', a.bad.has(f.id) && 'INVALID',
+      f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now() && `setup-retry ${f.setupRetryAt}`].filter(Boolean).join(' ')])];
   const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
   for (const r of rows) console.log(r.map((c, i) => c.padEnd(w[i])).join('  ').trimEnd());
   const open = tasks.filter((t) => t.status === 'open');
   console.log(open.length ? '\nOpen human tasks:' : '\nNo open human tasks.');
   for (const t of open) console.log(`  ${t.id}: ${t.title} → unblocks ${(t.unblocks || []).join(', ')}${t.mockable ? ' (mockable)' : ''}`);
+  const hold = readSetupState(root).hold;
+  if (hold) console.log(`\nSETUP HOLD since ${hold.since} (${hold.features.join(', ')}): ${hold.reason}\nNo new launches until \`${NAME} setup-resume\`.`);
   const cr = readControlFile(root, config);
   console.log(`\nModel profile: ${cr.ok ? profileLine(cr.control.profile ?? null) : `unknown (${cr.error})`}`);
 }

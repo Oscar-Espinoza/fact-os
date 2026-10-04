@@ -300,7 +300,11 @@ Each tick:
      alert, once): no new launch while it is open, in-flight work and parked merges continue, `run` without `--watch`
      stops, `--watch` polls. It survives restarts. `fact-os setup-resume` or the dashboard's Resume setup releases it
      (`setup-resumed`) and clears pending setup delays and counts of `todo` features; a person's `retry` clears a stuck
-     feature's count. A deferred prepare that fails after a build loses that build (the next launch rebuilds).
+     feature's count. A deferred prepare that fails after a build loses that build (the next launch rebuilds); its note
+     says "after the build", so observer statistics count the launch as built, not as setup. The observer classifies any
+     prepare/worktree output as setup before its infrastructure patterns, so it never retries these. A delayed retry
+     wakes the foreman only when the launch limit allows a launch (paused or 0 lanes: a run without `--watch` exits).
+     `status` and the dashboard show the hold (reason, features) and each delayed retry, foreman running or not.
    - **Dependency import.** After branch creation/restoration, before `prepare` or building, verify every
      declared merged dependency's recorded SHA is a commit reachable from current base. A legacy merged
      dependency without SHA requires current base instead. If those commits are absent from a reused

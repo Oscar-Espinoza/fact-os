@@ -61,11 +61,13 @@ export function resolveTests(names: string[], files: string[]): string[] {
 // A test counts as the feature's own when the feature changes it or a file in its directory.
 export function classify(detail: string, tests: string[], changed: string[], extra: string[] = []): { cause: Cause; evidence: string } {
   if (INVALID_VERDICT.test(detail)) return { cause: 'own', evidence: 'the evaluator did not pass it' };
+  // Setup output may name infrastructure (ECONNREFUSED, a database starting up), but the foreman owns setup retries (I05):
+  // classify it as setup before the infrastructure scan, so the observer never resets such a feature's attempts.
+  if (/^(prepare `|worktree:)/.test(detail)) return { cause: 'setup', evidence: firstLine(detail) };
   const low = detail.toLowerCase();
   const infra = [...INFRA, ...extra.map((p) => p.toLowerCase())].find((p) => p && low.includes(p));
   if (infra) return { cause: 'infra', evidence: infra };
   if (/too many base refreshes/.test(detail)) return { cause: 'conflict-loop', evidence: firstLine(detail) };
-  if (/^(prepare `|worktree:)/.test(detail)) return { cause: 'setup', evidence: firstLine(detail) };
   if (/^(builder failed|commit your work|evaluator failed)/.test(detail)) return { cause: 'builder', evidence: firstLine(detail) };
   if (/^test command `/.test(detail)) {
     if (!tests.length) return { cause: 'unknown', evidence: 'test command failed; no failing test file recognized' };
@@ -233,7 +235,8 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
     if (e.event === 'testing' && cur.stage === 'build') { E.built++; E.b.push(min(cur.at, ms)); Object.assign(cur, { stage: 'test', at: ms }); }
     else if (e.event === 'evaluating' && cur.stage === 'test') { E.gated++; E.g.push(min(cur.at, ms)); Object.assign(cur, { stage: 'eval', at: ms }); }
     else if ((e.event === 'failed' || e.event === 'stuck') && cur.stage === 'build') {
-      if (/^(prepare `|worktree:)/.test(e.detail)) E.setup++; // the environment, not the agent
+      if (/\(setup failure \d+ of \d+, after the build;/.test(e.detail)) E.built++; // deferred setup failed after a paid build
+      else if (/^(prepare `|worktree:)/.test(e.detail)) E.setup++; // the environment, not the agent
       else if (/^test command `/.test(e.detail)) E.built++;    // an older log without the testing event: built, failed the gate
       else E.bf.push(firstLine(e.detail).replace(/[:(].*$/, '').slice(0, 60));
       open.delete(e.feature);

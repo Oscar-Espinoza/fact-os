@@ -1521,3 +1521,56 @@ test('I05: a person retrying a setup-stuck feature clears its setup count', (t) 
   assert.equal(s.cli('retry', 'a').status, 0);
   assert.deepEqual([s.feature('a').status, s.feature('a').setupFailures], ['todo', undefined]);
 });
+
+// I05 review regressions (ported from the independent Codex review's scratch probes)
+test('I05 review: the observer never replenishes a setup-stuck feature, even when its output names infrastructure', async (t) => {
+  const s = setup(t, { features: [F('a', { attempts: 1, refreshes: 2 })], config: { setupRetryDelaysSec: [], prepare: 'echo ECONNREFUSED; exit 3' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['stuck', 1, 2]);
+  const obs = await observeOnce(s.repo, { out: () => {} });
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').refreshes], ['stuck', 1, 2]);
+  assert.equal(obs.diagnoses.at(-1)!.cause, 'setup');
+});
+
+test('I05 review: a run without --watch, paused, drains and exits without waiting out a setup deadline', async (t) => {
+  const s = setup(t, { features: [F('a', { setupFailures: 1, setupRetryAt: new Date(Date.now() + 3000).toISOString() })], config: { prepare: 'exit 3' } });
+  await writeControl(s.repo, { paused: true }, 'cli');
+  const at = Date.now(), r = s.cli('run'), elapsed = Date.now() - at;
+  assert.equal(r.status, 2); assert.ok(elapsed < 1500, `waited ${elapsed}ms`);
+});
+
+test('I05 review: a hold opening mid-run leaves no retry timer keeping the CLI alive', (t) => {
+  const s = setup(t, { features: [F('a', { setupFailures: 1, setupRetryAt: new Date(Date.now() + 2500).toISOString() }), F('b')],
+    config: { maxParallel: 2, prepare: 'sleep 0.3; echo database down; exit 3' } });
+  writeFileSync(join(s.repo, '.fact-os/setup-hold.json'), JSON.stringify({ failures: [{ feature: 'a', ts: new Date().toISOString() }, { feature: 'c', ts: new Date().toISOString() }], hold: null }));
+  const at = Date.now(), r = s.cli('run'), elapsed = Date.now() - at;
+  assert.equal(r.status, 2);
+  assert.ok(JSON.parse(readFileSync(join(s.repo, '.fact-os/setup-hold.json'), 'utf8')).hold);
+  assert.ok(elapsed < 1500, `waited ${elapsed}ms`);
+});
+
+test('I05 review: a deferred setup failure after a paid build is not counted as setup before any model ran', (t) => {
+  const s = setup(t, { features: [], config: { merge: 'manual', prepare: 'exit 7', setupRetryDelaysSec: [] }, scenario: { b: 'resolve' } });
+  staleDependency(s, { conflict: true });
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('build', 'b').length, 1);
+  const stats = agentStats(events(s, 'b') as LogEvent[], [], 0);
+  assert.equal(stats.reduce((n, e) => n + e.setup, 0), 0, 'the builder already ran');
+  assert.equal(stats.reduce((n, e) => n + e.built, 0), 1);
+});
+
+test('I05 review: setup retries really wait their delays', (t) => {
+  const s = setup(t, { features: [F('a')], config: { setupRetryDelaysSec: [0.4, 0.4], prepare: 'exit 3' } });
+  const at = Date.now(); assert.equal(s.cli('run').status, 2);
+  assert.ok(Date.now() - at >= 800, `the two delays were not waited (${Date.now() - at}ms)`);
+  assert.equal(s.feature('a').status, 'stuck');
+});
+
+test('I05 review: a good setup between failures resets the streak, so no hold opens', (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { priority: 2 }), F('c', { priority: 3 }), F('d', { priority: 4 })],
+    config: { maxParallel: 1, setupRetryDelaysSec: [], prepare: 'case "$FACTOS_FEATURE" in a|b|d) echo down; exit 3;; esac' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual(['a', 'b', 'c', 'd'].map((id) => s.feature(id).status), ['stuck', 'stuck', 'merged', 'stuck']);
+  const st = existsSync(join(s.repo, '.fact-os/setup-hold.json')) ? JSON.parse(readFileSync(join(s.repo, '.fact-os/setup-hold.json'), 'utf8')) : { hold: null };
+  assert.equal(st.hold, null, 'two failures, a success, one failure: no three in a row');
+});
