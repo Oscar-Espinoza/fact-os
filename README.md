@@ -86,6 +86,9 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   `gateFixes` (0; after a test-gate failure, resume the builder's own Claude session that many times per pass to fix
   it, spending no attempt) and `diagnoser` (null; `{model, effort}`: when a resumed fix fails the gate again, a
   read-only run diagnoses a code, test or environment fault, and the builder gets one more fix with that brief).
+  `commitFixes` (0; when a build or a fix leaves work uncommitted, or a merge the foreman started unfinished, resume
+  the builder's session that many times per pass to commit it, spending no attempt; a build with no commits at all,
+  or that lost its dependencies, still fails).
   Edits to tests that already exist on base are always listed for the evaluator (`test-edits` event).
   The evaluator and the diagnoser can run on Codex: `provider: "codex"` in their role config, a profile's
   evaluator entry or a tier entry (e.g. `{provider: "codex", model: "gpt-6.1-sol", effort: "high"}`). It runs

@@ -97,10 +97,15 @@ if (mode === 'resolve') {
       }
   }
 } else if (mode === 'fix') {
-  // default: delete broken.txt (what makes the guard tests' gate fail) and commit; "noop": change nothing;
+  // default: commit leftover work, then delete broken.txt (what makes the guard tests' gate fail); "noop": change nothing;
   // "noop1": change nothing on this feature's first fix only
   const fixes = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'fix' && e.id === id; }).length : 0;
-  if (!has('noop') && !(has('noop1') && fixes === 0) && existsSync('broken.txt')) { git('rm', '-q', 'broken.txt'); git('commit', '-qm', `fix ${id}: remove broken.txt`); }
+  if (!has('noop') && !(has('noop1') && fixes === 0)) {
+    // commit work the build left behind (a commit-fix), then remove broken.txt (a gate fix)
+    if (git('status', '--porcelain')) { git('add', '-A'); git('commit', '-qm', `fix ${id}: commit the leftover work`); }
+    if (existsSync('broken.txt')) { git('rm', '-q', 'broken.txt'); git('commit', '-qm', `fix ${id}: remove broken.txt`); }
+  }
+  if (has('dirty1') && fixes === 0) writeFileSync('leftover-fix.txt', 'not committed by the first fix\n'); // "dirty1": the first fix leaves work uncommitted
 } else if (mode === 'diagnose') {
   // answers with the next scripted diagnosis from $FAKE_DIAGNOSES, default a code fault; "edit": also commits a file (it must not)
   if (has('edit')) commit('diagnoser.txt', 'edited by the diagnosis\n');

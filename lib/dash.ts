@@ -170,6 +170,7 @@ function stageSince(features: Feature[], events: LogEvent[]): Record<string, str
     let since: string | null = null;
     for (const e of events) if (e.feature === f.id) {
       if (e.event === 'launch') since = want === 'launch' ? e.ts : null;
+      else if (want === 'launch' && (e.event === 'gate-fix' || e.event === 'commit-fix')) since = e.ts; // a resumed builder
       else if (e.event === want) since = e.ts;
     }
     out[f.id] = since ?? f.updatedAt;

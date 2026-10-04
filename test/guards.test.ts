@@ -1269,3 +1269,53 @@ test('I03: a tiered feature launches its builder and reviewer with the tier mode
   assert.deepEqual([build('b').model, build('b').effort, review('b').effort], ['sonnet', 'medium', 'high'], 'untiered: the profile itself');
   assert.ok(events(s, 'a').some((e) => e.event === 'prompt' && /^builder model=opus effort=high .* tier=risky$/.test(e.detail)));
 });
+
+// ---- I04: resume the builder once when it leaves work uncommitted (docs/improvements.md) ----
+test('I04: commitFixes 0 keeps uncommitted work an ordinary counted failure', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 }, scenario: { a: 'dirty' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.match(s.feature('a').lastFeedback!, /^commit your work: the worktree has uncommitted changes/);
+  assert.equal(s.calls('fix', 'a').length, 0);
+});
+
+test('I04: uncommitted work after a build resumes the same session once to commit it; the pass goes on', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, commitFixes: 1 }, scenario: { a: 'dirty' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  const [fix] = s.calls('fix', 'a');
+  assert.ok(fix); assert.equal(fix.args[fix.args.indexOf('--resume') + 1], 'fake');
+  assert.match(fix.prompt, /not committed/); assert.match(fix.prompt, /leftover\.txt/);
+  const ev = events(s, 'a').map((e) => e.event);
+  assert.equal(ev.filter((e) => e === 'launch').length, 1); assert.equal(ev.filter((e) => e === 'commit-fix').length, 1);
+  assert.equal(ev.filter((e) => e === 'failed').length, 0);
+});
+
+test('I04: a build with no commits at all is not resumed', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, commitFixes: 1 }, scenario: { a: 'noop' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.match(s.feature('a').lastFeedback!, /has no commits beyond main/);
+  assert.equal(s.calls('fix', 'a').length, 0);
+});
+
+test('I04: work still uncommitted after the resume counts exactly one failure', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 2, commitFixes: 1 }, scenario: { a: 'dirty,fix:noop' } });
+  s.cli('run', '--once');
+  assert.deepEqual([s.feature('a').attempts, s.calls('fix', 'a').length], [1, 1]);
+  assert.equal(events(s, 'a').filter((e) => e.event === 'failed').length, 1);
+});
+
+test('I04: a gate fix that leaves work uncommitted is resumed once to commit it', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, commitFixes: 1 }, scenario: { a: 'break,fix:dirty1' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.equal(s.calls('fix', 'a').length, 2);
+  assert.deepEqual(events(s, 'a').map((e) => e.event).filter((e) => e === 'gate-fix' || e === 'commit-fix'), ['gate-fix', 'commit-fix']);
+});
+
+test('I04: the commit allowance is spent once per pass', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, commitFixes: 1 }, scenario: { a: 'dirty,fix:dirty1' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('fix', 'a').length, 1, 'the resume left new dirt; no second resume');
+  assert.match(s.feature('a').lastFeedback!, /leftover-fix\.txt/);
+});

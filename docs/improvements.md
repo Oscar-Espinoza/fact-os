@@ -14,6 +14,8 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I01 | done | B: report edits to existing tests. C: one inline fix after a gate failure, then a diagnosis |
 | I02 | done | Codex for the read-only roles (evaluator, diagnoser), Claude fallback and cooldown |
 | I03 | done | Feature tiers set at intake, mapped to role models by the active profile |
+| I04 | done | Resume the builder once to commit work it left uncommitted (`commitFixes`) |
+| I05 | next | Setup failures: bounded delayed retries without spending attempts, then a launch hold |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -125,3 +127,12 @@ Intake sets `tier`; the active profile maps it to role overrides. Ecommerce's `o
 guidance: normal = Sonnet medium builder and Sol high review; multi = Sonnet high; hard = Opus medium; risky = Opus high
 builder and Sol xhigh review; investigate = Opus high (Sol as a builder comes with Codex builders). The keyword heuristic
 flagged 16 of 37 open ecommerce features as risky, too broad for a model upgrade, so it stays only for untiered features.
+
+## I04 — commit the work instead of spending an attempt
+
+F99-43 built for 55 minutes and ended with uncommitted changes; "commit your work" counted as a failed attempt (13 in the
+ecommerce log, 3 since Oct 1). Agreed with the Codex design partner (Sol 6.1 xhigh, 2026-10-03): a separate `commitFixes`
+allowance per pass (default 0, ecommerce 1) so committing never uses up a genuine gate fix; resume only for dirty files or
+an unfinished foreman merge, never for "no commits" or lost dependency ancestry; the same check after the initial build and
+after every resumed fix; a `commit-fix` event that keeps the pass open, ends build reuse, stays in the build stage for
+observer statistics and restarts the dashboard's building timer.

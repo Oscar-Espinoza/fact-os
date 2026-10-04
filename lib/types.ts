@@ -51,6 +51,7 @@ export interface Config {
   conflictBrief: boolean;             // a conflicting refresh's feedback carries both sides' context; resolutions get the keep-lines check
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
   gateFixes: number;                  // safe integer >= 0: resumed builder fixes after a test-gate failure, per pass (0 = none)
+  commitFixes: number;                // safe integer >= 0: resumes per pass to commit work the builder left uncommitted (0 = none)
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
   codex: { fallback: RoleConfig; cooldownMin: number }; // a Codex run that cannot answer falls back to this Claude role config
   observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`

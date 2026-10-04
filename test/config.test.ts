@@ -196,6 +196,9 @@ test('I01: gateFixes is a safe integer >= 0 and diagnoser is null or role settin
   const s = setup(t);
   s.set({});
   assert.deepEqual([loadConfig(s.root).gateFixes, loadConfig(s.root).diagnoser], [0, null]);
+  assert.equal(loadConfig(s.root).commitFixes, 0);
+  for (const value of ['1', -1, 0.5]) { s.set({ commitFixes: value }); assert.throws(() => loadConfig(s.root), /config\.commitFixes/); }
+  s.set({});
   for (const value of ['1', -1, 1.5, null, true]) {
     s.set({ gateFixes: value });
     assert.throws(() => loadConfig(s.root), /config\.gateFixes/, `gateFixes=${JSON.stringify(value)}`);

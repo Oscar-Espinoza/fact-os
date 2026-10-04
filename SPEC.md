@@ -322,7 +322,10 @@ Each tick:
      evidence, fix}` (`diagnosis` event; a run that changes the worktree is refused and its changes undone). `code` or
      `test` → one more resumed fix with that brief; `environment`, an invalid answer or a further failure → the
      ordinary counted failure, its feedback followed by the diagnosis. At most `gateFixes` + 1 fixes and one diagnosis
-     per pass. A `gate-fix` ends build reuse of the sha that failed (a stop during a fix rebuilds). Observer statistics
+     per pass. Uncommitted work (dirty files, or an unfinished merge the foreman started) after the build or after any
+     fix is resumed the same way, `commitFixes` times per pass in total (default 0): `commit-fix` event, a commit-only
+     prompt, then the commit checks again; no commits at all or lost dependency ancestry still fail at once.
+     A `gate-fix` or `commit-fix` ends build reuse of the sha that failed (a stop during a fix rebuilds). Observer statistics
      treat the fix as part of the pass (no new launch or build); prompt rates credit the final builder prompt.
      Before every evaluation the foreman lists edits to test files that exist on `base` (deleted files, removed
      lines, added `.skip`/`.only`/`.todo`/`.fails`/`xit`), logs them as `test-edits` and gives them to the evaluator,

@@ -293,6 +293,8 @@ test('builtWhenStopped: the sha a pass had built when the foreman stopped, only 
     'stopped during a resumed gate fix: the sha that failed the gate is not reused');
   assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'gate-fix'), ev('a', 'testing', 'def'), ev('a', 'interrupted')], 'a'), 'def',
     'stopped while the fixed sha was in the gate');
+  assert.equal(builtWhenStopped([ev('a', 'launch'), ev('a', 'testing', 'abc'), ev('a', 'gate-fix'), ev('a', 'testing', 'def'), ev('a', 'commit-fix'), ev('a', 'interrupted')], 'a'), null,
+    'stopped during a commit fix: no tested sha is reused');
 });
 
 test('parseDiagnosis: fault, evidence and fix, bare, fenced or in prose; anything else is an error', () => {

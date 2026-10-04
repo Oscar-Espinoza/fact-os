@@ -178,7 +178,7 @@ export function promptFingerprint(role: Role, r: { model?: string; effort?: stri
 
 // The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
 // `testing <sha>` of the same pass), or null. The next pass can skip the builder if the branch is still exactly there.
-const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked', 'gate-fix'];
+const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked', 'gate-fix', 'commit-fix'];
 export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'detail'>[], id: string): string | null {
   let sha: string | null = null, last = '', before: { sha: string | null; last: string } | null = null;
   for (const e of events) {
@@ -319,6 +319,15 @@ export function gateFixPrompt(config: Config, failure: string, d: Diagnosis | nu
     'Run the failing tests before you finish, commit all your work and leave the worktree clean. Only the foreman merges.',
     d ? `\nA read-only diagnosis of this failure${diagnoserModel ? ` (${diagnoserModel})` : ''} found a ${d.fault} fault.\nEvidence: ${d.evidence}\nFix: ${d.fix}\n` +
       (d.fault === 'test' ? 'Change only the test it names, as it describes, and keep everything that test checks that is still right.' : 'Change the code; leave the tests as they are.') : '',
+  ].join('\n');
+}
+
+// Sent to the builder's own resumed session when it left its work uncommitted (config.commitFixes).
+export function commitFixPrompt(config: Config, problem: string): string {
+  return [`The foreman found that your work is not committed, so the test gate cannot run on it yet:`, '', problem, '',
+    'Finish only the existing work: commit all of it (git add, git commit). If a merge the foreman started is pending, resolve it ' +
+    'and commit the merge; never abort it and never start another merge or rebase. Do not start new work, do not weaken or delete ' +
+    `tests and do not discard changes that belong to this feature. Leave the worktree clean. Only the foreman merges into ${config.base}.`,
   ].join('\n');
 }
 
@@ -731,17 +740,41 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     }
     if (prepareDeferred && !await prepare()) return;
     // Any commit beyond base counts as the builder's, including the merge commit that completes a base refresh.
-    const commitProblem = (): string | null => {
+    // `resumable`: work exists but is not committed (dirty files or a pending merge). No commits at all, or lost dependency
+    // ancestry, cannot be repaired by asking the builder to commit.
+    const commitProblem = (): { text: string; resumable: boolean } | null => {
       const status = git(['status', '--porcelain'], wt).out.split('\n').filter(Boolean);
       const listed = status.slice(0, 40).join('\n') + (status.length > 40 ? `\n… ${status.length - 40} more` : '');
       const merging = git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 ? `the merge of ${config.base} the foreman started is not committed; ` : '';
       if (merging || status.length || git(['rev-list', '--count', `${config.base}..${branch}`], wt).out === '0')
-        return `commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`;
+        return { text: `commit your work: ${merging}${status.length ? `the worktree has uncommitted changes (git status --porcelain):\n${listed}` : merging ? 'git commit it' : `${branch} has no commits beyond ${config.base}`}`,
+          resumable: !!merging || status.length > 0 };
       if (required.some((sha) => git(['merge-base', '--is-ancestor', sha, branch], wt).code !== 0))
-        return 'commit your work: the branch no longer contains its declared merged dependencies';
+        return { text: 'commit your work: the branch no longer contains its declared merged dependencies', resumable: false };
       return null;
     };
-    { const cp = commitProblem(); if (cp) return fail(cp); }
+    // Uncommitted work after a build or a fix: resume the builder's session to commit it, config.commitFixes times per pass
+    // (shared by every check in the pass). False: the pass ended (a counted failure, or a stop that left the feature todo).
+    let commitsLeft = config.commitFixes;
+    const ensureCommitted = async (): Promise<boolean> => {
+      for (;;) {
+        const cp = commitProblem();
+        if (!cp) return true;
+        if (!cp.resumable || !builderSession || commitsLeft <= 0) { await fail(cp.text); return false; }
+        commitsLeft--;
+        if (await stopped()) return false;
+        tag = runTag(readdirSync(runDir), attempt);
+        log(root, id, 'commit-fix', 'resuming the builder to commit work it left uncommitted');
+        out(`fix ${id}: work left uncommitted; resuming the builder to commit it`);
+        const cfp = commitFixPrompt(config, cp.text);
+        recordPrompt('builder', cfp, builderNotes);
+        const r = await claude('builder', cfp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
+        if (await stopped()) return false;
+        if (!r.ok) { await fail(`builder failed: ${r.error}`); return false; }
+        if (r.sessionId) builderSession = r.sessionId;
+      }
+    };
+    if (!await ensureCommitted()) return;
     // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
     const rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
     if (rc.lost) return fail(rc.lost);
@@ -763,8 +796,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (await stopped()) return 'done';
       if (!r.ok) { await fail(`builder failed: ${r.error}`); return 'done'; }
       if (r.sessionId) builderSession = r.sessionId;
-      const cp = commitProblem();
-      if (cp) { await fail(cp); return 'done'; }
+      if (!await ensureCommitted()) return 'done';
       const edits = testEdits(wt, before, 'HEAD');
       if (edits.length) log(root, id, 'test-edits', `in the fix: ${edits.join('; ')}`);
       return 'retry';

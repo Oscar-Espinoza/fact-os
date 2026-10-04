@@ -369,6 +369,16 @@ test('agentStats: a resumed gate fix continues the pass; it is not a new launch 
   assert.deepEqual([failed!.launches, failed!.built, failed!.gated, failed!.merged], [1, 1, 0, 0]);
 });
 
+test('agentStats: a commit fix after the build stays in the build stage; it is not a new launch', () => {
+  const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
+  const e = (min: number, event: string, detail = '') => ({ ts: at(min), feature: 'a', event, detail });
+  const [era] = agentStats([e(0, 'launch'), e(1, 'prompt', 'builder model=opus effort=medium lessons=- briefs=-'),
+    e(50, 'commit-fix', 'resuming the builder to commit work it left uncommitted'), e(51, 'prompt', 'builder model=opus effort=medium lessons=- briefs=-'),
+    e(52, 'testing', 's1'), e(80, 'evaluating'), e(85, 'merged', 'ship/a')], [], T0 - 60e3);
+  assert.deepEqual([era!.launches, era!.built, era!.gated, era!.merged], [1, 1, 1, 1]);
+  assert.equal(era!.buildMin, 52, 'the build time includes its commit fix');
+});
+
 test('agentStats: a resolver run continues the pass that hit the conflict; its merge counts once, its gate and evaluation are not counted again', () => {
   const T0 = Date.parse('2026-10-01T10:00:00Z'), at = (min: number) => new Date(T0 + min * 60e3).toISOString();
   const e = (min: number, feature: string, event: string, detail = '') => ({ ts: at(min), feature, event, detail });
