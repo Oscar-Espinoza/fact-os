@@ -77,6 +77,11 @@ if (mode === 'resolve') {
     }
     commit(`${id}.txt`, `built ${id} at ${Date.now()}\n`);
     if (has('break')) commit('broken.txt', 'the guard tests\' gate fails while this exists\n');
+    if (has('close-tasks')) { // a person finishes every human task while this feature builds
+      const file = join(root(), '.fact-os/human.json'), d = JSON.parse(readFileSync(file, 'utf8')) as { tasks: { status: string }[] };
+      for (const t of d.tasks) t.status = 'done';
+      writeFileSync(file, JSON.stringify(d));
+    }
     if (has('skip-test')) commit('a.test.ts', "it.skip('works', () => {});\n"); // weakens the test that exists on base
     if (has('new-test')) commit(`${id}-new.test.ts`, "it('is new', () => { expect(2).toBe(2); });\n");
     if (has('dirty')) writeFileSync('leftover.txt', 'not committed\n');

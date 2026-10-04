@@ -209,13 +209,19 @@ const RUN_FILE: Record<Role, string> = { builder: 'build', evaluator: 'eval', re
 const REFRESH_SEP = '\n\nThis failure is not fixed yet. Also: ';
 
 // `notes`: the notes block for this model and role (notesBlock), appended last.
+// The open, mockable human tasks a launch may build against a mock of (captured at launch), by id, title and scope,
+// rendered the same way for the builder and the evaluator.
+const mockList = (tasks: HumanTask[]): string => tasks.map((t) => `- ${t.id}: ${t.title}${(t.steps || []).length ? `\n${t.steps.map((x) => `  - ${x}`).join('\n')}` : ''}`).join('\n');
+
 export function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = [], notes = ''): string {
   const lessons = readIf(resolve(root, config.lessonsFile));
   return [`You are the builder for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}, created from ${config.base}.`, '', f.description || '', '',
     'Acceptance checks (an independent evaluator verifies each one):', ...(f.acceptance || []).map((a) => `- ${a}`), '',
-    mockTasks.length ? 'ON MOCK: these human tasks are still open, so build against a clearly isolated mock/fake of what they ' +
-      `provide, easy to swap for the real thing later:\n${mockTasks.map((t) => `- ${t.title}`).join('\n')}\n` : '',
+    mockTasks.length ? 'ON MOCK: these human tasks were open at launch, so build against a clearly isolated mock/fake of the external ' +
+      'capability they provide, behind a boundary that is easy to swap for the real thing later. Wire everything else for production: the ' +
+      'real routes, jobs and state transitions must reach that boundary, and production must fail explicitly while no real integration ' +
+      `exists (never enable the fake in production):\n${mockList(mockTasks)}\n` : '',
     f.lastFeedback ? `Feedback on your previous attempt:\n${f.lastFeedback}\n` : '',
     hotHeld.length ? `Hot files: merge conflicts keep sending work back on these, and other features in flight are changing them:\n${
       hotHeld.map((h) => `- ${h}`).join('\n')}\nKeep your edits there small and additive (never reorder or reformat them); do not skip a change the feature needs.\n` : '',
@@ -248,7 +254,8 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
 
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 
-export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = []): string {
+export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = []): string {
+  const onMock = mockTasks.length > 0;
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
     'You did not write this code. Judge it skeptically. You may read files and run commands; do not modify or commit anything in this',
     'worktree (for a mutation check, use a scratch copy: git worktree add /tmp/<name> HEAD, and remove it afterwards).',
@@ -258,15 +265,22 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     '- For each check about money, permissions, tenant isolation or a state change: remove or flip the guard in a scratch copy, run its',
     '  test, and report which test fails. A test that still passes does not prove the check.',
     '- Check production wiring: every check must be reachable from a real route, job or composition, not only from a test, a fake or a',
-    '  development-only setting. Every new state or status needs production code that moves it forward.',
+    `  development-only setting${onMock ? ' (outside the on-mock tasks below)' : ''}. Every new state or status needs production code that moves it forward.`,
     '',
     'Look explicitly for pass-through implementations, tests that cannot fail, skipped or deleted tests, and hard-coded results. ' +
     'Report any under "cheating".',
     'Report under "blocking" every problem that must stop the merge even if no acceptance check names it: a defect in money, auth,',
-    'tenant isolation or state handling; a path that only works with a fake or a development setting; a multi-line copy of an existing',
+    `tenant isolation or state handling; a path that only works with a fake or a development setting${onMock ? ' outside the on-mock tasks below' : ''}; a multi-line copy of an existing`,
     'production helper (name both file:line locations); changed behaviour of an existing export whose callers were not checked; edits to',
     'unrelated tests that weaken them. Duplicated setup or helpers inside test files go under "notes" (suggest the shared helper), never',
     'under "blocking". Minor remarks go under "notes" and do not block. "lesson" is only advice for future builders.', '',
+    onMock ? 'ON MOCK: these human tasks were open when this feature launched, and the builder was told to build against an isolated ' +
+      'mock of the external capability they provide:\n' + mockList(mockTasks) + '\nFor exactly that capability, a missing real adapter ' +
+      'or a live provider report is a documented deferral, not a failed wiring check, cheating or blocking. Verify instead that the mock ' +
+      'is isolated behind a swappable boundary, that the real internal routes, jobs, state transitions and their consumers reach it, ' +
+      'and that production fails explicitly rather than using the fake. Simulated provider reports must still drive the real internal ' +
+      'transitions. A mock outside these tasks, one that is not isolated, or a fake enabled in production still blocks, and so does ' +
+      'any defect in money, auth, tenant isolation or state handling. Put what the real integration will need under "notes", keyed by task id.\n' : '',
     `Test command \`${config.test}\` exited ${test.code}. Output tail:\n\`\`\`\n${test.tail}\n\`\`\``, '',
     resolved ? `This branch resolved a merge conflict with ${config.base} in this pass. Also verify that the features merged into ` +
       `${config.base} it conflicted with still behave as their acceptance checks say (a failure there fails this feature):\n${resolved}\n` : '',
@@ -870,7 +884,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const en = notesFor('evaluator');
       const edits = testEdits(wt, git(['merge-base', config.base, sha], wt).out, sha);
       if (edits.length) log(root, id, 'test-edits', edits.join('; '));
-      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits);
+      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks);
       recordPrompt('evaluator', ep, en);
       const e = await agent('evaluator', ep, `${tag}-eval.json`);
       if (await stopped()) return;
@@ -1160,11 +1174,17 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           }
           // Claim and capture together: a pending edit may have completed since this tick's load.
           // Keep the pre-transition SHA for build reuse; clear disk acceptance until a fresh auto pass.
+          // The human tasks this launch may mock are captured here too, by value, and kept for the whole pass: closing or
+          // editing a task mid-pass neither removes nor widens the allowance. A blocker that turned unmockable defers the launch.
+          let mockTasks: HumanTask[] = [];
           const f = await mutate(root, 'features', (d) => {
             const current = d.features.find((x) => x.id === id);
             if (!current || current.status !== 'todo') return null;
-            const snapshot = { ...current, acceptance: [...(current.acceptance || [])] };
-            Object.assign(current, { status: 'building', onMock: a.mock.has(id), sha: undefined, pendingLesson: undefined,
+            const open = loadState(root).tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id));
+            if (open.some((t) => !t.mockable)) return null;
+            mockTasks = open.map((t) => ({ ...t, steps: [...(t.steps || [])], unblocks: [...(t.unblocks || [])] }));
+            const snapshot = { ...current, acceptance: [...(current.acceptance || [])], onMock: mockTasks.length > 0 };
+            Object.assign(current, { status: 'building', onMock: mockTasks.length > 0, sha: undefined, pendingLesson: undefined,
               stop: undefined, pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
             return snapshot;
           });
@@ -1172,9 +1192,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           busy.add(g);
           launched++;
           if (claims) claims.held.push([id, filesOf(f)]);
-          const mockTasks = tasks.filter((t) => t.status === 'open' && t.mockable && (t.unblocks || []).includes(id));
-          log(root, id, 'launch', a.mock.has(id) ? 'onMock' : '');
-          out(`building ${id}${a.mock.has(id) ? ' (on mock)' : ''}`);
+          log(root, id, 'launch', mockTasks.length ? 'onMock' : '');
+          out(`building ${id}${mockTasks.length ? ' (on mock)' : ''}`);
           inflight.set(id, pipeline(f, config, mockTasks, hotHeld, control.profile ?? null)
             .catch((e: unknown) => { log(root, id, 'error', (e as Error | undefined)?.stack || String(e)); return set(id, { status: 'todo' }); })
             .finally(() => inflight.delete(id)));

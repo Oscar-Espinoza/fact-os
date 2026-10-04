@@ -131,7 +131,8 @@ non-null timeouts must be positive and fit the native timer range. Budget/count/
 zeros retain their documented meanings; config `maxParallel: 0` still gives one lane.
 
 **Readiness:** a `todo` feature is ready when every dep is `merged` in either merge mode and
-every open human task that unblocks it is `mockable` (it is then built `onMock`). An open non-mockable task
+every open human task that unblocks it is `mockable` (it is then built `onMock`; builder and evaluator both see those
+tasks, captured at launch, and the evaluator accepts an isolated mock of exactly that external capability). An open non-mockable task
 makes it *waiting-on-human*. Ready features run by priority, then number of transitive dependents, then id.
 Features in cycles, with unknown deps or duplicate ids are reported and never run.
 In manual mode, merge the recorded evaluated commit into `base`, then use the dashboard's

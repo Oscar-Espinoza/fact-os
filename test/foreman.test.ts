@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt } from '../lib/foreman.ts';
+import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
@@ -325,5 +325,23 @@ test('evaluatorPrompt: a copied helper blocks only in production code; duplicate
     const blocking = p.slice(p.indexOf('Report under "blocking"'), p.indexOf('Minor remarks'));
     assert.match(blocking, /multi-line copy of an existing\s+production helper/);
     assert.match(p, /Duplicated setup or helpers inside test files go under "notes"/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('I06: builder and evaluator see the same on-mock tasks by id and scope; without them the evaluator stays strict', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fact-os-onmock-'));
+  try {
+    const cfg = { ...DEFAULT_CONFIG, lessonsFile: 'none.md' };
+    const f: Feature = { id: 'a', title: 'A', description: '', acceptance: ['works'], surface: 'any', deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '' };
+    const task = { id: 'H-C44', title: 'Gudink partner API', steps: ['confirm the partner API', 'share credentials'], unblocks: ['a'], mockable: true, status: 'open' as const };
+    const ev = evaluatorPrompt(root, cfg, f, 'ship/a', '', { code: 0, tail: '' }, [], '', '', [], [task]);
+    for (const re of [/ON MOCK/, /H-C44: Gudink partner API/, /confirm the partner API/, /documented deferral/, /under "notes", keyed by task id/])
+      assert.match(ev, re);
+    assert.match(ev, /outside the on-mock tasks below/, 'the fake/development rules name the exception');
+    const strict = evaluatorPrompt(root, cfg, f, 'ship/a', '', { code: 0, tail: '' }, []);
+    assert.doesNotMatch(strict, /ON MOCK|on-mock/);
+    assert.match(strict, /a path that only works with a fake or a development setting/);
+    const bp = builderPrompt(root, cfg, f, 'ship/a', [task]);
+    assert.match(bp, /ON MOCK/); assert.match(bp, /H-C44: Gudink partner API/); assert.match(bp, /confirm the partner API/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

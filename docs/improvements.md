@@ -16,6 +16,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I03 | done | Feature tiers set at intake, mapped to role models by the active profile |
 | I04 | done | Resume the builder once to commit work it left uncommitted (`commitFixes`) |
 | I05 | next | Setup failures: bounded delayed retries without spending attempts, then a launch hold |
+| I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -136,3 +137,15 @@ allowance per pass (default 0, ecommerce 1) so committing never uses up a genuin
 an unfinished foreman merge, never for "no commits" or lost dependency ancestry; the same check after the initial build and
 after every resumed fix; a `commit-fix` event that keeps the pass open, ends build reuse, stays in the build stage for
 observer statistics and restarts the dashboard's building timer.
+
+## I06 — the evaluator knows what the build was allowed to mock
+
+F17-10 launched on mock (open mockable task H-C44, a supplier partner API). The builder was told to build against an
+isolated mock; the evaluator was not told and blocked it under "a path that only works with a fake". Agreed with the
+Codex partner: capture the open mockable tasks by value at the locked launch (not the stale `onMock` flag; a blocker that
+turned non-mockable defers the launch) and keep them for the pass; render them by id, title and steps for both builder
+and evaluator; give both fake/development rules a narrow exception for exactly those external capabilities; the real
+internal routes, jobs, transitions and consumers must still reach the boundary, production must fail explicitly, and
+what the real integration needs goes into the verdict's notes. Re-validating a merged on-mock feature when its task closes
+is a separate follow-up (a task can close by confirming that no API exists). F17-10's own `in_production` cancellation
+defect stays a real blocking finding.

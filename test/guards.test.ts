@@ -1357,3 +1357,16 @@ test('I04 review: the commit allowance spent after the build is not available to
   assert.equal(s.calls('fix', 'a').length, 2, 'one commit resume, one gate fix, no second commit resume');
   assert.match(s.feature('a').lastFeedback!, /leftover-gate\.txt/);
 });
+
+// ---- I06: the evaluator knows what the build was allowed to mock ----
+test('I06: on-mock tasks captured at launch reach the evaluator even when the task closes during the build', (t) => {
+  const s = setup(t, { features: [F('a'), F('b', { onMock: true, priority: 2 })], config: { maxParallel: 1 }, scenario: { a: 'close-tasks' } });
+  writeFileSync(join(s.repo, '.fact-os/human.json'), JSON.stringify({ tasks: [
+    { id: 'H-API', title: 'Partner API access', steps: ['confirm the partner API'], unblocks: ['a'], mockable: true, status: 'open' }] }));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  const [ev] = s.calls('eval', 'a');
+  assert.match(ev!.prompt, /ON MOCK/); assert.match(ev!.prompt, /H-API: Partner API access/);
+  assert.equal(events(s, 'a').find((e) => e.event === 'launch')!.detail, 'onMock');
+  assert.doesNotMatch(s.calls('eval', 'b')[0]!.prompt, /ON MOCK/, 'a stale onMock flag without open tasks stays strict');
+  assert.equal(s.feature('b').onMock, false);
+});

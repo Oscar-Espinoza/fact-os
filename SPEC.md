@@ -204,7 +204,13 @@ and `doctor` print how many not-merged features would escalate. Opus never escal
 
 A feature is **ready** when: status is `todo`; every dep is `merged`, in either merge mode;
 and for every open human task that lists it in `unblocks`, that task is `mockable`
-(then the feature is built with `onMock: true`). A feature blocked by an open non-mockable human task
+(then the feature is built with `onMock: true`). Those tasks are captured by value at the locked launch (a blocker
+that turned non-mockable defers the launch) and kept for the whole pass, closed or edited mid-pass or not. Builder
+and evaluator get the same list (id, title, steps): the builder mocks exactly that external capability behind a
+swappable boundary, with production failing explicitly; the evaluator treats a missing real adapter there as a
+documented deferral (notes keyed by task id), and still blocks a mock beyond those tasks, a fake enabled in
+production and any other wiring or state defect. Without on-mock tasks the evaluator's rules are unchanged.
+A feature blocked by an open non-mockable human task
 is **waiting-on-human**. Ready features are ordered by priority, then by how many other features
 transitively depend on them (more first), then id. Dependency cycles and unknown dep ids are reported
 by `fact-os doctor` / at load and those features are never ready.
