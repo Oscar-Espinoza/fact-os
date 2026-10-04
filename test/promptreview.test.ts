@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { passKind, passesOf, nextResult, selectPasses, parseFingerprint, promptFile, parseReview, eligible, promptRates, trend, promptSummary, renderPromptSection, reviewPrompt, reviewBudget, reviewTimeoutMin,
-  type Pass, type PromptReview } from '../lib/promptreview.ts';
+  holdDecision, type Pass, type PromptReview } from '../lib/promptreview.ts';
 import { mergeNotes, fitNotes, parseNotes, noteBullet, notesBlock, notesHash, notesFile, readNotes, overCap, NOTE_MAX } from '../lib/notes.ts';
 import { promptFingerprint, builderPrompt, parseVerdict, feedbackFromVerdict } from '../lib/foreman.ts';
 import { agentStats, versionKey, classify } from '../lib/observe.ts';
@@ -291,4 +291,19 @@ test('reviewBudget: one batch per everyMinutes, at most maxPerDay runs in 24 hou
   assert.equal(reviewTimeoutMin({ timeoutMin: null }), 20);
   assert.equal(reviewTimeoutMin({ timeoutMin: 90 }), 20);
   assert.equal(reviewTimeoutMin({ timeoutMin: 5 }), 5);
+});
+
+test('holdDecision: a hold needs every quote found in the saved prompt or outcome and the requirement quoted from the prompt', () => {
+  const prompt = 'Acceptance checks:\n- The retention document   lists every table unchanged\n- Parallel additions merge without conflicts', outcome = 'FAILED Parallel additions: retention-doc.test.ts:17 fails after two scratch additions';
+  const r = (cause: string, confidence: string, evidence: string[]) => ({ cause, confidence, evidence }) as never;
+  assert.equal(holdDecision(r('spec-error', 'high', ['"The retention document lists every table unchanged"']), prompt, outcome), 'hold');
+  assert.equal(holdDecision(r('spec-error', 'high', []), prompt, outcome), 'alert', 'no evidence');
+  assert.equal(holdDecision(r('spec-error', 'high', ['a requirement nobody wrote anywhere']), prompt, outcome), 'alert', 'unverifiable quote');
+  assert.equal(holdDecision(r('spec-error', 'high', ['retention-doc.test.ts:17 fails after two scratch additions']), prompt, outcome), 'alert', 'outcome only: the requirement is not quoted');
+  assert.equal(holdDecision(r('spec-error', 'medium', ['The retention document lists every table unchanged']), prompt, outcome), 'alert', 'medium needs corroboration');
+  assert.equal(holdDecision(r('spec-error', 'medium', ['The retention document lists … every table unchanged', 'retention-doc.test.ts:17 fails']), prompt, outcome), 'hold', 'medium, corroborated');
+  assert.equal(holdDecision(r('prompt-conflict', 'high', ['The retention document lists every table unchanged', 'Parallel additions merge without conflicts']), prompt, outcome), 'hold');
+  assert.equal(holdDecision(r('prompt-conflict', 'medium', ['The retention document lists every table unchanged', 'Parallel additions merge without conflicts']), prompt, outcome), 'alert');
+  assert.equal(holdDecision(r('spec-error', 'low', ['The retention document lists every table unchanged']), prompt, outcome), null);
+  assert.equal(holdDecision(r('model-limitation', 'high', ['The retention document lists every table unchanged']), prompt, outcome), null);
 });

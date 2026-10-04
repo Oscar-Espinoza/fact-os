@@ -10,9 +10,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { childEnv, paths, log, envVar, mutate, NAME } from './state.ts';
-import { git, exec, claudeArgs, parseClaudeOutput } from './foreman.ts';
+import { git, exec, claudeArgs, parseClaudeOutput, holdInputs } from './foreman.ts';
 import { NOTE_MAX, clipNote, noteBullets, mergeNotes, fitNotes, overCap, renderNotes, parseNotes, notesFile, notesArchive, notesDir } from './notes.ts';
-import { PROMPT_CAUSES, type Cause, type Config, type HumanTask, type LogEvent, type PromptCause, type PromptReviewConfig, type Role, type RoleConfig } from './types.ts';
+import { PROMPT_CAUSES, type Cause, type Config, type Feature, type HumanTask, type LogEvent, type PlanningHold, type PromptCause, type PromptReviewConfig, type Role, type RoleConfig } from './types.ts';
 
 const DAY = 24 * 3600e3;
 const now = (): string => new Date().toISOString();
@@ -266,11 +266,69 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
     reviews[k.key] = 'error' in a ? { ...base, cause: null, evidence: [], confidence: null, suggestion: '', target: null, error: `invalid answer: ${a.error}` } : { ...base, ...a };
     delete tries[k.key];
     log(root, null, 'observer-review', `${k.key} ${p.role} ${used.model}: ${'error' in a ? `invalid answer (${a.error})` : `${a.cause} (${a.confidence})`}; $${c.cost.toFixed(2)}`);
+    if (!('error' in a)) await placeHold(root, config, p, k.key, a, input.prompt);
     done++;
   };
   for (let i = 0; i < todo.length && !stopping(); i += PARALLEL) await Promise.all(todo.slice(i, i + PARALLEL).map(one));
   out(`observer: reviewed ${done} of ${todo.length} failed passes`);
   return done;
+}
+
+// ---- planning holds ----
+
+const norm = (s: string): string => s.replace(/\s+/g, ' ').trim();
+const QUOTES = /^["'`“”‘’]+|["'`“”‘’]+$/g;
+// A quote's checkable fragments: wrapping quote marks removed, split at an ellipsis; a fragment under 8 characters proves nothing.
+const fragments = (q: string): string[] => norm(q).replace(QUOTES, '').split(/\s*(?:…|\.\.\.)\s*/).map((x) => x.replace(QUOTES, '').trim()).filter((x) => x.length >= 8);
+// Where each of a review's quotes is found, verbatim up to whitespace: in the saved prompt, in the pass's outcome, or nowhere.
+export function locateEvidence(evidence: string[], prompt: string, outcome: string): { inPrompt: number; inOutcome: number; unverified: string[] } {
+  const P = norm(prompt), O = norm(outcome), unverified: string[] = [];
+  let inPrompt = 0, inOutcome = 0;
+  for (const q of evidence) {
+    const fr = fragments(q), p = fr.length > 0 && fr.every((x) => P.includes(x)), o = fr.length > 0 && fr.every((x) => O.includes(x));
+    if (p) inPrompt++;
+    if (o) inOutcome++;
+    if (!p && !o) unverified.push(q);
+  }
+  return { inPrompt, inOutcome, unverified };
+}
+// Whether a review warrants a planning hold. A hold needs every quote found in the saved prompt or outcome, and the requirement
+// itself quoted from the prompt: a high spec-error; a medium spec-error corroborated by the outcome too (at least two quotes);
+// a high prompt-conflict quoting both sides from the prompt. Anything else of those causes at medium or high is only an alert.
+export function holdDecision(r: Pick<PromptReview, 'cause' | 'confidence' | 'evidence'>, prompt: string, outcome: string): 'hold' | 'alert' | null {
+  if ((r.cause !== 'spec-error' && r.cause !== 'prompt-conflict') || (r.confidence !== 'high' && r.confidence !== 'medium')) return null;
+  const e = locateEvidence(r.evidence, prompt, outcome), verified = r.evidence.length > 0 && e.unverified.length === 0;
+  if (r.cause === 'spec-error' && verified && e.inPrompt >= 1 && (r.confidence === 'high' || (r.evidence.length >= 2 && e.inOutcome >= 1))) return 'hold';
+  if (r.cause === 'prompt-conflict' && r.confidence === 'high' && verified && e.inPrompt >= 2) return 'hold';
+  return 'alert';
+}
+// The saved prompt still carries the feature's current description and acceptance (it was not edited since that pass).
+const specIn = (prompt: string, f: Pick<Feature, 'description' | 'acceptance'>): boolean => {
+  const P = norm(prompt);
+  return [f.description || '', ...(f.acceptance || [])].map(norm).filter(Boolean).every((x) => P.includes(x));
+};
+const launchedSince = (root: string, id: string, since: string): boolean => {
+  let text = ''; try { text = readFileSync(paths(root).log, 'utf8'); } catch { return false; }
+  return text.split('\n').some((l) => { if (!l.includes('"launch"')) return false; try { const e = JSON.parse(l) as LogEvent; return e.feature === id && e.event === 'launch' && Date.parse(e.ts) > Date.parse(since); } catch { return false; } });
+};
+// Places a planning hold for a review of `p`, rechecked under the state lock after the paid review: the feature is todo with
+// attempts left and no hold, `p` is its latest pass (no launch since it started), and the spec is the one that pass was given.
+async function placeHold(root: string, config: Config, p: Pass, key: string, r: ParsedReview, prompt: string): Promise<void> {
+  const d = holdDecision(r, prompt, p.detail || '');
+  if (!d) return;
+  const quotes = r.evidence.join(' | ');
+  if (d === 'alert') { log(root, p.feature, 'planning-alert', `${r.cause} (${r.confidence}) in review ${key}, not held: its evidence was not verified against the saved prompt and outcome: ${quotes}`); return; }
+  const placed = await mutate(root, 'features', (data) => {
+    const f = data.features.find((x) => x.id === p.feature);
+    if (!f || f.status !== 'todo' || f.planningHold || (f.attempts || 0) >= config.maxAttempts) return null;
+    if (launchedSince(root, p.feature, p.start) || !specIn(prompt, f)) return null;
+    const hold: PlanningHold = { cause: r.cause as PlanningHold['cause'], confidence: r.confidence as PlanningHold['confidence'], evidence: r.evidence, review: key, passEnd: p.end,
+      inputs: holdInputs(root, config, f), ts: new Date().toISOString() };
+    f.planningHold = hold;
+    return hold;
+  });
+  if (placed) log(root, p.feature, 'planning-hold', `${r.cause} (${r.confidence}), review ${key}: ${quotes}. Edit the feature's description or acceptance ` +
+    `(or the briefs) to release it, or \`${NAME} release ${p.feature}\` to launch it unchanged.`);
 }
 
 // ---- notes ----

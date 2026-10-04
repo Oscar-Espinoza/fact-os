@@ -34,6 +34,7 @@ imports `lib/cli.ts`, since tsc skips extensionless files.
 | `fact-os status` | Feature table (status, attempts, cost, deps, next/onMock/waiting) and open human tasks. |
 | `fact-os classify <id…>` / `--all` / `--report` | Shadow-classify features with TypeSafe Jev (I07 v2: 32 narrow questions composed into review requirements, workload, attention priority and planning candidates; `config.classifier`, key in `TYPESAFE_API_KEY` or fact-os's `.env`). Records to `.fact-os/classifier.jsonl`; never changes features. `--report` shows the shadow outputs beside what features actually took. `--escalate` sends unsure review questions to a read-only agent (Sol 6.1 high, Opus high fallback), capped per run and day. With `classifier.auto` (default on) the running observer classifies new and edited open features by itself, escalating when `escalation.enabled`. See docs/jev-lessons.md. |
 | `fact-os done <task-id>` | Marks a human task done; a watching foreman picks it up. |
+| `fact-os release <id>...` | Launch a feature the observer put on a planning hold, unchanged (editing its spec releases it too). |
 | `fact-os pause\|resume\|retry <id>...` | Pause `todo`/`stuck` features (they and their dependents never launch; `run --watch` keeps waiting), resume paused ones (fresh attempts if they had run out), retry stuck ones (attempts reset, last feedback kept). |
 | `fact-os pause-all` / `resume-all` | Stop / restart launching new features for the whole project (`control.json`). Nothing running is interrupted; parked merges still merge; `run --watch` keeps waiting while paused, while a foreman without `--watch` exits once its work in flight drains. Says when no foreman is running (it applies when one starts). |
 | `fact-os lanes <n\|default>` | How many features may be in flight (0–32; `default` = `config.maxParallel`), changed during a run without a restart: more lanes launch at once, fewer let the running ones finish. Prints the resulting state. The dashboard header has the same controls. |
@@ -82,14 +83,25 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   overlap blocks, so cold siblings can run concurrently), `conflictBrief` (false; a conflicting refresh's feedback
   names both sides: this feature, the features merged into `base` that touched each conflicting file with their
   acceptance checks, and the diff3 hunks; resolutions must keep every line either side added or declare it as
-  `dropped: <file>: <line>` in a commit message) and `resolver` (null; `{model, effort, permissionMode}`: a separate
+  `dropped: <file>: <line>` in a commit message, the line exactly as it was with the reason on the next line; a line in
+  one leading code span, or followed by ` - ` or ` (…)`, is also accepted) and `resolver` (null; `{model, effort, permissionMode}`: a separate
   resolver run resolves the conflict at once, in the same pass, then the test and a fresh evaluator run again),
   `gateFixes` (0; after a test-gate failure, resume the builder's own Claude session that many times per pass to fix
   it, spending no attempt) and `diagnoser` (null; `{model, effort}`: when a resumed fix fails the gate again, a
   read-only run diagnoses a code, test or environment fault, and the builder gets one more fix with that brief).
   `commitFixes` (0; when a build or a fix leaves work uncommitted, or a merge the foreman started unfinished, resume
   the builder's session that many times per pass to commit it, spending no attempt; a build with no commits at all,
-  or that lost its dependencies, still fails).
+  or that lost its dependencies, still fails). `keepFixes` (1; when the builder's committed merge resolution lost lines,
+  resume its session that many times per pass with copyable `dropped:` records before a counted failure) and
+  `reviewFixes` (0; after an actionable evaluator rejection — a valid verdict, no cheating, concrete failed findings —
+  resume the builder's session that many times per pass, then the gate and a fresh evaluator run on the new commit).
+  A diagnoser `environment` fault reruns the gate once on the same build; if it fails the same way the pass stops
+  without spending an attempt and the build is revalidated after `setupRetryDelaysSec` (one more episode after the
+  last delay is an uncounted stuck). A feature also gets the mock allowance of the open mockable human tasks of its
+  dependencies (transitively), shown with the dependency they came through. When the observer's prompt review of a
+  feature's latest failed pass finds a spec error or a prompt conflict and its quotes check out against the saved
+  prompt and outcome, the feature gets a planning hold (no launch, no attempt spent) until its description,
+  acceptance or the briefs change, or a person runs `fact-os release <id>`.
   Edits to tests that already exist on base are always listed for the evaluator (`test-edits` event).
   The evaluator and the diagnoser can run on Codex: `provider: "codex"` in their role config, a profile's
   evaluator entry or a tier entry (e.g. `{provider: "codex", model: "gpt-6.1-sol", effort: "high"}`). It runs

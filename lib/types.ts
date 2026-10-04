@@ -108,6 +108,19 @@ export interface Diagnosis { ts: string; feature: string; cause: Cause; tests: s
 
 export interface AttemptStop { attempt: number; counted: boolean }
 
+// A launch hold the observer places when a review of the feature's latest failed pass shows, with evidence checked against the
+// saved prompt and outcome, that the spec or the prompt cannot be met as written. Not a person's pause: no attempt is spent, and
+// it is released by an edit of the feature's inputs (its fingerprint changes) or by a person (`release`), never by time.
+export interface PlanningHold {
+  cause: 'spec-error' | 'prompt-conflict';
+  confidence: 'medium' | 'high';
+  evidence: string[];                 // the reviewer's quotes, each found in the saved prompt or the outcome
+  review: string;                     // the review key (<feature>/<tag>) of the failed pass
+  passEnd: string;                    // ISO end of that pass
+  inputs: string;                     // holdInputs fingerprint when placed: description, acceptance, deps and briefs
+  ts: string;
+}
+
 export interface Feature {
   id: string;
   title: string;
@@ -126,6 +139,7 @@ export interface Feature {
   setupRetryAt?: string;              // ISO: no launch before this time (a delayed setup retry)
   envFailures?: number;               // gate failures diagnosed as environmental, after a same-build rerun; never attempts; cleared by a passing gate or a retry
   envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
+  planningHold?: PlanningHold;
   envBuild?: string;                  // the commit held after an environmental gate failure: the next pass revalidates it instead of rebuilding
   refreshes?: number;
   lastFeedback?: string;

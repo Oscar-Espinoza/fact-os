@@ -1,7 +1,7 @@
 // End-to-end scenarios where the builder, the evaluator or the checkout misbehave. Uses fixtures/fake-claude.ts.
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
@@ -1680,4 +1680,33 @@ test('inherited mock allowance: a feature whose dependency is built on a named m
     assert.match(c!.prompt, /C02: Shipping partner account \(inherited: open for dependency a, which this feature builds on\)/, mode);
   }
   assert.equal(s.feature('b').onMock, true);
+});
+
+// ---- review repair (reviewFixes) ----
+const REJECT = { pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'GET credit returns 409 for a saved partial claim (credit.ts:297)' }], cheating: [], blocking: [], lesson: 'superseded advice' };
+
+test('reviewFixes: an actionable rejection resumes the builder once; the gate and a fresh evaluator pass the new commit with no attempt spent', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, reviewFixes: 1 }, verdicts: { a: [REJECT] } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  const [fix] = s.calls('fix', 'a');
+  assert.ok(fix); assert.match(fix.prompt, /^An independent evaluator rejected/); assert.match(fix.prompt, /GET credit returns 409/);
+  assert.equal(fix.args[fix.args.indexOf('--resume') + 1], 'fake');
+  const evals = s.calls('eval', 'a');
+  assert.equal(evals.length, 2, 'a fresh evaluation');
+  assert.match(s.git('log', '--format=%s', '-3', s.feature('a').sha!), /a-review-fix\.txt/, 'the accepted sha is the fixed commit');
+  const ev = events(s, 'a').map((e) => e.event);
+  assert.equal(ev.filter((e) => e === 'testing').length, 2); assert.equal(ev.filter((e) => e === 'review-fix').length, 1);
+  assert.doesNotMatch(s.log(), /"event":"lesson","detail":"superseded advice"/, 'the superseded rejection\'s lesson is not compounded');
+  const files = readdirSync(join(s.repo, '.fact-os', 'runs', 'a'));
+  assert.ok(files.includes('1-eval.json') && files.some((x) => /^1\.\d-eval\.json$/.test(x)), `both evaluations kept: ${files}`);
+});
+
+test('reviewFixes: a second rejection counts once; cheating, an invalid verdict or no builder session never resume', (t) => {
+  const s = setup(t, { features: [F('a'), F('b'), F('c')], config: { maxAttempts: 1, reviewFixes: 1, maxParallel: 1 },
+    verdicts: { a: [REJECT, REJECT], b: [{ ...REJECT, cheating: ['hard-coded result'] }], c: [{ pass: true, findings: [] } as never] } });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.calls('fix', 'a').length, s.calls('eval', 'a').length], ['stuck', 1, 1, 2]);
+  assert.deepEqual([s.feature('b').status, s.calls('fix', 'b').length], ['stuck', 0]);
+  assert.deepEqual([s.feature('c').status, s.calls('fix', 'c').length], ['stuck', 0], 'an invalid verdict is not a repair brief');
 });

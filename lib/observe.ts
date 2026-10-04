@@ -155,9 +155,12 @@ export function parseImprover(text: string): ImproverAnswer {
 
 // ---- agent effectiveness ----
 
-export interface RunCost { ts: string; role: 'build' | 'eval'; cost: number; ms: number }
+export interface RunCost { ts: string; role: 'build' | 'eval'; cost: number; ms: number; unpriced?: boolean }
+// A run with no USD measurement (a Codex run: tokens only), including older Codex artifacts written with a synthetic $0.
+export const unpricedRun = (j: { total_cost_usd?: unknown; cost_status?: unknown; provider?: unknown }): boolean =>
+  j.cost_status === 'unpriced' || (j.provider === 'codex' && !(typeof j.total_cost_usd === 'number' && j.total_cost_usd > 0));
 export interface Era { since: string; change: string; launches: number; setup: number; built: number; gated: number; evaluated: number; passed: number;
-  bounced: number; merged: number; resolves: number; resolvedMerged: number; buildMin: number | null; gateMin: number | null; evalMin: number | null; costBuild: number; costEval: number;
+  bounced: number; merged: number; resolves: number; resolvedMerged: number; buildMin: number | null; gateMin: number | null; evalMin: number | null; costBuild: number; costEval: number; unpricedRuns: number;
   rejections: [string, number][]; builderFailures: [string, number][] }
 
 const median = (xs: number[]): number | null => { if (!xs.length) return null; const a = [...xs].sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m]! : (a[m - 1]! + a[m]!) / 2; };
@@ -204,7 +207,7 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
   }
   const eraOf = (ms: number) => { let i = 0; while (i + 1 < starts.length && t(starts[i + 1]!) <= ms) i++; return i; };
   const eras: (Era & { b: number[]; g: number[]; v: number[]; rej: string[]; bf: string[] })[] = starts.map((s) => ({ since: s.ts, change: s.change, launches: 0, setup: 0, built: 0, gated: 0,
-    evaluated: 0, passed: 0, bounced: 0, merged: 0, resolves: 0, resolvedMerged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
+    evaluated: 0, passed: 0, bounced: 0, merged: 0, resolves: 0, resolvedMerged: 0, buildMin: null, gateMin: null, evalMin: null, costBuild: 0, costEval: 0, unpricedRuns: 0, rejections: [], builderFailures: [], b: [], g: [], v: [], rej: [], bf: [] }));
   const open = new Map<string, { era: number; stage: 'build' | 'test' | 'fix' | 'eval' | 'resolve' | 'revalidate'; at: number }>(), lastEra = new Map<string, number>();
   const min = (a: number, b: number) => (b - a) / 60e3;
   for (const e of events) {
@@ -252,7 +255,7 @@ export function agentStats(events: LogEvent[], runs: RunCost[], since: number): 
       open.delete(e.feature);
     } else if (e.event === 'interrupted' || e.event === 'refreshed') open.delete(e.feature);
   }
-  for (const r of runs) { const ms = t(r); if (ms < since) continue; const E = eras[eraOf(ms)]!; if (r.role === 'build') E.costBuild += r.cost; else E.costEval += r.cost; }
+  for (const r of runs) { const ms = t(r); if (ms < since) continue; const E = eras[eraOf(ms)]!; if (r.unpriced) E.unpricedRuns++; if (r.role === 'build') E.costBuild += r.cost; else E.costEval += r.cost; }
   return eras.map(({ b, g, v, rej, bf, ...e }) => ({ ...e, buildMin: median(b), gateMin: median(g), evalMin: median(v), rejections: top(rej), builderFailures: top(bf),
     costBuild: Math.round(e.costBuild * 100) / 100, costEval: Math.round(e.costEval * 100) / 100 }));
 }
@@ -269,8 +272,8 @@ export function runCosts(runsDir: string): RunCost[] {
       const m = /-(build|eval|resolve|diagnose)\.json$/.exec(n); // a resolver run is making code: counted with the builds; a gate diagnosis with the evaluations
       if (!m) continue;
       try {
-        const file = join(runsDir, f, n), j = JSON.parse(readFileSync(file, 'utf8')) as { total_cost_usd?: unknown; duration_ms?: unknown };
-        out.push({ ts: new Date(statSync(file).mtimeMs).toISOString(), role: m[1] === 'eval' || m[1] === 'diagnose' ? 'eval' : 'build', cost: Number(j.total_cost_usd) || 0, ms: Number(j.duration_ms) || 0 });
+        const file = join(runsDir, f, n), j = JSON.parse(readFileSync(file, 'utf8')) as { total_cost_usd?: unknown; duration_ms?: unknown; cost_status?: unknown; provider?: unknown };
+        out.push({ ts: new Date(statSync(file).mtimeMs).toISOString(), role: m[1] === 'eval' || m[1] === 'diagnose' ? 'eval' : 'build', cost: Number(j.total_cost_usd) || 0, ms: Number(j.duration_ms) || 0, ...(unpricedRun(j) ? { unpriced: true } : {}) });
       } catch {}
     }
   }
@@ -421,6 +424,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   if (!pidAlive(foremanPid) && live.some((f) => !['merged', 'paused', 'stuck'].includes(f.status)))
     alert(`the foreman is not running and ${live.filter((f) => f.status !== 'merged').length} features are not merged`);
   for (const e of events) if (e.event === 'alert') alert(`foreman: ${e.detail}`, e.ts);
+  for (const e of events) if (e.event === 'planning-alert') alert(`${e.feature}: ${e.detail}`, e.ts);
   const parked = live.filter((f) => f.status === 'ready' && f.parked);
   if (parked.length && Date.now() - Math.min(...parked.map((f) => Date.parse(f.updatedAt) || Date.now())) > 10 * 60e3) {
     const dirty = git(['status', '--porcelain', '--untracked-files=no', '--', '.', `:(exclude)${P.name}`], root).out;
@@ -665,6 +669,7 @@ export function renderReport(root: string, state: ObserverState, features: Featu
   const lastFor = (id: string) => [...state.diagnoses].reverse().find((d) => d.feature === id && d.action !== 'none: the foreman retries it');
   const stuck = features.filter((f) => f.status === 'stuck');
   const proposals = tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-'));
+  const holds = features.filter((f) => f.planningHold && f.status === 'todo');
   const alerts = state.alerts.filter((a) => Date.parse(a.ts) >= since).reverse();
   const causes = Object.entries(recent.reduce<Record<string, number>>((m, d) => ((m[d.cause] = (m[d.cause] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
   const recurring = recurringTests(state.diagnoses, since, 2);
@@ -675,9 +680,11 @@ export function renderReport(root: string, state: ObserverState, features: Featu
     '## Features', '',
     `${count(['merged'])} merged · ${count(['building', 'testing', 'evaluating', 'ready'])} in progress · ${count(['todo'])} to do · ${stuck.length} stuck · ${count(['paused'])} paused`, '',
     '## Needs you', '',
-    ...(alerts.length || stuck.length || proposals.length ? [
+    ...(alerts.length || stuck.length || proposals.length || holds.length ? [
       ...alerts.map((a) => `- ${at(a.ts)}: ${a.text}`),
       ...stuck.map((f) => { const d = lastFor(f.id); return `- ${f.id} is stuck: ${d ? `${CAUSE[d.cause]} (${d.evidence})` : firstLine(f.lastFeedback || '')}`; }),
+      ...holds.map((f) => `- ${f.id} is on a planning hold: ${f.planningHold!.cause === 'spec-error' ? 'its spec' : 'its prompt'} cannot be met as written ` +
+        `(${f.planningHold!.confidence}; ${f.planningHold!.evidence.join(' | ')}). Edit its description or acceptance to release it, or \`${NAME} release ${f.id}\` to launch it unchanged.`),
       ...proposals.map((t) => `- Proposal ${t.id}: ${t.title}`)] : ['Nothing.']), '',
     '## Last 24 hours', '',
     `Failures: ${recent.length}. Sent back by the observer: ${sent.length}. Improvements queued: ${state.improvements.length}.`, '',
@@ -688,10 +695,10 @@ export function renderReport(root: string, state: ObserverState, features: Featu
     ...(state.agentNotes ? ['## Agent notes', '', state.agentNotes, ''] : []),
     ...renderPromptSection(promptSummary(state, (model, role) => readNotes(root, model, role) ?? ''), at),
     ...(state.agents?.length ? ['## Agents (last 7 days, by prompt version)', '',
-      '| Since | Change | Builds (setup failed) | Reached test | Passed gate | Passed evaluator | Bounced | Merged | Build / gate / eval (median min) | Cost build + eval |',
+      '| Since | Change | Builds (setup failed) | Reached test | Passed gate | Passed evaluator | Bounced | Merged | Build / gate / eval (median min) | Reported USD build + eval |',
       '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
       ...state.agents.map((e) => { const pc = (a: number, b: number) => (b ? `${Math.round((100 * a) / b)}%` : '–'), m = (x: number | null) => (x == null ? '–' : x.toFixed(0));
-        return `| ${at(e.since)} | ${e.change} | ${e.launches} (${e.setup}) | ${pc(e.built, e.launches - e.setup)} | ${pc(e.gated, e.built)} | ${pc(e.passed, e.evaluated)} | ${pc(e.bounced, e.passed)} | ${e.merged}${e.resolvedMerged ? ` (${e.resolvedMerged} after a resolver)` : ''} | ${m(e.buildMin)} / ${m(e.gateMin)} / ${m(e.evalMin)} | $${e.costBuild.toFixed(0)} + $${e.costEval.toFixed(0)} |`; }), '',
+        return `| ${at(e.since)} | ${e.change} | ${e.launches} (${e.setup}) | ${pc(e.built, e.launches - e.setup)} | ${pc(e.gated, e.built)} | ${pc(e.passed, e.evaluated)} | ${pc(e.bounced, e.passed)} | ${e.merged}${e.resolvedMerged ? ` (${e.resolvedMerged} after a resolver)` : ''} | ${m(e.buildMin)} / ${m(e.gateMin)} / ${m(e.evalMin)} | $${e.costBuild.toFixed(0)} + $${e.costEval.toFixed(0)}${e.unpricedRuns ? ` (+ ${e.unpricedRuns} Codex runs, USD unavailable)` : ''} |`; }), '',
       ...(state.agents.at(-1)!.rejections.length ? ['Why the evaluator rejected (latest version):', '', ...state.agents.at(-1)!.rejections.map(([r, n]) => `- ${n}× ${r}`), ''] : [])] : []),
     '## Recent decisions', '',
     ...state.diagnoses.filter((d) => d.action && d.action !== 'none: the foreman retries it').slice(-15).reverse()

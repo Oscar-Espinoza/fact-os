@@ -19,7 +19,7 @@ export const DEFAULT_CONFIG: Config = {
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
-  gateFixes: 0, commitFixes: 0, keepFixes: 1, reviewFixes: 1, setupRetryDelaysSec: [30, 120], diagnoser: null, classifier: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
+  gateFixes: 0, commitFixes: 0, keepFixes: 1, reviewFixes: 0, setupRetryDelaysSec: [30, 120], diagnoser: null, classifier: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.

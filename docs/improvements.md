@@ -18,6 +18,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I05 | done | Setup failures spend no attempts: delayed retries, then a sticky launch hold until setup-resume |
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
 | I07 | v2 shadow done | Jev classifier: 32 narrow questions → review requirements, workload, attention, planning; Sol escalation for unsure cases; shadow only |
+| I08 | done | Five stuck features: keep-lines declarations, uncounted environment stops, inherited mock allowance, planning holds, review repair, unpriced Codex cost |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -306,3 +307,40 @@ its own artifact. Raw experiment data (dataset, answers, labels, partner reports
 
 **Not done (each needs Oscar):** applying tiers, a launch-time backstop, observer reassessment, split drafting. Prospective
 validation: freeze the policy, assess new features before launch, and compare with their outcomes.
+
+## I08 — what five stuck features showed (2026-10-04)
+
+An audit of the five features stuck after three tries (by Claude, and independently by a Codex Sol run that reached the
+same per-feature causes) found that most of the 15 counted failures were not the builder's code being wrong:
+
+- **4 of 15 were a protocol mismatch.** Builders declared moved lines as `` dropped: <file>: `line` - reason `` (the form the
+  feedback itself suggested); the parser wanted the bare line, so three tries of one feature burned in about 90 seconds.
+- **A diagnosed environment fault still spent the last try.** The diagnoser found the gate's receipt fixture timing out behind
+  a backlog other suites left in the shared task outbox; the same flake had stopped 7 features 8 times. The fixture fix is an
+  ecommerce feature (`F99-45`).
+- **The builder and the evaluator disagreed on fakes.** A feature built on dependencies whose external providers are mocked
+  (open mockable human tasks on those dependencies) had no mock allowance of its own, so every evaluation blocked on them.
+- **A known spec contradiction was retried.** The observer's review had called it a spec error with high confidence before the
+  third try; the third builder weakened a test to satisfy both halves.
+- **One narrow defect cost a full rebuild.** A single precise blocking finding could have been fixed in the same session.
+
+Changes (designed with the Codex partner, each amended by its review; `/tmp/herd/stuck-design.md` at the time):
+
+1. Keep-lines: a record declares a line when it is the exact line, the line in one leading code span, or the line followed by
+   ` - `, ` — ` or a final ` (…)` (never a bare prefix or `;`). The feedback lists copyable records, quotes records that matched
+   nothing, and hints where a lost line's token now is (a hint never excuses a loss). Declared drops reach the evaluator.
+   `keepFixes` (default 1) resumes the builder's session once per pass before a counted failure.
+2. Environment: an `environment` diagnosis reruns the gate on the same build; the same failure again is an uncounted stop that
+   holds the build (`envBuild`) and retries after `setupRetryDelaysSec`; one more episode after the last delay is an uncounted
+   stuck. The stop is logged with `cause: "environment"` so the observer neither re-classifies nor resets it. Diagnosis no
+   longer needs a builder session.
+3. Planning hold: a prompt review of the feature's latest failed pass that says `spec-error` (high; medium only when corroborated
+   by the outcome) or `prompt-conflict` (high, both sides quoted) holds the launch, but only when every quote is found in the
+   saved prompt or outcome, the requirement is quoted from the prompt, no newer launch exists and the spec is the one that pass
+   was given. Unverified ones are alerts. An edit of the description, acceptance, dependencies or briefs releases it; so does
+   `release <id>`; time never does. It is not a person's pause.
+4. Mock allowance: open mockable human tasks of a feature's dependencies (transitively) are captured at launch, with the
+   dependency they came through, and shown to every role. Non-mockable ones on dependencies neither block nor grant.
+5. `reviewFixes` (default 0, opt-in like `gateFixes`): an actionable rejection (valid verdict, no cheating, concrete failed
+   findings or blocking entries) resumes the builder once per pass, then the gate and a fresh evaluator run again.
+6. Codex runs are recorded as unpriced (`cost_status`), not $0; totals are labelled reported USD.

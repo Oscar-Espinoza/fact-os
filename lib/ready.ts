@@ -3,7 +3,7 @@ import type { Feature, HumanTask, MergeMode } from './types.ts';
 
 export const SLUG = /^[a-z0-9][a-z0-9._-]*$/i; // ids become paths and branch names
 
-export interface Analysis { ready: string[]; waiting: string[]; mock: Set<string>; bad: Set<string> }
+export interface Analysis { ready: string[]; waiting: string[]; mock: Set<string>; bad: Set<string>; held: string[] }
 
 // Transitive deps of each feature (unknown ids included as-is).
 function reachability(features: Feature[]) {
@@ -76,9 +76,10 @@ export function analyze(features: Feature[], tasks: HumanTask[], _mergeMode: Mer
     [...reach.get(f.id)!].some((d) => !byId.has(d))).map((f) => f.id));
   const done = new Set<string | undefined>(['merged']);
   const open = tasks.filter((t) => t.status === 'open');
-  const ready: Feature[] = [], waiting: string[] = [], mock = new Set<string>();
+  const ready: Feature[] = [], waiting: string[] = [], mock = new Set<string>(), held: string[] = [];
   for (const f of features) {
     if (f.status !== 'todo' || bad.has(f.id)) continue;
+    if (f.planningHold) { held.push(f.id); continue; } // a planning hold: the spec or prompt needs a change first
     const m = mockTasksFor(f.id, features, open, reach);
     if (m.blocked) { waiting.push(f.id); continue; }
     if (!(f.deps || []).every((d) => done.has(byId.get(d)?.status))) continue;
@@ -87,5 +88,5 @@ export function analyze(features: Feature[], tasks: HumanTask[], _mergeMode: Mer
   }
   const dep = dependents(features);
   ready.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || dep.get(b.id)! - dep.get(a.id)! || (a.id < b.id ? -1 : 1));
-  return { ready: ready.map((f) => f.id), waiting, mock, bad };
+  return { ready: ready.map((f) => f.id), waiting, mock, bad, held };
 }

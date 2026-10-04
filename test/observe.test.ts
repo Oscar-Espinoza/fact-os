@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFile
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observe, observerPaths, lessonSection, parseCurated, bulletsOf, versionKey } from '../lib/observe.ts';
+import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observe, observerPaths, lessonSection, parseCurated, bulletsOf, versionKey, runCosts, unpricedRun } from '../lib/observe.ts';
 import type { Diagnosis, Feature } from '../lib/types.ts';
 import { parseVerdict, feedbackFromVerdict } from '../lib/foreman.ts';
 
@@ -735,4 +735,19 @@ test('classify: prepare output is setup even when it names infrastructure; a wor
   assert.equal(classify('prepare `sh setup` exited 3:\nmy custom outage', [], [], ['my custom outage']).cause, 'setup');
   assert.deepEqual(classify('worktree: fatal: could not create leading directories: No space left on device', [], []), { cause: 'infra', evidence: 'no space left on device' });
   assert.equal(classify('worktree: dependency a is not a merged commit on main', [], []).cause, 'setup');
+});
+
+test('unpricedRun / runCosts: a Codex run has no USD (new or legacy artifact); a Claude fallback or a genuine $0 Claude run is priced', (t) => {
+  assert.equal(unpricedRun({ provider: 'codex', total_cost_usd: null, cost_status: 'unpriced' }), true);
+  assert.equal(unpricedRun({ provider: 'codex', total_cost_usd: 0 }), true, 'legacy synthetic $0');
+  assert.equal(unpricedRun({ total_cost_usd: 1.25 }), false, 'a paid Claude run (fallback included)');
+  assert.equal(unpricedRun({ total_cost_usd: 0 }), false, 'a genuine $0 Claude run');
+  const dir = mkdtempSync(join(tmpdir(), 'fact-os-cost-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'a'));
+  writeFileSync(join(dir, 'a', '1-build.json'), JSON.stringify({ total_cost_usd: 2.5, duration_ms: 10 }));
+  writeFileSync(join(dir, 'a', '1-eval.json'), JSON.stringify({ provider: 'codex', model: 'gpt-6.1-sol', total_cost_usd: null, cost_status: 'unpriced', duration_ms: 5 }));
+  const runs = runCosts(dir).sort((x, y) => x.role.localeCompare(y.role));
+  assert.deepEqual(runs.map((r) => [r.role, r.cost, !!r.unpriced]), [['build', 2.5, false], ['eval', 0, true]]);
+  const eras = agentStats([], runs, 0);
+  assert.equal(eras.reduce((n, e) => n + e.unpricedRuns, 0), 1);
 });

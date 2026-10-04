@@ -230,3 +230,45 @@ test('prompt review end to end: a failed pass is reviewed once, and only that mo
   assert.ok(!bc.prompt.includes('## Notes for') && !bc.prompt.includes(NOTE), 'sonnet does not get opus\'s notes');
   assert.ok(fp('c', 'builder')[0]!.includes('profile=fable-sonnet') && !fp('c', 'builder')[0]!.includes('notes='));
 });
+
+test('planning hold: an evidenced spec-error review of the latest failed pass holds the launch without spending an attempt; an edit of the spec releases it', { timeout: 90000 }, async (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'fact-os-hold-'));
+  const repo = join(base, 'app');
+  t.after(() => { reap(repo); rmSync(base, { recursive: true, force: true }); });
+  mkdirSync(repo);
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
+  writeFileSync(join(repo, 'README.md'), '# app\n'); git('add', '.'); git('commit', '-qm', 'init');
+  chmodSync(FAKE, 0o755);
+  const env = { ...process.env, FACTOS_CLAUDE: FAKE, FACTOS_POLL_MS: '100', FAKE_DELAY_MS: '50', FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json'), FAKE_REVIEWS: join(base, 'reviews.json') };
+  const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 45000, killSignal: 'SIGKILL' });
+  const state = (f: string) => join(repo, '.fact-os', f);
+  const feature = () => (JSON.parse(readFileSync(state('features.json'), 'utf8')) as FeaturesFile).features[0]!;
+  const builds = () => readFileSync(env.FAKE_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { mode: string }).filter((c) => c.mode === 'build').length;
+  assert.equal(cli('init', '--test', 'true').status, 0);
+  const cfgFile = state('config.json');
+  writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), maxAttempts: 3, observer: { promptReview: { everyMinutes: 0 } } }));
+  writeFileSync(state('features.json'), JSON.stringify({ features: [F('a', { acceptance: ['the registry document lists every table unchanged', 'parallel additions merge without editing that document'] })] }));
+  writeFileSync(env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'parallel additions', ok: false, evidence: 'the document comparison fails after two parallel additions' }], cheating: [] }] }));
+  writeFileSync(env.FAKE_REVIEWS, JSON.stringify({ a: [{ cause: 'spec-error', confidence: 'high', suggestion: '', target: 'lessons',
+    evidence: ['the registry document lists every table unchanged', 'parallel additions merge without editing that document'] }] }));
+
+  let r = cli('run', '--max-features', '1');
+  assert.deepEqual([feature().status, feature().attempts], ['todo', 1], r.stdout + r.stderr);
+  r = cli('observe', '--agent'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  const hold = feature().planningHold!;
+  assert.ok(hold, readFileSync(state('log.jsonl'), 'utf8'));
+  assert.deepEqual([hold.cause, hold.confidence, hold.review], ['spec-error', 'high', 'a/1']);
+  assert.match(readFileSync(state('observer-report.md'), 'utf8'), /a is on a planning hold: its spec cannot be met as written/);
+  assert.match(cli('status').stdout, /planning-hold spec-error/);
+
+  r = cli('run');
+  assert.equal(builds(), 1, `held: no launch\n${r.stdout}${r.stderr}`); assert.deepEqual([feature().status, feature().attempts], ['todo', 1]);
+
+  const d = JSON.parse(readFileSync(state('features.json'), 'utf8')) as FeaturesFile;
+  d.features[0]!.acceptance = ['the registry document is generated from the modules', 'parallel additions merge without editing that document'];
+  writeFileSync(state('features.json'), JSON.stringify(d));
+  r = cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(feature().status, 'merged');
+  assert.match(readFileSync(state('log.jsonl'), 'utf8'), /"event":"planning-hold-released"/);
+});

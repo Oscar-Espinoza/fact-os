@@ -83,6 +83,14 @@ export function feedbackFromVerdict(v: Partial<Verdict>): string {
   return lines.join('\n') || 'Evaluator did not pass the feature.';
 }
 
+// A rejection a resumed builder can act on (config.reviewFixes): a valid verdict from a run that worked (no parse or provider
+// error, no unvalidated output, not a pass contradicted by its own lists), no cheating, and at least one concrete failed
+// finding or blocking entry. Anything else stays an ordinary counted failure.
+export function repairableRejection(runOk: boolean, v: Verdict): boolean {
+  return runOk && !v.pass && !v.error && !v.diagnostic && v.cheating.length === 0 &&
+    (v.findings.some((f) => f.ok !== true) || v.blocking.length > 0);
+}
+
 export function applyFailure(f: Feature, feedback: string, maxAttempts: number): void {
   delete f.sha; // counted failures rebuild; only unspent revalidation retains accepted build reuse
   delete f.envBuild;
@@ -201,6 +209,10 @@ export const describeControl = (c: Pick<Control, 'paused' | 'maxParallel' | 'pro
 // ---- prompts ----
 
 const readIf = (file: string): string | null => { try { return readFileSync(file, 'utf8'); } catch { return null; } };
+// What a planning hold was judged on: the feature's description, acceptance and dependencies, and the project briefs. A
+// different fingerprint means the inputs were edited, which releases the hold for a fresh launch and review.
+export const holdInputs = (root: string, config: Config, f: Pick<Feature, 'title' | 'description' | 'acceptance' | 'deps'>): string =>
+  createHash('sha256').update(JSON.stringify({ title: f.title, description: f.description, acceptance: f.acceptance, deps: f.deps, briefs: briefs(root, config) })).digest('hex').slice(0, 16);
 const briefs = (root: string, config: Config) => (config.briefFiles || []).map((f) => {
   const c = readIf(resolve(root, f));
   return c == null ? '' : `\n## Brief: ${f}\n\n${c}`;
@@ -690,7 +702,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           writeJsonAtomic(codexState, { until: new Date(Date.now() + config.codex.cooldownMin * 60e3).toISOString(), reason: why.split('\n')[0] });
         return fallback(`codex unavailable: ${why.split('\n')[0]}`, cleaned);
       }
-      writeFileSync(join(runDir, file), JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: 0,
+      writeFileSync(join(runDir, file), JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: null, cost_status: 'unpriced', // Codex reports tokens, not USD
         duration_ms: Date.now() - started, session_id: ev.threadId, provider: 'codex', model: cfg.model, effort: cfg.effort, usage: ev.usage }));
       return { ok: true, text, cost: 0, ...(ev.threadId ? { sessionId: ev.threadId } : {}), cleaned };
     };
@@ -898,7 +910,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     let resolved = rc.note; // after a resolution in this pass: what the evaluator must also check
     // Gate-failure recovery, bounded per pass: config.gateFixes resumed fixes, then (config.diagnoser) one read-only diagnosis
     // and one more fix with its brief. 'retry' re-runs the gate; 'fail' counts the failure; 'done' means stopped or already failed.
-    let fixesLeft = config.gateFixes, diagnosed = false, diagNote = '';
+    let fixesLeft = config.gateFixes, diagnosed = false, diagNote = '', reviewsLeft = config.reviewFixes;
     const resumeFix = async (failure: string, d: Diagnosis | null): Promise<'retry' | 'done'> => {
       if (await stopped()) return 'done';
       const before = git(['rev-parse', 'HEAD'], wt).out;
@@ -1020,6 +1032,28 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (await stopped()) return;
       const v = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };
       const lesson = v.lesson;
+      // An actionable rejection resumes the builder's session once per pass (config.reviewFixes), then the gate and a fresh
+      // evaluator run again on the new commit; acceptance is unchanged. The superseded rejection's lesson is not compounded:
+      // the final outcome's lesson policy applies.
+      if (!v.pass && builderSession && reviewsLeft > 0 && repairableRejection(e.ok, v)) {
+        reviewsLeft--;
+        if (await stopped()) return;
+        tag = runTag(readdirSync(runDir), attempt);
+        await set(id, { status: 'building', sha: undefined, pendingLesson: undefined });
+        log(root, id, 'review-fix', 'resuming the builder with the evaluator\'s findings');
+        out(`fix ${id}: the evaluator rejected it; resuming the builder`);
+        const rp = reviewFixPrompt(config, feedbackFromVerdict(v));
+        recordPrompt('builder', rp, builderNotes);
+        const r = await claude('builder', rp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
+        if (await stopped()) return;
+        if (!r.ok) return fail(`builder failed: ${r.error}`);
+        if (r.sessionId) builderSession = r.sessionId;
+        if (!await ensureCommitted()) return;
+        const edits2 = testEdits(wt, sha, 'HEAD');
+        if (edits2.length) log(root, id, 'test-edits', `in the review fix: ${edits2.join('; ')}`);
+        tag = runTag(readdirSync(runDir), attempt); // the fresh evaluation gets its own tag
+        continue;
+      }
       if (!v.pass) {
         if (lesson) await serial(() => compound(id, lesson));
         return fail(feedbackFromVerdict(v));
@@ -1261,6 +1295,17 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         for (const f of parked) await serial(() => retryMerge(f));
         continue;
       }
+      // A planning hold whose inputs were edited since it was placed is released: the edited spec gets a fresh launch.
+      const edited = features.filter((f) => f.status === 'todo' && f.planningHold && f.planningHold.inputs !== holdInputs(root, config, f));
+      if (edited.length) {
+        await mutate(root, 'features', (d) => {
+          for (const f of d.features) if (edited.some((x) => x.id === f.id) && f.planningHold && f.planningHold.inputs !== holdInputs(root, config, f)) {
+            log(root, f.id, 'planning-hold-released', `its inputs changed since the hold (${f.planningHold.cause}, review ${f.planningHold.review})`);
+            delete f.planningHold;
+          }
+        });
+        continue;
+      }
       const a = analyze(features, tasks, config.merge);
       const manualWaiting = config.merge === 'manual' ? features.filter((f) => f.status === 'todo' && !a.bad.has(f.id) &&
         (f.deps || []).some((d) => features.find((x) => x.id === d)?.status === 'ready')).map((f) => f.id) : [];
@@ -1317,7 +1362,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           let mockTasks: MockTask[] = [];
           const f = await mutate(root, 'features', (d) => {
             const current = d.features.find((x) => x.id === id);
-            if (!current || current.status !== 'todo') return null;
+            if (!current || current.status !== 'todo' || current.planningHold) return null;
             if (readSetupState(root).hold || [current.setupRetryAt, current.envRetryAt].some((t) => t && Date.parse(t) > Date.now())) return null; // under the state lock
             const m = mockTasksFor(id, d.features, loadState(root).tasks); // direct and inherited through dependencies, by value
             if (m.blocked) return null;

@@ -17,6 +17,7 @@ const USAGE = `usage: ${NAME} <command>
   status                          features and open human tasks
   done <human-task-id>            mark a human task done
   pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
+  release <id>...                 launch a feature the observer put on a planning hold, unchanged (an edit releases it too)
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
   setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
   classify <id...> | --all        shadow-classify features with TypeSafe Jev (tier, needs split); records only, changes nothing
@@ -75,9 +76,11 @@ function status(): void {
     f.costUsd ? `$${f.costUsd.toFixed(2)}` : '', (f.deps || []).join(','), [f.onMock && 'onMock', a.ready.includes(f.id) && 'next',
       a.waiting.includes(f.id) && 'waiting-on-human', a.bad.has(f.id) && 'INVALID',
       f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now() && `setup-retry ${f.setupRetryAt}`,
-      f.envRetryAt && Date.parse(f.envRetryAt) > Date.now() && `env-retry ${f.envRetryAt}`].filter(Boolean).join(' ')])];
+      f.envRetryAt && Date.parse(f.envRetryAt) > Date.now() && `env-retry ${f.envRetryAt}`,
+      f.planningHold && `planning-hold ${f.planningHold.cause}`].filter(Boolean).join(' ')])];
   const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
   for (const r of rows) console.log(r.map((c, i) => c.padEnd(w[i])).join('  ').trimEnd());
+  console.log('\n(cost: reported USD; Codex runs record tokens only, so their USD is not included)');
   const open = tasks.filter((t) => t.status === 'open');
   console.log(open.length ? '\nOpen human tasks:' : '\nNo open human tasks.');
   for (const t of open) console.log(`  ${t.id}: ${t.title} → unblocks ${(t.unblocks || []).join(', ')}${t.mockable ? ' (mockable)' : ''}`);
@@ -231,7 +234,7 @@ try {
     case 'init': init(o.test); break;
     case 'status': status(); break;
     case 'done': await done(positionals[0]); break;
-    case 'pause': case 'resume': case 'retry': {
+    case 'pause': case 'resume': case 'retry': case 'release': {
       if (!positionals.length) throw new Error(`usage: ${NAME} ${argv[0]} <feature-id>...`);
       const r = await act(needRoot(), argv[0] as Action, positionals);
       for (const [id, err] of Object.entries(r)) console.log(err ? `✗ ${id}: ${err}` : `${PAST[argv[0] as Action]} ${id}`);

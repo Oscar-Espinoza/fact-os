@@ -9,7 +9,7 @@ import { git, parseClaudeOutput, parseVerdict, feedbackFromVerdict } from './for
 import { conflictFiles } from './merge.ts';
 import { analyze, taskReach } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
-import { observerPaths, observerConfig, recurringTests, hotFiles, type ObserverState, type Era } from './observe.ts';
+import { observerPaths, observerConfig, recurringTests, hotFiles, unpricedRun, type ObserverState, type Era } from './observe.ts';
 import { promptSummary, type PromptSummary } from './promptreview.ts';
 import { readNotes } from './notes.ts';
 import { profileNames, profileLabel, roleTable, validProfile, type RoleRow } from './profiles.ts';
@@ -43,7 +43,7 @@ export interface ProfileInfo { name: string; label: string; roles: RoleRow[] }
 export interface ObserverSummary {
   updatedAt: string; running: boolean; alerts24h: { ts: string; text: string }[]; stuck: { id: string; cause: string; evidence: string }[];
   decisions: Diagnosis[]; causes24h: { cause: string; n: number }[]; recurring: { test: string; features: string[] }[];
-  improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; agents: Era[]; prompts: PromptSummary; proposals: { id: string; title: string }[];
+  improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; agents: Era[]; prompts: PromptSummary; proposals: { id: string; title: string }[]; holds: { id: string; cause: string; confidence: string; evidence: string[] }[];
   conflicts24h: Conflict[]; titles: Record<string, string>; // titles: feature id → title, for every id the view shows
 }
 // One merge conflict followed to its outcome (see conflictTimeline). `resolving`: the resolver is working on it right now.
@@ -54,6 +54,7 @@ export interface Conflict {
 export interface Stats { mergedAt: string[]; costToday: number; costYesterday: number }
 export interface Run {
   n: number; tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; ms: number | null; cost: number | null; turns: number | null; model: string | null;
+  provider?: string; unpriced?: boolean; // a Codex run: tokens recorded, USD unavailable (cost is null)
   pass?: boolean; findings?: Finding[]; error?: string; text: string; summary: string;
 }
 export type OpenTask = HumanTask & { project: string; projectName: string; reach: number };
@@ -254,6 +255,7 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[], events: 
       ...(() => { const b = (Array.isArray(o.bounces) ? o.bounces : []).filter((x) => Date.parse(x.ts) >= since); return { bounces24h: b.length, hotFiles: hotFiles(b).slice(0, 5).map(([file, n]) => ({ file, n })) }; })(),
       ...(o.improveAt ? { improveAt: o.improveAt } : {}), agents: Array.isArray(o.agents) ? o.agents : [], prompts: promptSummary(o, (model, role) => readNotes(dir, model, role) ?? ''), ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
       proposals: tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-')).map((t) => ({ id: t.id, title: t.title })),
+      holds: features.filter((f) => f.status === 'todo' && f.planningHold).map((f) => ({ id: f.id, cause: f.planningHold!.cause, confidence: f.planningHold!.confidence, evidence: f.planningHold!.evidence })),
       conflicts24h: conflictTimeline(events.filter((e) => Date.parse(e.ts) >= since - 3600e3), Date.now(), titles), titles };
   } catch { return null; }
 }
@@ -289,12 +291,14 @@ function featureRuns(dir: string, id: string): Run[] {
     const m = /^(\d+(?:\.\d+)?)-(build|eval|resolve|diagnose)\.json$/.exec(name);
     if (!m) continue;
     try {
-      const file = join(rd, name), raw = readFileSync(file, 'utf8'), j = tryJson(raw) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; stdout?: unknown } | undefined;
+      const file = join(rd, name), raw = readFileSync(file, 'utf8'), j = tryJson(raw) as { duration_ms?: unknown; total_cost_usd?: unknown; num_turns?: unknown; modelUsage?: unknown; stdout?: unknown; provider?: unknown; model?: unknown; cost_status?: unknown } | undefined;
       if (!j || typeof j !== 'object' || Array.isArray(j)) continue;
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
       const role = m[2] as Run['role'], provider = parseClaudeOutput(raw), text = provider.text || (typeof j.stdout === 'string' ? j.stdout : '');
-      const run: Run = { n: Number(m[1]!.split('.')[0]), tag: m[1]!, role, at: new Date(statSync(file).mtimeMs).toISOString(), ms: num(j.duration_ms), cost: num(j.total_cost_usd),
-        turns: num(j.num_turns), model: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage)[0] ?? null : null, text, summary: text.slice(0, 400) };
+      const unpriced = unpricedRun(j);
+      const run: Run = { n: Number(m[1]!.split('.')[0]), tag: m[1]!, role, at: new Date(statSync(file).mtimeMs).toISOString(), ms: num(j.duration_ms), cost: unpriced ? null : num(j.total_cost_usd),
+        turns: num(j.num_turns), model: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage)[0] ?? null : typeof j.model === 'string' ? j.model : null, text, summary: text.slice(0, 400),
+        ...(typeof j.provider === 'string' ? { provider: j.provider } : {}), ...(unpriced ? { unpriced: true } : {}) };
       if (role === 'eval') {
         const v = parseVerdict(provider.text);
         run.pass = provider.ok && v.pass;

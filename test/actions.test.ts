@@ -54,3 +54,10 @@ test('act writes under the lock, logs applied actions and reports unknown ids', 
   assert.equal(JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')).features[0].status, 'paused');
   assert.match(readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8'), /"feature":"a","event":"paused"/);
 });
+
+test('release: only a feature on a planning hold; it launches unchanged and keeps its attempts', () => {
+  const held = { id: 'a', status: 'todo', attempts: 1, planningHold: { cause: 'spec-error', confidence: 'high', evidence: ['x'], review: 'a/1', passEnd: '', inputs: 'h', ts: '' } } as unknown as Feature;
+  assert.equal(apply(held, 'release', 3), null);
+  assert.deepEqual([held.planningHold, held.status, held.attempts], [undefined, 'todo', 1]);
+  assert.match(apply({ id: 'b', status: 'todo', attempts: 0 } as unknown as Feature, 'release', 3)!, /no planning hold/);
+});
