@@ -10,6 +10,8 @@ export type Role = 'builder' | 'evaluator' | 'resolver';
 
 // provider: 'claude' (default) or 'codex' (`codex exec`; only the evaluator and the diagnoser, which change no code).
 export type Provider = 'claude' | 'codex';
+export interface ClassifierConfig { provider: 'typesafe'; model: string; mode: 'shadow'; minConfidence: number; minRiskConfidence: number;
+  timeoutMs: number; maxRetries: number; maxRequestsPerDay: number }
 export interface RoleConfig { model?: string; effort?: string; permissionMode?: string; provider?: Provider }
 
 // Model profiles (profiles.ts): a named set of model/effort per role, chosen at runtime in control.json. "opus" is the
@@ -53,6 +55,7 @@ export interface Config {
   gateFixes: number;                  // safe integer >= 0: resumed builder fixes after a test-gate failure, per pass (0 = none)
   commitFixes: number;                // safe integer >= 0: resumes per pass to commit work the builder left uncommitted (0 = none)
   setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
+  classifier: ClassifierConfig | null; // I07: TypeSafe Jev tier/split judgments, shadow mode only (records, never changes a feature)
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
   codex: { fallback: RoleConfig; cooldownMin: number }; // a Codex run that cannot answer falls back to this Claude role config
   observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`

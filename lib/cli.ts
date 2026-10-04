@@ -19,6 +19,8 @@ const USAGE = `usage: ${NAME} <command>
   pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
   setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
+  classify <id...> | --all        shadow-classify features with TypeSafe Jev (tier, needs split); records only, changes nothing
+  classify --report               shadow tiers beside what the features actually took (tries, stuck, cost)
   lanes <n|default>               how many features may be in flight (0-${MAX_LANES}); default = config.maxParallel
   profile [<name|default>]        model profile for new launches (opus = each role's config; fable-sonnet; config.profiles);
                                   without a name: the active profile and its role → model/effort table
@@ -59,7 +61,7 @@ function init(test: string | undefined): void {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json', 'setup-hold.json'].map((f) => `${paths(root).name}/${f}`)
+  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json', 'setup-hold.json', 'classifier.jsonl'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');
@@ -219,9 +221,9 @@ async function hook(): Promise<void> {
 const argv = process.argv.slice(2);
 const { values, positionals } = parseArgs({ args: argv.slice(1), allowPositionals: true, options: {
   test: { type: 'string' }, watch: { type: 'boolean' }, once: { type: 'boolean' }, 'max-features': { type: 'string' },
-  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' } }, strict: !['hook', 'lanes'].includes(argv[0]!) });
+  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' }, all: { type: 'boolean' }, report: { type: 'boolean' } }, strict: !['hook', 'lanes'].includes(argv[0]!) });
 // strict parsing (every command but hook, which ignores o) guarantees these types.
-const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean };
+const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean; all?: boolean; report?: boolean };
 try {
   switch (argv[0]) {
     case 'init': init(o.test); break;
@@ -235,6 +237,15 @@ try {
       break;
     }
     case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
+    case 'classify': {
+      const root = needRoot(), { config, features } = load(root), { classify, report } = await import('./classifier.ts');
+      if (o.report) { console.log(report(root, features)); break; }
+      if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "model": "jev-latest", "mode": "shadow"}} to config.json');
+      const targets = o.all ? features : positionals.map((id) => features.find((f) => f.id === id) ?? (() => { throw new Error(`unknown feature: ${id}`); })());
+      if (!targets.length) throw new Error(`usage: ${NAME} classify <feature-id>... | --all | --report`);
+      await classify(root, config.classifier, targets, features, (s) => console.log(s));
+      break;
+    }
     case 'setup-resume': {
       const was = await releaseSetupHold(needRoot(), 'a person (cli)');
       console.log(was ? `setup hold released (open since ${was.since}: ${was.reason})` : 'no setup hold was open');

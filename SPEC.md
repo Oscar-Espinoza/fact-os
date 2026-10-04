@@ -64,7 +64,9 @@ and one dashboard across projects.
   "profiles": {},               // extra model profiles (see Model profiles); optional; a profile may add "tiers" (below)
   "gateFixes": 0,               // resumed builder fixes after a test-gate failure, per pass (see Pass, Test)
   "diagnoser": null,            // null, or a role config (provider "claude" or "codex") diagnosing a repeated gate failure
-  "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30} // when a Codex run cannot answer
+  "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30}, // when a Codex run cannot answer
+  "classifier": null            // I07 shadow classifier: {provider: "typesafe", model: "jev-latest", mode: "shadow", minConfidence,
+                                // minRiskConfidence, timeoutMs, maxRetries, maxRequestsPerDay}; records judgments, never changes features
 }
 ```
 Configuration is validated by `loadConfig()` before it becomes a `Config`, including in

@@ -2,8 +2,12 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, appendFileSync, lstatSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import type { Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
+import type { ClassifierConfig, Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
 import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } from './profiles.ts';
+
+// Provisional operating bounds for the shadow classifier (I07); thresholds are recalibrated after the benchmark.
+export const CLASSIFIER_DEFAULTS: ClassifierConfig = { provider: 'typesafe', model: 'jev-latest', mode: 'shadow', minConfidence: 0.8,
+  minRiskConfidence: 0.9, timeoutMs: 5000, maxRetries: 1, maxRequestsPerDay: 250 };
 
 export const DEFAULT_CONFIG: Config = {
   base: 'main', worktreesDir: '../<repo>-worktrees', branchPrefix: 'ship/', maxParallel: 3, maxAttempts: 2,
@@ -12,7 +16,7 @@ export const DEFAULT_CONFIG: Config = {
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
-  gateFixes: 0, commitFixes: 0, setupRetryDelaysSec: [30, 120], diagnoser: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
+  gateFixes: 0, commitFixes: 0, setupRetryDelaysSec: [30, 120], diagnoser: null, classifier: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
@@ -218,6 +222,18 @@ function configProblems(raw: unknown): string[] {
   for (const key of ['builder', 'evaluator', 'resolver'])
     if (Object.hasOwn(c, key) && !(key === 'resolver' && c[key] === null)) role(c[key], `config.${key}`, key === 'evaluator');
   if (Object.hasOwn(c, 'diagnoser') && c.diagnoser !== null) role(c.diagnoser, 'config.diagnoser', true);
+  if (Object.hasOwn(c, 'classifier') && c.classifier !== null) {
+    const k = obj(c.classifier, 'config.classifier');
+    if (k) {
+      field(k, 'config.classifier', 'provider', (x) => x === 'typesafe', '"typesafe"');
+      field(k, 'config.classifier', 'model', str, 'a non-empty string');
+      field(k, 'config.classifier', 'mode', (x) => x === 'shadow', '"shadow" (apply mode comes after the benchmark)');
+      for (const key of ['minConfidence', 'minRiskConfidence']) field(k, 'config.classifier', key, (x) => nonnegative(x) && (x as number) <= 1, 'a number from 0 to 1');
+      field(k, 'config.classifier', 'timeoutMs', (x) => uint(x) && (x as number) >= 100 && (x as number) <= 120000, 'milliseconds from 100 to 120000');
+      field(k, 'config.classifier', 'maxRetries', (x) => uint(x) && (x as number) <= 5, 'a safe integer from 0 to 5');
+      field(k, 'config.classifier', 'maxRequestsPerDay', uint, 'a safe integer >= 0');
+    }
+  }
   if (Object.hasOwn(c, 'codex')) {
     const cx = obj(c.codex, 'config.codex');
     if (cx) {
@@ -265,6 +281,7 @@ export function loadConfig(root: string): Config {
   const c: Config = { ...DEFAULT_CONFIG, ...(raw as Partial<Config>) };
   c.worktreesDir = c.worktreesDir.replace('<repo>', basename(root));
   c.codex = { ...DEFAULT_CONFIG.codex, ...c.codex }; // a partial codex block keeps the default fallback or cooldown
+  if (c.classifier) c.classifier = { ...CLASSIFIER_DEFAULTS, ...(c.classifier as Partial<ClassifierConfig>) }; // provisional bounds until the benchmark
   return c;
 }
 

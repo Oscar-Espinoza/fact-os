@@ -17,6 +17,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I04 | done | Resume the builder once to commit work it left uncommitted (`commitFixes`) |
 | I05 | done | Setup failures spend no attempts: delayed retries, then a sticky launch hold until setup-resume |
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
+| I07 | phase 1 done | Shadow classifier: TypeSafe Jev judges tier and needs-split; recorded, never applied |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -159,3 +160,17 @@ spends no attempt, retries after `setupRetryDelaysSec`, then stops as an uncount
 at least two features open a sticky launch hold, persisted across restarts and separate from a person's pause, released
 explicitly once the environment is fixed. The foreman is the only owner of these retries; the observer's retry policy is
 unchanged (it never retries setup). Known limit: a deferred prepare that fails after a build loses that build.
+
+## I07 — tiering and split judgments with TypeSafe Jev (phase 1: shadow)
+
+Oscar's idea: a fast typed-judgment model (Jev) should assign tiers and flag over-scoped features instead of a big model
+at intake. Agreed with the Codex partner (/tmp/herd/sol-partner-split-jev.md): shadow first. `fact-os classify <id…>|--all`
+sends one request per feature (a six-way tier choice including `insufficient_info`, and a needs-split probability) and
+records the answers, their input hash and what apply mode would do in `.fact-os/classifier.jsonl`. Abstention: insufficient
+information, confidence below provisional thresholds (0.8, or 0.9 for protected features), a risk conflict (a feature with
+`risk: high` or risk keywords only takes risky or investigate), and a person's tier is never touched. Nothing changes a
+feature in phase 1. `fact-os classify --report` compares the shadow tiers with what features actually took.
+
+Next, separately authorized: the benchmark (blinded labels on the ecommerce history, a fixed Sonnet classifier on the same
+state, calibration and critical-downgrade rates), then apply mode with calibrated thresholds, the launch backstop for
+untiered features, observer reassessment after repeated blockers, and split drafts that Oscar approves (never auto-queued).
