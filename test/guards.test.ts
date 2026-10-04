@@ -1908,3 +1908,15 @@ test('base defect: a person\'s release (or an edit) of a base-defect hold makes 
   assert.equal(s.cli('release', 'a').status, 0);
   assert.equal(s.feature('a').baseRecheck, true);
 });
+
+test('base defect: a signature containing | is capped like any other (keys are exact signatures)', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  writeFileSync(join(s.repo, 'fixture.ts'), 'x\n'); s.git('add', '.'); s.git('commit', '-qm', 'fixture');
+  const sig = "Expected 'queued' | 'running'", base = s.git('rev-parse', 'main'), config = loadConfig(s.repo), file = join(s.repo, '.fact-os', 'features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
+  Object.assign(d.features[0]!, { baseRechecks: { [sig]: 2 }, planningHold: { cause: 'base-defect', confidence: 'high', evidence: [sig], review: 'a/1', passEnd: '', ts: '',
+    inputs: holdInputs(s.repo, config, d.features[0]!), base, paths: ['fixture.ts'], signatures: [sig] } });
+  writeFileSync(file, JSON.stringify(d));
+  writeFileSync(join(s.repo, 'fixture.ts'), 'y\n'); s.git('add', '.'); s.git('commit', '-qm', 'touch');
+  s.cli('run');
+  assert.equal(s.feature('a').planningHold?.cause, 'base-defect');
+});
