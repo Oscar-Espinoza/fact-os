@@ -181,7 +181,7 @@ export interface Scorer { version: string; target: string; battery: string; batt
   composites: { families: Record<string, string[]>; excludedWithoutFacts: string[]; perItem: string };
   reference: { scores: number[]; tailFraction: number; threshold: number } }
 // The extraction contracts this code implements; an artifact naming another one is not scored.
-export const SUPPORTED_SCORERS = ['i07-v2.1-rework-devfit'];
+export const SUPPORTED_SCORERS = ['i07-v2.1-rework-devfit', 'i07-v2.2-rework-devfit'];
 // The exact ordered feature vector and target each supported contract was fitted on.
 const CONTRACT_FEATURES = ['acc_chars', 'coupling_max', 'coupling_mean', 'deliverables_expected', 'desc_chars', 'kw_hits', 'mitigation_max', 'mitigation_mean', 'n_acceptance',
   'n_deps', 'n_packages', 'n_touches', 'stakes_max', 'stakes_mean', 'surface_ui', 'touches_missing', 'uncertainty_max', 'uncertainty_mean', 'verification_max', 'verification_mean'];

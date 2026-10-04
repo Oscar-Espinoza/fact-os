@@ -1,6 +1,6 @@
 {
- "version": "i07v2.1-2026-10-04",
- "note": "I07 v2.1 question battery (frozen 2026-10-04; designed with the Codex Sol partner, evaluated in docs/improvements.md I07). Do not edit in place: a wording change is a new version.",
+ "version": "i07v2.2-2026-10-04",
+ "note": "I07 v2.2 question battery (frozen 2026-10-04): v2.1 with \"add or alter\" in the stakes questions. Do not edit in place: a wording change is a new version.",
  "questions": {
   "c01_new_lifecycle": {
    "criteria": {
@@ -382,7 +382,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter how an authoritative monetary amount is determined?"
+    "question": "Does the requested change add or alter how an authoritative monetary amount is determined?"
    },
    "type": "noul"
   },
@@ -414,7 +414,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change add or alter an authoritative production path that initiates a financial commitment?"
+    "question": "Does the requested change add or add or alter an authoritative production path that initiates a financial commitment?"
    },
    "type": "noul"
   },
@@ -446,7 +446,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter which financial settlement state permits a business action?"
+    "question": "Does the requested change add or alter which financial settlement state permits a business action?"
    },
    "type": "noul"
   },
@@ -478,7 +478,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter inventory availability or its reservation lifecycle?"
+    "question": "Does the requested change add or alter inventory availability or its reservation lifecycle?"
    },
    "type": "noul"
   },
@@ -510,7 +510,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter an enforced decision about who may perform an action?"
+    "question": "Does the requested change add or alter an enforced decision about who may perform an action?"
    },
    "type": "noul"
   },
@@ -542,7 +542,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter how data access is bound to its owning store or customer?"
+    "question": "Does the requested change add or alter how data access is bound to its owning store or customer?"
    },
    "type": "noul"
   },
@@ -574,7 +574,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter how sensitive information is exposed or retained?"
+    "question": "Does the requested change add or alter how sensitive information is exposed or retained?"
    },
    "type": "noul"
   },
@@ -670,7 +670,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter coordination between concurrent writers of shared state?"
+    "question": "Does the requested change add or alter coordination between concurrent writers of shared state?"
    },
    "type": "noul"
   },
@@ -702,7 +702,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change add or alter a path whose repeated delivery could repeat a durable effect?"
+    "question": "Does the requested change add or add or alter a path whose repeated delivery could repeat a durable effect?"
    },
    "type": "noul"
   },
@@ -734,7 +734,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter acceptance of an external assertion as a trusted business fact?"
+    "question": "Does the requested change add or alter acceptance of an external assertion as a trusted business fact?"
    },
    "type": "noul"
   },
@@ -766,7 +766,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter the protocol implemented at an external-provider boundary?"
+    "question": "Does the requested change add or alter the protocol implemented at an external-provider boundary?"
    },
    "type": "noul"
   },
@@ -798,7 +798,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter the machinery used to decide whether a build has passed verification?"
+    "question": "Does the requested change add or alter the machinery used to decide whether a build has passed verification?"
    },
    "type": "noul"
   },
@@ -830,7 +830,7 @@
      "dependencies",
      "codebase.glossary"
     ],
-    "question": "Does the requested change alter the boundary between untrusted content and executable actions?"
+    "question": "Does the requested change add or alter the boundary between untrusted content and executable actions?"
    },
    "type": "noul"
   },

@@ -70,6 +70,12 @@ not send. Typed output guarantees the interface, not the truth.
 - **History cannot answer counterfactuals.** 184 of 205 labelled features were built by Opus: the data measures difficulty
   under that policy, not whether Sonnet would have failed.
 
+12. **Tell Jev the house rules.** Requirements that are true for every feature in a codebase (every staff action is
+    permission-checked; every route is store-scoped) never appear in feature text, so a literal reader misses them. One glossary
+    entry stating them moved the decisive answers from confidently wrong (.16) into the unsure band (.65), where an agent can check.
+13. **Keep the question and its criteria saying the same thing.** "Does it alter ..." with criteria that count additions made Jev
+    under-score new routes; "add or alter" fixed it.
+
 ## Escalating to an agent
 
 - Send only the unsure questions, never Jev's probabilities or the predicted tier (that anchors the agent).

@@ -275,6 +275,19 @@ caller's agent group keeps its claim even after its leader exits; cancellation i
 eligibility is recomputed at reservation; a result that cannot be published in time is staged and published by the next run;
 rejected answers keep the agent's reason and references; the summary keeps completed proposals after cache hits.
 
+**v2.2 (same day, from Oscar's request to dig into the disagreements).** Nine open features where Jev's candidate disagreed with
+a person's tier or would upgrade were inspected answer by answer. Two causes: (1) context: house rules live in the codebase, not
+in feature text (F07-12's real failure was a missing permission check; the text never says "permission", so "who may act" scored
+.16); (2) literal reading: the stakes questions asked whether a feature *alters* a decision while their criteria already counted
+*adding* one, so new store-scoped routes scored .6-.7 on store binding. Fixes: battery v2.2 asks "add or alter" in the stakes
+questions, and the ecommerce glossary gained a `houseRules` entry (permissions on every staff action, `orders.refund` for financial
+actions, store scoping for every route). On the nine cases: F07-12 "who may act" .16 -> .65 (now inside the escalation band), store
+binding .51 -> .84; F12-09 "who may act" .36 -> .82; F17-09-C store binding .61 -> .88. Outcome prediction did not change (dev
+AUPRC .39 -> .40, holdout .34 -> .33, within noise); the blind set's wrong answers rose 7 -> 11, mostly where the house rule and the
+author's label disagree (a refund screen over an existing API). The attention scorer was refit on v2.2 answers with the same recipe
+(development evidence only: the v2.1 holdout had been used). All 226 re-classified: normal 129, multi 10, hard 26, risky 61; 90
+features have an unsure review answer (was 68), which is what escalation acts on.
+
 **Status and stopping point.** Five fresh reviews took the stage from 9 to 16 to 13 to 12 findings, each round narrower
 (crash recovery, cancellation timing, credential edge cases). The classifier itself (Jev battery, scorer, projection, report)
 converged by the third review. Escalation stays opt-in and disabled by default (`escalation.enabled: false`); further
