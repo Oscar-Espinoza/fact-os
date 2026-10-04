@@ -1009,7 +1009,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // An environment diagnosis labels only the commit and failure it diagnosed (the observer reads infrastructure from it);
     // a code or test diagnosis stays useful context for the next builder whatever failed after it.
     let diagSha = '', diagId = '', diagEnv = false;
-    const diagFor = (sha: string, id: string) => (!diagEnv || (sha === diagSha && id === diagId) ? diagNote : '');
+    const diagFor = (sha: string, id: string) => (!diagEnv || (sha === diagSha && id !== '' && id === diagId) ? diagNote : '');
     const afterGateFailure = async (failure: string, sha: string): Promise<'retry' | 'fail' | 'done' | 'env'> => {
       if (builderSession && fixesLeft > 0) { fixesLeft--; return resumeFix(failure, null); }
       if (!config.diagnoser || diagnosed) return 'fail';

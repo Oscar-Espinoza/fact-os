@@ -38,8 +38,13 @@ const FAIL_LINE = /\bFAIL\b|×|✗|\bnot ok\b|\(fail\)/;
 // quote tests, conflicts or infrastructure without establishing any of them.
 const INVALID_VERDICT = /^Evaluator: (evaluator output is not a JSON object|verdict\.)/;
 
+// A failure detail without the foreman's diagnosis notes: a note is context for the next builder (it may describe an earlier
+// failure, e.g. an ECONNREFUSED that a fix already removed), never evidence of what the current failure is.
+export const currentEvidence = (detail: string): string => detail.replace(/\n\nDiagnosis \([^)\n]*\): [\s\S]*?\nSuggested fix: [^\n]*/g, '');
+
 // Test files named on failure lines of a test command's output (vitest/jest "FAIL", tables, ×/✗, TAP "not ok").
 export function failingTests(detail: string): string[] {
+  detail = currentEvidence(detail);
   if (INVALID_VERDICT.test(detail)) return [];
   const out = new Set<string>();
   for (const line of detail.split('\n')) if (FAIL_LINE.test(line)) for (const m of line.match(TEST_PATH) || []) out.add(m.replace(/^\.\//, ''));
@@ -60,6 +65,7 @@ export function resolveTests(names: string[], files: string[]): string[] {
 // Why a feature got stuck. `tests` are the resolved failing tests, `changed` the files the feature changes.
 // A test counts as the feature's own when the feature changes it or a file in its directory.
 export function classify(detail: string, tests: string[], changed: string[], extra: string[] = []): { cause: Cause; evidence: string } {
+  detail = currentEvidence(detail);
   if (INVALID_VERDICT.test(detail)) return { cause: 'own', evidence: 'the evaluator did not pass it' };
   // Prepare output may name infrastructure (ECONNREFUSED, a database starting up), but the foreman owns prepare retries
   // (I05): classify it as setup before the infrastructure scan, so the observer never resets such a feature's attempts.

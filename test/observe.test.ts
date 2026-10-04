@@ -764,3 +764,11 @@ test('recheck R13: a resumed builder that fails during a review repair counts as
   const [e] = agentStats([ev(0, 'launch'), ev(10, 'testing', 's1'), ev(20, 'evaluating'), ev(25, 'review-fix', 'resuming'), ev(30, 'failed', 'builder failed: exit 1')], [], 0);
   assert.equal(e!.evaluated, 1); assert.deepEqual(e!.builderFailures.map(([r]) => r), ['builder failed']);
 });
+
+test('recheck2: a diagnosis note in a failure detail is builder context, never infrastructure evidence of the current failure', () => {
+  const detail = 'test command `gate` exited 1:\nFAIL src/orders/tenant.test.ts > isolation\nAssertionError: expected 403 to be 200' +
+    '\n\nDiagnosis (gpt-6.1-sol): code: the earlier ECONNREFUSED came from a wrong database port\nSuggested fix: use 5433';
+  const c = classify(detail, ['src/orders/tenant.test.ts'], ['src/orders/tenant.ts']);
+  assert.equal(c.cause, 'own', JSON.stringify(c));
+  assert.equal(classify('test command `gate` exited 1:\nError: connect ECONNREFUSED 127.0.0.1:5433', [], []).cause, 'infra', 'current evidence still counts');
+});

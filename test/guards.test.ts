@@ -1819,3 +1819,12 @@ test('recheck R8: an environment note is not attached to a different failure on 
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
   assert.doesNotMatch(s.feature('a').lastFeedback!, /Diagnosis/);
 });
+
+test('recheck2: two failures with empty identities are not the same failure; no environment note is attached', (t) => {
+  const gate = 'if [ ! -f ../g1-$FACTOS_FEATURE ]; then touch ../g1-$FACTOS_FEATURE; echo "FAIL src/x.test.ts > relay"; echo "receipt timed out"; else echo "FAIL src/x.test.ts > tenant"; echo "tenant isolation violated"; fi; exit 1';
+  const s = setup(t, { features: [F('a')], config: { test: gate, maxAttempts: 1, diagnoser: DIAG } });
+  scriptDiagnoses(s, { a: [{ fault: 'environment', evidence: 'ECONNREFUSED on the relay', fix: 'restart' }] });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.doesNotMatch(s.feature('a').lastFeedback!, /Diagnosis/);
+});
