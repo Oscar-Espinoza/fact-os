@@ -154,7 +154,10 @@ if (mode === 'resolve') {
   if (has('move-branch')) commit('evil.txt', 'committed during evaluation\n');
   const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { mode: string; id: string }) : [];
   const n = past.filter((e) => e.mode === 'eval' && e.id === id).length;
-  const scripted = (JSON.parse(readFileSync(process.env.FAKE_VERDICTS as string, 'utf8')) as Record<string, Partial<Verdict>[]>)[id]?.[n];
+  // "$BASE_SHA" / "$FEATURE_SHA" in a scripted verdict: the commits the foreman pinned for this evaluation (for baseDefects)
+  const pin = /the base commit of this evaluation is ([0-9a-f]+) and the feature commit is ([0-9a-f]+)/.exec(prompt);
+  const rawScript = (JSON.parse(readFileSync(process.env.FAKE_VERDICTS as string, 'utf8')) as Record<string, Partial<Verdict>[]>)[id]?.[n];
+  const scripted = rawScript && JSON.parse(JSON.stringify(rawScript).replaceAll('$BASE_SHA', pin?.[1] ?? 'none').replaceAll('$FEATURE_SHA', pin?.[2] ?? 'none')) as Partial<Verdict>;
   result = 'Verdict:\n```json\n' + JSON.stringify(scripted ?? { pass: true,
     findings: [{ check: 'works', ok: true, evidence: 'fake' }], cheating: [], lesson: null }) + '\n```';
 }

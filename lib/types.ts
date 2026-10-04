@@ -144,7 +144,8 @@ export interface Feature {
   envFailures?: number;               // gate failures diagnosed as environmental, after a same-build rerun; never attempts; cleared by a passing gate or a retry
   envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
   planningHold?: PlanningHold;
-  baseRechecks?: Record<string, number>; // automatic base-defect rechecks spent, by joined signatures (at most 2 each)
+  baseRechecks?: Record<string, number>; // automatic base-defect rechecks spent, per failure signature (at most 2 each)
+  baseRecheck?: boolean;              // released for a base-defect recheck: the next pass merges current base before validating
   rejected?: { sha: string; tree: string; inputs: string }; // the content an evaluator last rejected, and what it was validated against (validationInputs)
   envBuild?: string;
   envBuildInputs?: string;            // what envBuild was built for (spec, briefs, role instructions, mocks): reused only while equal                  // the commit held after an environmental gate failure: the next pass revalidates it instead of rebuilding
@@ -197,7 +198,7 @@ export type StateName = keyof StateFiles;
 
 export interface Finding { check: string; ok: boolean; evidence: string }
 // A failure the evaluator reproduced on the base commit as well, with the same signature: not this feature's to fix.
-export interface BaseDefect { check: string; command: string; signature: string; baseSha: string; evidence: string; paths?: string[] }
+export interface BaseDefect { check: string; command: string; signature: string; baseSha: string; featureSha: string; evidence: string; paths?: string[] }
 export interface Verdict {
   pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string;
   baseDefects?: BaseDefect[]; // failures reproduced on base too; each names the failed finding (check) it explains

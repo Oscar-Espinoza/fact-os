@@ -392,7 +392,9 @@ rejections since 10-01, 17 carried a duplicated-helper blocker (5 as the only ca
    signature) under `baseDefects` (check, command, signature, baseSha, evidence, paths), keeping that finding failed. A
    rejection whose every failed finding is explained by a base defect, with no cheating or blocking entry and each base commit
    on the base line, is an uncounted stop: the build is held, and a `base-defect` hold waits until base changes an implicated
-   path (an automatic recheck, at most twice per set of signatures), an edit, or `release`. Mixed rejections count as usual,
+   path (an automatic recheck, at most twice per signature, merging the new base first), an edit, or `release`. Base
+   attributions must name the pinned base and feature commits of the evaluation and a failed finding; others count as the
+   feature's failure. Mixed rejections count as usual,
    with base defects listed apart and the builder told not to fix them. A base defect always prevents a merge.
 10. The builder prompt now carries the helper-reuse rule the evaluator enforces (search with rg; a multi-line copy of a
     production helper blocks; duplicated test setup is a note).

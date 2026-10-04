@@ -1831,11 +1831,11 @@ test('recheck2: two failures with empty identities are not the same failure; no 
 
 // ---- base defects (item 9) ----
 test('base defect: a rejection only for a defect reproduced on base holds the build without an attempt; a base change to the implicated path rechecks it', async (t) => {
-  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, reviewFixes: 1 } });
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, reviewFixes: 1, refreshBeforeTest: false } });
   writeFileSync(join(s.repo, 'echo-worker.ts'), 'export const queues = [];\n'); s.git('add', '.'); s.git('commit', '-qm', 'fixture');
   const base = s.git('rev-parse', 'main');
   writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'the producer fixture fails' }], cheating: [], blocking: [],
-    baseDefects: [{ check: 'a.txt exists', command: 'pnpm test producer-queue.db.test.ts', signature: 'Queue catalog.product-changed does not exist', baseSha: base, evidence: 'fails on base and branch', paths: ['echo-worker.ts'] }] }] }));
+    baseDefects: [{ check: 'a.txt exists', command: 'pnpm test producer-queue.db.test.ts', signature: 'Queue catalog.product-changed does not exist', baseSha: '$BASE_SHA', featureSha: '$FEATURE_SHA', evidence: 'fails on base and branch', paths: ['echo-worker.ts'] }] }] }));
   s.cli('run');
   const a = s.feature('a');
   assert.deepEqual([a.status, a.attempts, a.stop, a.planningHold?.cause], ['todo', 0, { attempt: 1, counted: false }, 'base-defect']);
@@ -1850,6 +1850,9 @@ test('base defect: a rejection only for a defect reproduced on base holds the bu
   const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
   const b = s.feature('a');
   assert.deepEqual([b.status, b.attempts], ['merged', 0]);
+  const [, recheckEval] = s.calls('eval', 'a');
+  assert.match(recheckEval!.prompt, /the base commit of this evaluation is ([0-9a-f]+)/);
+  assert.equal(/the base commit of this evaluation is ([0-9a-f]+)/.exec(recheckEval!.prompt)![1], s.git('rev-parse', 'main~1'), 'the recheck validated against the base with the fix (refreshBeforeTest off)');
   assert.equal(s.calls('build', 'a').length, 1, 'the held build was revalidated, not rebuilt');
   assert.deepEqual(Object.values(b.baseRechecks ?? {}), [1]);
 });
@@ -1858,10 +1861,33 @@ test('base defect: mixed with a real blocker it counts as usual, with the base d
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
   const base = s.git('rev-parse', 'main');
   writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'x' }], cheating: [], blocking: ['a real defect of this feature'],
-    baseDefects: [{ check: 'a.txt exists', command: 'cmd', signature: 'sig', baseSha: base, evidence: 'both' }] }] }));
+    baseDefects: [{ check: 'a.txt exists', command: 'cmd', signature: 'sig', baseSha: '$BASE_SHA', featureSha: '$FEATURE_SHA', evidence: 'both' }] }] }));
   assert.equal(s.cli('run').status, 2);
   const a = s.feature('a');
   assert.deepEqual([a.status, a.attempts, a.planningHold], ['stuck', 1, undefined]);
   assert.match(a.lastFeedback!, /BLOCKING: a real defect[\s\S]*BASE DEFECT/);
   assert.match(s.calls('build', 'a')[0]!.prompt, /search the codebase with rg for an existing implementation/, 'the helper-reuse rule reaches the builder');
+});
+
+test('base defect: an attribution not pinned to this evaluation\'s commits is treated as the feature\'s failure', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  const old = s.git('rev-parse', 'main');
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'x' }], cheating: [], blocking: [],
+    baseDefects: [{ check: 'a.txt exists', command: 'cmd', signature: 'sig', baseSha: old.slice(0, 7) === '0000000' ? 'abcdef1' : 'abcdef1', featureSha: '$FEATURE_SHA', evidence: 'an old base' }] }] }));
+  assert.equal(s.cli('run').status, 2);
+  const a = s.feature('a');
+  assert.deepEqual([a.status, a.attempts, a.planningHold], ['stuck', 1, undefined]);
+  assert.match(a.lastFeedback!, /Base attribution not verified for this evaluation's commits/);
+});
+
+test('base defect: a signature with two automatic rechecks spent stays held, whatever companion signatures come with it', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  writeFileSync(join(s.repo, 'fixture.ts'), 'x\n'); s.git('add', '.'); s.git('commit', '-qm', 'fixture');
+  const base = s.git('rev-parse', 'main'), config = loadConfig(s.repo), file = join(s.repo, '.fact-os', 'features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
+  Object.assign(d.features[0]!, { baseRechecks: { S: 2 }, planningHold: { cause: 'base-defect', confidence: 'high', evidence: ['S'], review: 'a/1', passEnd: '', ts: '',
+    inputs: holdInputs(s.repo, config, d.features[0]!), base, paths: ['fixture.ts'], signatures: ['S', 'T3'] } });
+  writeFileSync(file, JSON.stringify(d));
+  writeFileSync(join(s.repo, 'fixture.ts'), 'y\n'); s.git('add', '.'); s.git('commit', '-qm', 'touch the implicated path');
+  s.cli('run');
+  assert.equal(s.feature('a').planningHold?.cause, 'base-defect'); assert.equal(s.calls('build', 'a').length, 0);
 });

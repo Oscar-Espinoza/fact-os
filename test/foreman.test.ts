@@ -347,12 +347,14 @@ test('I06: builder and evaluator see the same on-mock tasks by id and scope; wit
 });
 
 test('baseDefects: parsed and validated; base-only means every failed finding is explained by a base defect and nothing blocks', () => {
-  const bd = { check: 'gate passes', command: 'pnpm test x.db.test.ts', signature: "Queue catalog.product-changed does not exist", baseSha: 'abcdef1234', evidence: 'fails on base and branch', paths: ['apps/worker/src/testing/echo-worker.ts'] };
+  const bd = { check: 'gate passes', command: 'pnpm test x.db.test.ts', signature: "Queue catalog.product-changed does not exist", baseSha: 'abcdef1234', featureSha: '1234abcdef', evidence: 'fails on base and branch', paths: ['apps/worker/src/testing/echo-worker.ts'] };
   const v = parseVerdict(JSON.stringify({ pass: false, findings: [{ check: 'gate passes', ok: false, evidence: 'x' }, { check: 'other', ok: true, evidence: 'y' }], cheating: [], blocking: [], baseDefects: [bd] }));
   assert.equal(v.error, undefined); assert.deepEqual(v.baseDefects, [bd]); assert.equal(baseOnly(v), true);
   assert.equal(baseOnly({ ...v, blocking: ['a real defect'] }), false, 'mixed: a blocking entry');
   assert.equal(baseOnly({ ...v, findings: [...v.findings, { check: 'mine', ok: false, evidence: 'z' }] }), false, 'an unexplained failed finding');
-  assert.equal(parseVerdict(JSON.stringify({ pass: true, findings: [{ check: 'gate passes', ok: true, evidence: 'x' }], cheating: [], baseDefects: [bd] })).pass, false, 'a base defect prevents a merge');
+  assert.match(parseVerdict(JSON.stringify({ pass: true, findings: [{ check: 'gate passes', ok: true, evidence: 'x' }], cheating: [], baseDefects: [bd] })).error!, /check must name a failed finding/, 'a base defect must explain a failed finding');
+  assert.match(parseVerdict(JSON.stringify({ pass: true, findings: [{ check: 'gate passes', ok: false, evidence: 'x' }], cheating: [], baseDefects: [bd] })).error!, /contradicted/, 'pass:true with a base defect is contradictory');
+  assert.equal(baseOnly({ ...v, findings: [{ check: 'gate passes', ok: true, evidence: 'x' }] }), false, 'no failed finding: not base-only');
   assert.match(parseVerdict(JSON.stringify({ pass: false, findings: [{ check: 'a', ok: false, evidence: 'x' }], baseDefects: [{ ...bd, baseSha: 'main' }] })).error!, /baseSha/);
   assert.match(feedbackFromVerdict(v), /^FAILED gate passes[\s\S]*BASE DEFECT \(reproduced on abcdef1234 too; not this feature's to fix\): gate passes: Queue catalog\.product-changed does not exist/m);
 });
