@@ -41,7 +41,7 @@ const INVALID_VERDICT = /^Evaluator: (evaluator output is not a JSON object|verd
 // A failure detail without the foreman's diagnosis notes: a note is context for the next builder (it may describe an earlier
 // failure, e.g. an ECONNREFUSED that a fix already removed), never evidence of what the current failure is.
 export const currentEvidence = (detail: string): string => detail.replace(/\n*\[diagnosis\][\s\S]*?(?:\[\/diagnosis\]|$)/g, '')
-  .replace(/\n\nDiagnosis \([^)\n]*\): [\s\S]*?\nSuggested fix: [^\n]*/g, ''); // the delimited note, and the older undelimited form
+  .replace(/\n\nDiagnosis \([^)\n]*\): [\s\S]*$/, ''); // the delimited note; an older undelimited note was always appended last, so to the end
 
 // Test files named on failure lines of a test command's output (vitest/jest "FAIL", tables, ×/✗, TAP "not ok").
 export function failingTests(detail: string): string[] {
