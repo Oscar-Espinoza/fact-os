@@ -119,23 +119,23 @@ export function readRecords(root: string): ClassifierRecord[] {
 }
 const requestsToday = (root: string): number => {
   const day = new Date().toISOString().slice(0, 10);
-  return readRecords(root).filter((r) => r.ts.startsWith(day) && r.decision !== 'skip').length;
+  return readRecords(root).filter((r) => r.ts.startsWith(day) && (r.tier != null || r.decision === 'error')).length; // records that cost a request
 };
 
-// Classify the given features in shadow mode: one Jev request each (unless a person already set the tier, or the same input
-// was already classified), within the daily request cap. Returns the records written.
+// Classify the given features in shadow mode: one Jev request each (unless the same input was already classified), within
+// the daily request cap. A feature a person tiered is asked too, so its answer is evidence, but its decision stays skip.
+// Returns the records written.
 export async function classify(root: string, cfg: ClassifierConfig, targets: Feature[], features: Feature[], out: (s: string) => void, purpose = 'manual', keyOf: () => string | null = typesafeKey): Promise<ClassifierRecord[]> {
   const key = keyOf();
   if (!key) { out('no TypeSafe API key: set TYPESAFE_API_KEY (or put it in fact-os/.env); nothing was classified'); return []; }
-  const seen = new Set(readRecords(root).filter((r) => r.decision !== 'error').map((r) => `${r.feature}:${r.hash}`));
+  const seen = new Set(readRecords(root).filter((r) => r.tier != null).map((r) => `${r.feature}:${r.hash}`));
   const written: ClassifierRecord[] = [];
   let used = requestsToday(root);
   for (const f of targets) {
     const state = classifierState(f, features), hash = inputHash(state);
     const base = { ts: new Date().toISOString(), feature: f.id, hash, rubric: RUBRIC_VERSION, model: cfg.model, mode: 'shadow' as const, purpose };
     let rec: ClassifierRecord;
-    if (f.tier) rec = { ...base, decision: 'skip', reason: `a person set tier ${f.tier}` };
-    else if (seen.has(`${f.id}:${hash}`)) { out(`${f.id}: unchanged since its last classification; skipped`); continue; }
+    if (seen.has(`${f.id}:${hash}`)) { out(`${f.id}: unchanged since its last classification; skipped`); continue; }
     else if (used >= cfg.maxRequestsPerDay) { out(`daily request cap ${cfg.maxRequestsPerDay} reached; stopping`); break; }
     else {
       used++;

@@ -74,19 +74,20 @@ test('I07: abstention rules: insufficient info, low confidence, risk conflicts a
 });
 
 test('I07: classify records shadow answers, changes no feature, skips unchanged input and a person\'s tier, and honors the daily cap', async (t) => {
-  const root = project(t), seen = fakeTypesafe(t, [answer('multi', 0.9), answer('risky', 0.95, 0.85)]);
+  const root = project(t), seen = fakeTypesafe(t, [answer('multi', 0.9), answer('risky', 0.95, 0.85), answer('hard', 0.9)]);
   const features = [F('a'), F('b', { title: 'Refund flow', description: 'Refund a payment' }), F('c', { tier: 'normal' })];
   const before = JSON.stringify(features), lines: string[] = [];
   const recs = await classify(root, cfg, features, features, (s) => lines.push(s), 'manual', fakeKey);
   assert.equal(JSON.stringify(features), before, 'shadow mode never changes a feature');
   assert.deepEqual(recs.map((r) => [r.feature, r.decision]), [['a', 'would-apply'], ['b', 'would-apply'], ['c', 'skip']]);
-  assert.equal(seen.length, 2, 'no request for a feature a person tiered');
+  assert.equal(seen.length, 3, 'a feature a person tiered is still asked, as evidence');
+  assert.equal(readRecords(root)[2]!.tier, 'hard');
   assert.equal(readRecords(root)[1]!.needsSplit, 0.85);
   assert.equal(readRecords(root)[0]!.hash, inputHash(classifierState(features[0]!, features)));
   await classify(root, cfg, features.slice(0, 1), features, (s) => lines.push(s), 'manual', fakeKey);
-  assert.equal(seen.length, 2); assert.ok(lines.some((l) => /unchanged since its last classification/.test(l)));
-  await classify(root, { ...cfg, maxRequestsPerDay: 2 }, [F('d')], [F('d')], (s) => lines.push(s), 'manual', fakeKey);
-  assert.equal(seen.length, 2); assert.ok(lines.some((l) => /daily request cap 2 reached/.test(l)));
+  assert.equal(seen.length, 3); assert.ok(lines.some((l) => /unchanged since its last classification/.test(l)));
+  await classify(root, { ...cfg, maxRequestsPerDay: 3 }, [F('d')], [F('d')], (s) => lines.push(s), 'manual', fakeKey);
+  assert.equal(seen.length, 3); assert.ok(lines.some((l) => /daily request cap 3 reached/.test(l)));
 });
 
 test('I07: without a key nothing is requested; the key comes from TYPESAFE_API_KEY or fact-os .env and is never recorded', async (t) => {
