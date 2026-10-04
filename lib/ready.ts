@@ -51,6 +51,21 @@ export function taskReach(task: HumanTask, features: Feature[]): number {
   return features.filter((f) => direct.has(f.id) || [...reach.get(f.id)!].some((d) => direct.has(d))).length;
 }
 
+// The human tasks a launch of `id` may build against a mock of: the open mockable tasks that name it, plus the open mockable
+// tasks that name any of its declared dependencies, transitively (`via`: those dependencies), each task once. An open task
+// that is not mockable blocks only the features it names (`blocked`); one on a dependency neither blocks nor grants. The
+// allowance is exactly these named capabilities, never every unavailable integration.
+export type MockTask = HumanTask & { via?: string[] };
+export function mockTasksFor(id: string, features: Feature[], tasks: HumanTask[], reach = reachability(features).reach): { tasks: MockTask[]; blocked: boolean } {
+  const open = tasks.filter((t) => t.status === 'open'), deps = reach.get(id) ?? new Set<string>();
+  const direct = open.filter((t) => (t.unblocks || []).includes(id));
+  if (direct.some((t) => !t.mockable)) return { tasks: [], blocked: true };
+  const copy = (t: HumanTask, via?: string[]): MockTask => ({ ...t, steps: [...(t.steps || [])], unblocks: [...(t.unblocks || [])], ...(via ? { via } : {}) });
+  const inherited = open.filter((t) => t.mockable && !direct.includes(t)).map((t) => ({ t, via: (t.unblocks || []).filter((u) => deps.has(u)).sort() }))
+    .filter((x) => x.via.length).map((x) => copy(x.t, x.via));
+  return { tasks: [...direct.map((t) => copy(t)), ...inherited], blocked: false };
+}
+
 // Keep the mode argument compatible with existing callers; both modes require
 // merged dependencies because worktrees start from base, not unmerged branches.
 export function analyze(features: Feature[], tasks: HumanTask[], _mergeMode: MergeMode = 'auto'): Analysis {
@@ -64,10 +79,10 @@ export function analyze(features: Feature[], tasks: HumanTask[], _mergeMode: Mer
   const ready: Feature[] = [], waiting: string[] = [], mock = new Set<string>();
   for (const f of features) {
     if (f.status !== 'todo' || bad.has(f.id)) continue;
-    const blockers = open.filter((t) => (t.unblocks || []).includes(f.id));
-    if (blockers.some((t) => !t.mockable)) { waiting.push(f.id); continue; }
+    const m = mockTasksFor(f.id, features, open, reach);
+    if (m.blocked) { waiting.push(f.id); continue; }
     if (!(f.deps || []).every((d) => done.has(byId.get(d)?.status))) continue;
-    if (blockers.length) mock.add(f.id);
+    if (m.tasks.length) mock.add(f.id);
     ready.push(f);
   }
   const dep = dependents(features);

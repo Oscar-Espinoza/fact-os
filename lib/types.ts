@@ -62,6 +62,8 @@ export interface Config {
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
   gateFixes: number;                  // safe integer >= 0: resumed builder fixes after a test-gate failure, per pass (0 = none)
   commitFixes: number;                // safe integer >= 0: resumes per pass to commit work the builder left uncommitted (0 = none)
+  keepFixes: number;                  // safe integer >= 0: resumes per pass to restore or declare lines the builder's merge resolution lost (0 = none)
+  reviewFixes: number;                // safe integer >= 0: resumes per pass to fix an actionable evaluator rejection, then a fresh gate and evaluation (0 = none)
   setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
   classifier: ClassifierConfig | null; // I07: TypeSafe Jev tier/split judgments, shadow mode only (records, never changes a feature)
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
@@ -101,7 +103,7 @@ export const PROMPT_CAUSES = ['prompt-missing-info', 'prompt-ambiguous', 'prompt
 export type PromptCause = typeof PROMPT_CAUSES[number];
 
 // What the observer decided about one stuck feature.
-export type Cause = 'untouched' | 'infra' | 'own' | 'conflict-loop' | 'setup' | 'builder' | 'unknown';
+export type Cause = 'untouched' | 'infra' | 'own' | 'conflict-loop' | 'setup' | 'builder' | 'environment' | 'unknown';
 export interface Diagnosis { ts: string; feature: string; cause: Cause; tests: string[]; evidence: string; action: string }
 
 export interface AttemptStop { attempt: number; counted: boolean }
@@ -122,6 +124,9 @@ export interface Feature {
   stop?: AttemptStop;                 // latest counted failure or uncounted stop; cleared when work resumes
   setupFailures?: number;             // consecutive failed setups (prepare) of this feature; never attempts; cleared by a good setup or retry
   setupRetryAt?: string;              // ISO: no launch before this time (a delayed setup retry)
+  envFailures?: number;               // gate failures diagnosed as environmental, after a same-build rerun; never attempts; cleared by a passing gate or a retry
+  envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
+  envBuild?: string;                  // the commit held after an environmental gate failure: the next pass revalidates it instead of rebuilding
   refreshes?: number;
   lastFeedback?: string;
   costUsd?: number;
@@ -180,6 +185,8 @@ export interface LogEvent {
   ts: string; feature: string | null; event: string; detail: string;
   stop?: AttemptStop;                 // failed/stuck event's try and whether it consumed a failed attempt
   attemptsReset?: boolean;           // resume/retry event: whether failed-attempt numbering restarted
+  cause?: 'environment';             // failed/stuck event: a typed cause (a diagnosed environmental gate failure)
+  sha?: string;                      // the commit that cause was diagnosed on
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
   lessonAppend?: { file: string; before: string; after: string };
 }

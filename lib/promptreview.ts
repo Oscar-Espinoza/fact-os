@@ -39,7 +39,7 @@ export interface Pass { feature: string; start: string; end: string; endEvent: s
 // failure (infrastructure, setup and merge-conflict loops are never a prompt's fault; a gate failure counts only on the feature's own tests).
 export function passKind(detail: string, endEvent: string, cause: Cause): PassKind | null {
   if (endEvent === 'resolve-failed') return /^keep-check:/.test(detail) ? 'keep-check' : 'resolver-failed'; // a resolver run's own keep-lines check
-  if (cause === 'infra' || cause === 'setup' || cause === 'conflict-loop' || cause === 'untouched') return null;
+  if (cause === 'infra' || cause === 'setup' || cause === 'conflict-loop' || cause === 'untouched' || cause === 'environment') return null;
   if (/^The merge resolution lost lines/.test(detail)) return 'keep-check';
   if (/^(builder failed|commit your work)/.test(detail)) return 'builder-failed'; // before the evaluator patterns: its stderr may have a line starting "FAILED "
   if (/^Evaluator: (evaluator failed|evaluator output is not|verdict needs|verdict\.)/.test(detail)) return 'evaluator-run-failed';

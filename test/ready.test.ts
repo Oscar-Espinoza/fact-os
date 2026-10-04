@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { analyze, validate } from '../lib/ready.ts';
+import { analyze, mockTasksFor, validate } from '../lib/ready.ts';
 import type { Feature, HumanTask } from '../lib/types.ts';
 
 const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: id, description: '', acceptance: ['works'], surface: 'any',
@@ -77,4 +77,22 @@ test('order: priority, then transitive dependents (more first), then id', () => 
     F('u', { deps: ['z'], priority: 9 }), // z has 1
   ];
   assert.deepEqual(analyze(fs, [], 'auto').ready, ['q', 'y', 'z', 'a0', 'x']);
+});
+
+test('mockTasksFor: open mockable tasks of the feature and of its dependencies (transitively, once each, with via); nothing else', () => {
+  const fs = [F('ship', { status: 'merged' }), F('inv', { status: 'merged' }), F('pay', { status: 'merged' }), F('cn', { status: 'merged', deps: ['inv', 'pay'] }),
+    F('mail', { status: 'merged' }), F('cancel', { status: 'merged', deps: ['pay', 'ship'] }), F('queue', { deps: ['ship', 'mail', 'cn', 'cancel'] }), F('other')];
+  const tasks = [T('C01', ['pay'], { mockable: true }), T('C02', ['ship'], { mockable: true }), T('C03', ['inv', 'cn'], { mockable: true }),
+    T('C04', ['mail'], { mockable: true }), T('LEGAL', ['cancel']), T('DONE', ['ship'], { mockable: true, status: 'done' }), T('ELSE', ['other'], { mockable: true })];
+  const m = mockTasksFor('queue', fs, tasks);
+  assert.equal(m.blocked, false);
+  assert.deepEqual(m.tasks.map((t) => [t.id, t.via]), [['C01', ['pay']], ['C02', ['ship']], ['C03', ['cn', 'inv']], ['C04', ['mail']]],
+    'C01 arrives through two paths (cn, cancel) once; a non-mockable or done task on a dependency neither grants nor blocks');
+  assert.ok(analyze(fs, tasks).mock.has('queue'), 'readiness agrees with the launch capture');
+  const direct = mockTasksFor('queue', fs, [...tasks, T('MINE', ['queue'], { mockable: true })]);
+  assert.deepEqual([direct.tasks[0]!.id, direct.tasks[0]!.via], ['MINE', undefined]);
+  assert.equal(mockTasksFor('queue', fs, [...tasks, T('KEYS', ['queue'])]).blocked, true, 'a direct non-mockable task still blocks');
+  assert.deepEqual(mockTasksFor('other', fs, tasks).tasks.map((t) => t.id), ['ELSE']);
+  const copy = mockTasksFor('queue', fs, tasks).tasks[0]!; copy.steps.push('x');
+  assert.deepEqual(tasks[0]!.steps, [], 'captured by value');
 });

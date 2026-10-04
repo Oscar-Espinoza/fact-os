@@ -78,7 +78,7 @@ test('resolver: a merge bounce is resolved in the same pass with both sides\' co
   assert.match(res.prompt, /This branch: a: Feature a\nRegisters a in registry\.txt\nAcceptance:\n- registry\.txt lists entry a/);
   assert.match(res.prompt, /- b: Feature b \([0-9a-f]{12}; files: registry\.txt\)\n {2}Registers b in registry\.txt\n {2}Acceptance:\n {2}- registry\.txt lists entry b/);
   assert.match(res.prompt, /<<<<<<< HEAD\nentry a\n\|\|\|\|\|\|\| [0-9a-f]+\n=======\nentry b\n>>>>>>> /);
-  assert.match(res.prompt, /dropped: <file>: <the line as it was>/);
+  assert.match(res.prompt, /dropped: <file>: <the line exactly as it was>` \(the line as written in the file: no backticks around it and nothing after it\), with the reason on the next line/);
   // the resolution still went through the test and a fresh evaluator, which was told what else to check
   assert.deepEqual(s.events('a').slice(-8), ['testing', 'evaluating', 'refreshed', 'resolving', 'resolved', 'testing', 'evaluating', 'merged']);
   const evals = s.calls('eval', 'a');
@@ -105,7 +105,7 @@ test('resolver with refreshBeforeTest: a conflict before the test is resolved in
 
 test('keep-lines check: a resolver that drops the other side\'s line is sent back, and the lost line never reaches main', { timeout: 30000 }, (t) => {
   const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
-    config: { maxParallel: 1, maxAttempts: 1, resolver: {} }, scenario: { a: 'resolve:drop' } });
+    config: { maxParallel: 1, maxAttempts: 1, resolver: {}, keepFixes: 0 }, scenario: { a: 'resolve:drop' } });
   registryBranches(s, ['b', 'a']);
   const r = s.cli('run');
   assert.equal(r.status, 2, r.stdout + r.stderr);
@@ -152,7 +152,7 @@ test('conflictBrief without a resolver: the builder gets both sides\' context an
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(s.calls('resolve', 'a').length, 0, 'no resolver configured');
   const p = s.calls('build', 'a')[1].prompt;
-  assert.match(p, /conflicts in: registry\.txt\. Resolve[\s\S]*dropped: <file>: <line>[\s\S]*## Merge conflict: keep both sides[\s\S]*- b: Feature b[\s\S]*Registers b[\s\S]*<<<<<<< HEAD/);
+  assert.match(p, /conflicts in: registry\.txt\. Resolve[\s\S]*dropped: <file>: <the line exactly as it was>[\s\S]*## Merge conflict: keep both sides[\s\S]*- b: Feature b[\s\S]*Registers b[\s\S]*<<<<<<< HEAD/);
   assert.match(s.log(), /"feature":"a","event":"keep-check","detail":"ok: registry\.txt"/);
   assert.equal(s.feature('a').conflict, undefined);
   assert.equal(s.feature('a').status, 'merged');

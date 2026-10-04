@@ -129,11 +129,43 @@ export function checkLines(base: string, ours: string, theirs: string, result: s
 }
 export const missingLines = (base: string, ours: string, theirs: string, result: string): Missing[] => checkLines(base, ours, theirs, result).lost;
 
-// Lines a resolution drops on purpose, declared in a commit message as `dropped: <file>: <line>` (one per line).
+// Lines a resolution drops on purpose, declared in a commit message as `dropped: <file>: <line>` (one per line), the
+// reason on the next line. One protocol for the builder brief, the resolver prompt and the keep-lines feedback.
+export const DROP_PROTOCOL = 'add a commit whose message has, for each such line, its own line `dropped: <file>: <the line exactly as it was>` ' +
+  '(the line as written in the file: no backticks around it and nothing after it), with the reason on the next line as `Reason: …`. ' +
+  'A check compares the lines both sides added with the result and sends unlisted losses back';
+export interface DropRecord { file: string; payload: string }
+export const dropRecords = (messages: string): DropRecord[] =>
+  [...messages.matchAll(/^dropped: ([^:\n]+): (.*)$/gm)].map((m) => ({ file: m[1]!.trim(), payload: m[2]!.trim() }));
 export function declaredDrops(messages: string): Set<string> {
-  const s = new Set<string>();
-  for (const m of messages.matchAll(/^dropped: ([^:\n]+): (.*)$/gm)) s.add(`${m[1]!.trim()}\n${m[2]!.trim()}`);
-  return s;
+  return new Set(dropRecords(messages).map((r) => `${r.file}\n${r.payload}`));
+}
+// Whether a record's payload declares `line`: the exact trimmed line (the canonical form); the line as one leading Markdown
+// code span, anything after its closing delimiter being an explanation; or the line followed by an explicit ` - `, ` — `
+// or ` -- ` separator, or by a final ` (…)`. Plain whitespace or `;` never ends the line (`foo(); bar();` does not declare
+// `foo();`), and backticks are never stripped globally (the old line may be a template literal).
+export function declares(payload: string, line: string): boolean {
+  const l = line.trim();
+  if (!l) return false;
+  if (payload === l) return true;
+  const span = /^(`+)(.+?)\1(?!`)/.exec(payload);
+  if (span) {
+    const inner = span[2]!, padded = inner.length > 2 && inner.startsWith(' ') && inner.endsWith(' ') && inner.trim() !== '';
+    if ((padded ? inner.slice(1, -1) : inner).trim() === l) return true;
+  }
+  if (!payload.startsWith(l)) return false;
+  const rest = payload.slice(l.length);
+  return /^ (?:-|--|—|–) \S/.test(rest) || /^ \([^]*\)$/.test(rest);
+}
+
+// A distinctive token of a lost line (a quoted string's content, else its longest identifier of 6+ characters), searched
+// for elsewhere at the tip to hint where a line may have moved in a new form. A hint only: it never excuses a loss.
+const KEYWORDS = new Set(['export', 'import', 'return', 'string', 'number', 'boolean', 'const', 'function', 'interface', 'default', 'typeof', 'readonly', 'extends', 'implements', 'private', 'public', 'static', 'unknown', 'undefined']);
+export function lineToken(line: string): string | null {
+  const q = /(['"])([A-Za-z_][\w.-]{3,})\1/.exec(line);
+  if (q) return q[2]!;
+  const ids = (line.match(/[A-Za-z_]\w{5,}/g) ?? []).filter((w) => !KEYWORDS.has(w));
+  return ids.sort((a, b) => b.length - a.length)[0] ?? null;
 }
 
 // ---- conflict hunks ----
@@ -230,11 +262,21 @@ export function conflictBrief(o: { wt: string; base: string; branch: string; our
 }
 
 // The keep-lines check of a committed resolution: `tip` contains both `ours` and `theirs`; for each conflicted file,
-// lines either side added must still be in tip, unless a commit message on the branch since `ours` declares them dropped.
-export function keepCheck(cwd: string, ours: string, theirs: string, tip: string, files: string[]): { ok: boolean; missing: (Missing & { file: string })[]; changed: (Changed & { file: string })[] } {
+// lines either side added must still be in tip, unless a commit message on the branch since `ours` declares them dropped
+// (`declares`). Returns the declared drops (for the evaluator), the records for a conflicted file that matched no lost
+// line (for the feedback), and per missing line a hint of where its token now is.
+export type KeepMissing = Missing & { file: string; hint?: string };
+export interface KeepResult { ok: boolean; missing: KeepMissing[]; changed: (Changed & { file: string })[]; declared: { file: string; line: string; payload: string }[]; unmatched: DropRecord[] }
+export function keepCheck(cwd: string, ours: string, theirs: string, tip: string, files: string[]): KeepResult {
   const mb = git(['merge-base', ours, theirs], cwd).out;
-  const declared = declaredDrops(git(['log', '--first-parent', '--format=%B', tip, `^${ours}`], cwd).out);
-  const missing: (Missing & { file: string })[] = [], changed: (Changed & { file: string })[] = [];
+  const records = dropRecords(git(['log', '--first-parent', '--format=%B', tip, `^${ours}`], cwd).out), used = new Set<DropRecord>();
+  const declared: KeepResult['declared'] = [];
+  const isDeclared = (file: string, line: string) => {
+    const r = records.find((x) => x.file === file && declares(x.payload, line));
+    if (r) { used.add(r); declared.push({ file, line, payload: r.payload }); }
+    return !!r;
+  };
+  const missing: KeepMissing[] = [], changed: (Changed & { file: string })[] = [];
   // Lines the resolution wrote into other files (neither side had them there): a lost line found among them was moved,
   // e.g. when base split a shared registry into one file per entry and the resolution moved this branch's entry over.
   const moved = new Map<string, { n: number; file: string }>();
@@ -252,7 +294,7 @@ export function keepCheck(cwd: string, ours: string, theirs: string, tip: string
     const left: typeof c.lost = [], movedTo = new Map<string, string>(); // side → where most of its block went
     let movedN = 0;
     for (const m of c.lost) {
-      if (declared.has(`${file}\n${m.line}`)) continue;
+      if (isDeclared(file, m.line)) continue;
       const mv = moved.get(m.line.trim());
       if (mv && mv.n >= m.missing) { mv.n -= m.missing; movedN++; movedTo.set(m.side, mv.file); changed.push({ file, line: m.line, now: `(moved to ${mv.file})` } as Changed & { file: string }); continue; }
       left.push(m);
@@ -266,18 +308,40 @@ export function keepCheck(cwd: string, ours: string, theirs: string, tip: string
     }
     for (const x of c.changed) changed.push({ file, ...x });
   }
-  return { ok: !missing.length, missing, changed };
+  for (const m of missing.slice(0, 20)) {
+    const tok = lineToken(m.line);
+    if (!tok) continue;
+    const hit = git(['grep', '-n', '-F', '-I', '-e', tok, tip, '--', '.', `:(exclude)${m.file}`, ':(exclude)*.test.*', ':(exclude)*.spec.*'], cwd).out.split('\n')[0];
+    const at = hit && /^[^:]+:([^:]+):(\d+):/.exec(hit);
+    if (at) m.hint = `\`${tok}\` is at ${at[1]}:${at[2]}`;
+  }
+  const unmatched = records.filter((r) => files.includes(r.file) && !used.has(r));
+  return { ok: !missing.length, missing, changed, declared, unmatched };
 }
+
+// For the evaluator: lines the resolution dropped on purpose, with the declaring record.
+export const declaredNote = (declared: KeepResult['declared'], max = 15): string => !declared.length ? '' :
+  ['Lines the resolution dropped on purpose (declared `dropped:` in its commits; check each drop is right):',
+    ...declared.slice(0, max).map((d) => `- ${d.file}: \`${cap(d.line, 160)}\`${d.payload !== d.line ? ` (declared as: ${cap(d.payload, 200)})` : ''}`),
+    ...(declared.length > max ? [`… ${declared.length - max} more`] : [])].join('\n');
 
 // For the evaluator: lines the resolution changed instead of keeping.
 export const changedNote = (changed: (Changed & { file: string })[], max = 15): string => !changed.length ? '' :
   ['Lines the resolution changed rather than kept as either side wrote them (check each is intended):',
     ...changed.slice(0, max).map((c) => `- ${c.file}: \`${cap(c.line, 160)}\` → \`${cap(c.now, 160)}\``), ...(changed.length > max ? [`… ${changed.length - max} more`] : [])].join('\n');
 
-export function keepFeedback(base: string, missing: (Missing & { file: string })[], max = 40): string {
+// The keep-lines feedback: each lost line with who added it, a hint of where its token now is, and its declaration record
+// ready to copy (never truncated); then the records found for these files that matched nothing, quoted.
+export function keepFeedback(base: string, missing: KeepMissing[], unmatched: DropRecord[] = [], max = 100): string {
   const who = { ours: 'this branch', theirs: base, both: 'both sides' };
-  return [`The merge resolution lost lines that one side added. Put them back (keep both sides' behaviour), or, if a line must go or change ` +
-    `(a duplicate, a key or number both sides used), add a commit whose message lists it as \`dropped: <file>: <line>\` with the reason:`,
-    ...missing.slice(0, max).map((m) => `- ${m.file}: \`${cap(m.line, 200)}\` (added by ${who[m.side]}${m.missing > 1 ? `, ${m.missing} copies` : ''})`),
-    ...(missing.length > max ? [`… ${missing.length - max} more`] : [])].join('\n');
+  return [`The merge resolution lost lines that one side added. Put each back (keep both sides' behaviour). If a line must go or change ` +
+    `(a duplicate, a key or number both sides used, or code that moved elsewhere in a new form), ${DROP_PROTOCOL}.`, '',
+    'Lost lines, each followed by its record to copy:',
+    ...missing.slice(0, max).flatMap((m) => [`- ${m.file}: \`${cap(m.line, 200)}\` (added by ${who[m.side]}${m.missing > 1 ? `, ${m.missing} copies` : ''})` +
+      (m.hint ? `. Hint: ${m.hint}; if the line moved there in a new form, declare it and say so in the reason.` : ''),
+      `  dropped: ${m.file}: ${m.line.trim()}`]),
+    ...(missing.length > max ? [`… ${missing.length - max} more lost lines, not listed; restore or declare those too.`] : []),
+    ...(unmatched.length ? ['', 'These `dropped:` records in your commits match none of the lost lines (the record must be the exact line, ' +
+      'without backticks around it or an explanation on the same line):', ...unmatched.slice(0, 20).map((r) => `- dropped: ${r.file}: ${cap(r.payload, 300)}`)] : []),
+  ].join('\n');
 }

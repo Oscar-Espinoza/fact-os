@@ -197,6 +197,9 @@ test('I01: gateFixes is a safe integer >= 0 and diagnoser is null or role settin
   s.set({});
   assert.deepEqual([loadConfig(s.root).gateFixes, loadConfig(s.root).diagnoser], [0, null]);
   assert.equal(loadConfig(s.root).commitFixes, 0);
+  assert.deepEqual([loadConfig(s.root).keepFixes, loadConfig(s.root).reviewFixes], [1, 1], 'one same-session keep-lines and review repair by default');
+  for (const key of ['keepFixes', 'reviewFixes']) for (const value of ['1', -1, 0.5]) { s.set({ [key]: value }); assert.throws(() => loadConfig(s.root), new RegExp(`config\\.${key}`)); }
+  s.set({ keepFixes: 1, reviewFixes: 1 });
   for (const value of ['1', -1, 0.5]) { s.set({ commitFixes: value }); assert.throws(() => loadConfig(s.root), /config\.commitFixes/); }
   s.set({});
   for (const value of ['1', -1, 1.5, null, true]) {

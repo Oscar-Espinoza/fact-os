@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { checkLines, claimBlock, conflictBrief, conflictFiles, conflictHunks, declaredDrops, featureFiles, hotScores, hotTest, keepCheck, keepFeedback, missingLines, DEFAULT_CLAIMS } from '../lib/merge.ts';
+import { checkLines, claimBlock, conflictBrief, conflictFiles, conflictHunks, declaredDrops, declaredNote, declares, featureFiles, hotScores, hotTest, keepCheck, keepFeedback, lineToken, missingLines, DEFAULT_CLAIMS } from '../lib/merge.ts';
 import { runTag } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
 import type { LogEvent } from '../lib/types.ts';
@@ -141,6 +141,27 @@ test('declaredDrops reads `dropped: <file>: <line>` lines from commit messages',
   assert.deepEqual([...d], ['src/a.ts\nimport { x } from "y";', 'b.json\n"k": 1,']);
 });
 
+test('declares: the exact line, one leading code span with an explanation after it, or an explicit separator; never a bare prefix', () => {
+  const L = "| 'PRINT_SPEC_INVALID'";
+  assert.ok(declares(L, L), 'canonical');
+  assert.ok(declares("`| 'PRINT_SPEC_INVALID'` - now PRINT_SPEC_INVALID: 422 in errors/print-on-demand.ts", L), 'the F17 field form');
+  assert.ok(declares("`` `grant ${s}`, `` moved to grants.ts", '`grant ${s}`,'), 'a padded double-backtick span around a template literal');
+  assert.ok(declares('`grant ${s}`,', '`grant ${s}`,'), 'a template literal declared bare is exact');
+  assert.ok(declares(`${L} - moved`, L)); assert.ok(declares(`${L} — moved`, L)); assert.ok(declares(`${L} (moved to errors/return_credit.ts; main derives the union)`, L));
+  assert.ok(!declares('foobar', 'foo'), 'a longer identifier');
+  assert.ok(!declares('foo(); bar();', 'foo();'), 'a code continuation is not a separator');
+  assert.ok(!declares('foo(); because it moved', 'foo();'), 'plain whitespace is not a separator');
+  assert.ok(!declares('foo();; - x', 'foo();'), 'a different line');
+  assert.ok(!declares('`foo` - bar', 'foo bar'), 'the span must hold the whole line');
+  assert.ok(!declares('', 'x')); assert.ok(!declares('x', '  '));
+});
+
+test('lineToken: a quoted literal first, else the longest identifier of 6+ characters that is not a keyword', () => {
+  assert.equal(lineToken("| 'PRINT_SPEC_INVALID'"), 'PRINT_SPEC_INVALID');
+  assert.equal(lineToken('export const registerShipmentLabels = x;'), 'registerShipmentLabels');
+  assert.equal(lineToken('],'), null);
+});
+
 test('conflictHunks keeps each conflict block with its context, joins gaps with …, and caps the size', () => {
   const text = ['l1', 'l2', 'l3', 'l4', '<<<<<<< HEAD', 'ours', '||||||| base', 'old', '=======', 'theirs', '>>>>>>> main', 'l5', ...Array(20).fill('x'),
     '<<<<<<< HEAD', 'o2', '=======', 't2', '>>>>>>> main', 'end'].join('\n');
@@ -203,8 +224,20 @@ test('keepCheck: a resolution that drops the other side fails until the drop is 
   assert.deepEqual(k.missing.map((m) => [m.file, m.line, m.side]), [['reg.ts', '],', 'both'], ['reg.ts', '`grant three ${s}`,', 'theirs'], ['reg.ts', 'm3: (s) => [', 'theirs']]);
   assert.deepEqual(k.changed, []);
   assert.match(keepFeedback('main', k.missing), /- reg\.ts: `m3: \(s\) => \[` \(added by main\)/);
+  const fb = keepFeedback('main', k.missing);
+  assert.match(fb, /^The merge resolution lost lines/, 'the prefix the observer classifies on');
+  assert.match(fb, /\n {2}dropped: reg\.ts: m3: \(s\) => \[$/m, 'a copyable record, no backticks');
+  assert.match(fb, /Reason: /);
+  git('commit', '-q', '--allow-empty', '-m', 'try\n\ndropped: reg.ts: the `m3: (s) => [` block moved');
+  const bad = keepCheck(dir, ours, theirs, tip(), ['reg.ts']);
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.unmatched.map((r) => r.payload), ['the `m3: (s) => [` block moved']);
+  assert.match(keepFeedback('main', bad.missing, bad.unmatched), /match none of the lost lines[\s\S]*- dropped: reg\.ts: the `m3: \(s\) => \[` block moved/);
   git('commit', '-q', '--allow-empty', '-m', 'm3 moved to another file\n\ndropped: reg.ts: m3: (s) => [\ndropped: reg.ts: `grant three ${s}`,\ndropped: reg.ts: ],');
-  assert.equal(keepCheck(dir, ours, theirs, tip(), ['reg.ts']).ok, true, 'declared drops are accepted');
+  const ok = keepCheck(dir, ours, theirs, tip(), ['reg.ts']);
+  assert.equal(ok.ok, true, 'declared drops are accepted');
+  assert.deepEqual(ok.declared.map((d) => d.line).sort(), ['`grant three ${s}`,', '],', 'm3: (s) => ['].sort());
+  assert.match(declaredNote(ok.declared), /dropped on purpose[\s\S]*reg\.ts: `m3: \(s\) => \[`/);
   commit({ 'reg.ts': readFileSync(join(dir, 'reg.ts'), 'utf8').replace('};', '  m3: (s) => [\n    `grant three ${s}`,\n  ],\n};') }, 'put m3 back');
   assert.equal(keepCheck(dir, ours, tip(), tip(), ['reg.ts']).ok, true);
 });
@@ -233,6 +266,19 @@ test('keepCheck: when most of a moved block arrived verbatim, its rewritten key 
   const k = keepCheck(dir, ours, theirs, git('rev-parse', 'HEAD'), ['reg.ts']);
   assert.equal(k.ok, true, JSON.stringify(k.missing));
   assert.ok(k.changed.some((c) => c.line === 'm2: (s) => [' && /moved with its block to grants-m2\.ts/.test(c.now)));
+});
+
+test('keepCheck: a lost line whose token is elsewhere at the tip stays lost, with a hint naming where', (t) => {
+  const { dir, git, commit } = repo(t);
+  git('checkout', '-q', 'ship/a');
+  const ours = git('rev-parse', 'HEAD'), theirs = git('rev-parse', 'main');
+  spawnSync('git', ['merge', '--no-edit', theirs], { cwd: dir });
+  // the resolution keeps main's reg.ts and rewrites this branch's m2 entry into another shape elsewhere
+  commit({ 'reg.ts': THEIRS, 'codes.ts': "export const CODES = { grant_two_entry: 1 };\n", 'reg.test.ts': 'grant two\n' }, 'merge main; m2 rewritten');
+  const k = keepCheck(dir, ours, theirs, git('rev-parse', 'HEAD'), ['reg.ts']);
+  assert.equal(k.ok, false, 'a token match never excuses a loss');
+  assert.ok(k.missing.length > 0);
+  for (const m of k.missing) assert.doesNotMatch(m.hint ?? '', /reg\.test\.ts/, 'tests are not hints');
 });
 
 test('runTag counts resolver run files, so a resolution pass never overwrites an earlier pass', () => {

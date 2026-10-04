@@ -368,7 +368,9 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
     if (e.event !== 'stuck' && e.event !== 'failed') continue;
     const { files, changed } = filesOf(byId.get(e.feature));
     const tests = resolveTests(failingTests(e.detail || ''), files);
-    const c = classify(e.detail || '', tests, changed, cfg.infraPatterns);
+    // A typed cause from the foreman (a diagnosed environmental gate failure) wins over text matching: the foreman owns
+    // those bounded retries, so the observer never resets them as an infrastructure failure.
+    const c = e.cause === 'environment' ? { cause: 'environment' as const, evidence: firstLine((e.detail || '').split('\nDiagnosis')[1] ?? e.detail ?? '') } : classify(e.detail || '', tests, changed, cfg.infraPatterns);
     const d: Diagnosis = { ts: e.ts, feature: e.feature, cause: c.cause, tests, evidence: c.evidence, action: e.event === 'failed' ? 'none: the foreman retries it' : '' };
     state.diagnoses.push(d);
     if (e.event === 'stuck') latestStuck.set(e.feature, d);
@@ -655,7 +657,7 @@ async function improvePass(root: string, config: Config, agent: RoleConfig, cfg:
 
 const at = (iso: string): string => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const CAUSE: Record<Cause, string> = { untouched: 'a test the feature does not change', infra: 'infrastructure', own: 'its own code or tests',
-  'conflict-loop': 'merge conflicts that keep coming back', setup: 'worktree or prepare setup', builder: 'the builder or evaluator run', unknown: 'unrecognized' };
+  'conflict-loop': 'merge conflicts that keep coming back', setup: 'worktree or prepare setup', builder: 'the builder or evaluator run', environment: 'a test environment fault (diagnosed)', unknown: 'unrecognized' };
 
 export function renderReport(root: string, state: ObserverState, features: Feature[], tasks: HumanTask[], foreman: boolean): string {
   const count = (s: Feature['status'][]) => features.filter((f) => s.includes(f.status)).length;

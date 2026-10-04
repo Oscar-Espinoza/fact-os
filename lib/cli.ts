@@ -74,7 +74,8 @@ function status(): void {
   const rows = [['id', 'status', 'tries', 'cost', 'deps', 'notes'], ...features.map((f) => [f.id, f.status, String(f.attempts || 0),
     f.costUsd ? `$${f.costUsd.toFixed(2)}` : '', (f.deps || []).join(','), [f.onMock && 'onMock', a.ready.includes(f.id) && 'next',
       a.waiting.includes(f.id) && 'waiting-on-human', a.bad.has(f.id) && 'INVALID',
-      f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now() && `setup-retry ${f.setupRetryAt}`].filter(Boolean).join(' ')])];
+      f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now() && `setup-retry ${f.setupRetryAt}`,
+      f.envRetryAt && Date.parse(f.envRetryAt) > Date.now() && `env-retry ${f.envRetryAt}`].filter(Boolean).join(' ')])];
   const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
   for (const r of rows) console.log(r.map((c, i) => c.padEnd(w[i])).join('  ').trimEnd());
   const open = tasks.filter((t) => t.status === 'open');

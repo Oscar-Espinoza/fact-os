@@ -5,8 +5,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSy
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { childEnv, paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
-import { analyze, validate } from './ready.ts';
-import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
+import { analyze, mockTasksFor, validate, type MockTask } from './ready.ts';
+import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, declaredNote, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { IN_FLIGHT, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
@@ -85,6 +85,7 @@ export function feedbackFromVerdict(v: Partial<Verdict>): string {
 
 export function applyFailure(f: Feature, feedback: string, maxAttempts: number): void {
   delete f.sha; // counted failures rebuild; only unspent revalidation retains accepted build reuse
+  delete f.envBuild;
   delete f.pendingLesson;
   f.attempts = (f.attempts || 0) + 1;
   f.stop = { attempt: f.attempts, counted: true };
@@ -178,7 +179,7 @@ export function promptFingerprint(role: Role, r: { model?: string; effort?: stri
 
 // The sha a feature's last pass had built when the foreman was stopped (its last event is `interrupted`, after a
 // `testing <sha>` of the same pass), or null. The next pass can skip the builder if the branch is still exactly there.
-const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked', 'gate-fix', 'commit-fix'];
+const ENDS_PASS = ['failed', 'stuck', 'refreshed', 'merged', 'ready', 'recovered', 'error', 'merge-failed', 'merge-hook-failed', 'unparked', 'gate-fix', 'commit-fix', 'keep-fix', 'review-fix'];
 export function builtWhenStopped(events: Pick<LogEvent, 'feature' | 'event' | 'detail'>[], id: string): string | null {
   let sha: string | null = null, last = '', before: { sha: string | null; last: string } | null = null;
   for (const e of events) {
@@ -211,7 +212,10 @@ const REFRESH_SEP = '\n\nThis failure is not fixed yet. Also: ';
 // `notes`: the notes block for this model and role (notesBlock), appended last.
 // The open, mockable human tasks a launch may build against a mock of (captured at launch), by id, title and scope,
 // rendered the same way for the builder and the evaluator.
-const mockList = (tasks: HumanTask[]): string => tasks.map((t) => `- ${t.id}: ${t.title}${(t.steps || []).length ? `\n${t.steps.map((x) => `  - ${x}`).join('\n')}` : ''}`).join('\n');
+// A task inherited through a dependency says which: that dependency was built against the same mock.
+const mockList = (tasks: MockTask[]): string => tasks.map((t) => `- ${t.id}: ${t.title}` +
+  (t.via?.length ? ` (inherited: open for dependenc${t.via.length > 1 ? 'ies' : 'y'} ${t.via.join(', ')}, which this feature builds on)` : '') +
+  `${(t.steps || []).length ? `\n${t.steps.map((x) => `  - ${x}`).join('\n')}` : ''}`).join('\n');
 
 export function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = [], notes = ''): string {
   const lessons = readIf(resolve(root, config.lessonsFile));
@@ -253,6 +257,16 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
 }
 
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+
+// A gate failure's identity, to tell whether a rerun failed the same way: the test files named on its failure lines
+// (vitest/jest FAIL, ×/✗, TAP "not ok", tables marked fail), else its last nonblank line without numbers (timings vary).
+export function failureId(output: string): string {
+  const tests = new Set<string>();
+  for (const line of output.split('\n')) if (/\bFAIL\b|×|✗|\bnot ok\b|\(fail\)|\|\s*fail\s*\|/i.test(line))
+    for (const m of line.match(/[\w@.+-]+(?:\/[\w@.+-]+)*\.(?:test|spec)\.[cm]?[jt]sx?/g) || []) tests.add(m.replace(/^\.\//, ''));
+  if (tests.size) return [...tests].sort().join(',');
+  return (output.trim().split('\n').filter((l) => l.trim()).pop() ?? '').replace(/\d+(\.\d+)?/g, '#').trim();
+}
 
 export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = []): string {
   const onMock = mockTasks.length > 0;
@@ -345,6 +359,24 @@ export function commitFixPrompt(config: Config, problem: string): string {
   ].join('\n');
 }
 
+// Sent to the builder's own resumed session when its committed merge resolution lost lines one side added (config.keepFixes).
+export function keepFixPrompt(config: Config, feedback: string): string {
+  return ['The foreman checked the merge you resolved and committed, and it lost lines one side added:', '', feedback, '',
+    'Fix only that: restore each line, or declare it in a new commit exactly as shown. Keep the merge commit; do not abort, redo or ' +
+    `rewrite it and do not start another merge or rebase. Do not weaken or delete tests. Commit your work and leave the worktree clean. Only the foreman merges into ${config.base}.`,
+  ].join('\n');
+}
+
+// Sent to the builder's own resumed session after an actionable evaluator rejection (config.reviewFixes).
+export function reviewFixPrompt(config: Config, feedback: string): string {
+  return ['An independent evaluator rejected the work you just committed. Its findings:', '', feedback, '',
+    'Fix the code so each reported behaviour is correct. Write or extend a test for each defect that fails before your fix. ' +
+    'The acceptance checks are unchanged: do not narrow them, and do not skip, delete or weaken a test. If a finding cannot be met as ' +
+    'the feature is specified, say so plainly in your final message instead of working around it. Commit all your work and leave the ' +
+    `worktree clean. The gate and a fresh evaluator run again afterwards. Only the foreman merges into ${config.base}.`,
+  ].join('\n');
+}
+
 // The read-only diagnosis of a gate failure that a resumed fix did not cure (config.diagnoser, run in plan mode).
 // The launch's on-mock scope for the fresh sessions that did not see the builder's prompt (resolver, diagnoser).
 const onMockBrief = (tasks: HumanTask[], extra: string): string => tasks.length ? 'ON MOCK: these human tasks were open when ' +
@@ -376,9 +408,7 @@ function resolverPrompt(root: string, config: Config, f: Feature, branch: string
       'replace it with a real integration here.'),
     'Rules:', '- Resolve every conflict keeping both behaviours: this feature\'s and each feature listed above. Read the code around the ' +
     'hunks, not just the markers. Where both sides add entries to one list or object, keep every entry, each with its own closing lines.',
-    '- Keep every line either side added. If one must go or change (a duplicate, a key or number both sides used), list each such ' +
-    'line in the merge commit message as `dropped: <file>: <the line as it was>`, followed by why. A check compares the lines both ' +
-    'sides added with your result and sends unlisted losses back.',
+    `- Keep every line either side added. If one must go or change (a duplicate, a key or number both sides used), ${DROP_PROTOCOL.replace('add a commit whose message has', 'make the merge commit message have')}.`,
     '- Change nothing beyond what the merge needs. Do not weaken or delete tests.',
     '- Run the quickest checks that cover the files you touched (type-check, the tests next to them) and fix what the merge broke.',
     `- Finish with git add and git commit (the merge commit). Do not abort the merge, and do not start another merge, rebase, reset or ` +
@@ -698,13 +728,13 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (why || !k!.ok) {
         log(root, id, 'resolve-failed', why ?? `keep-check: ${k!.missing.length} lines lost`);
         out(`retry ${id}: ${why ?? 'the resolution lost lines one side added'}`);
-        const fb = why ? `${why}; finish it yourself.` : keepFeedback(config.base, k!.missing);
+        const fb = why ? `${why}; finish it yourself.` : keepFeedback(config.base, k!.missing, k!.unmatched);
         await set(id, { status: 'todo', lastFeedback: `${cur.lastFeedback || ''}\n\nA resolver run tried first: ${fb}` });
         return null;
       }
       log(root, id, 'resolved', `${tip}${k!.changed.length ? `; ${k!.changed.length} lines changed` : ''}`);
       await set(id, { conflict: undefined });
-      return [pending?.others || `(conflicts were in ${rec.files.join(', ')})`, changedNote(k!.changed)].filter(Boolean).join('\n');
+      return [pending?.others || `(conflicts were in ${rec.files.join(', ')})`, changedNote(k!.changed), declaredNote(k!.declared)].filter(Boolean).join('\n');
     };
     const wtErr = await serial(() => {
       if (existsSync(wt)) return null;
@@ -774,12 +804,15 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // Reuse a parked evaluation that needs current-base validation, or an interrupted build,
     // only when the clean worktree still points to exactly that commit.
     const reevaluate = config.refreshBeforeTest ? f.sha : undefined;
-    const built = reevaluate || builtWhenStopped(readLogEvents(P.log), id);
+    const held = !reevaluate ? f.envBuild : undefined; // a build held after an environmental gate failure
+    const built = reevaluate || held || builtWhenStopped(readLogEvents(P.log), id);
     const skipBuild = !!built && git(['rev-parse', branch], wt).out === built && !git(['status', '--porcelain'], wt).out &&
       git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code !== 0;
     if (skipBuild) log(root, id, 'build-skipped', reevaluate
       ? `revalidating the previously evaluated ${built!.slice(0, 12)} against current base`
+      : built === held ? `revalidating ${built!.slice(0, 12)}, held after an environmental gate failure`
       : `the foreman stopped after it built ${built!.slice(0, 12)}`);
+    if (f.envBuild && !skipBuild) await edit(id, (x) => { delete x.envBuild; }); // the held build no longer matches: rebuild
     // The builder's Claude session in this pass: a test-gate failure resumes it (config.gateFixes), so the fix keeps its context.
     // A skipped build has no session, so its gate failure stays an ordinary failure.
     let builderSession: string | null = null, builderNotes: string | null = null;
@@ -835,9 +868,32 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // merge; whatever setup leaves behind must be committed too (the same per-pass allowance).
     if (!await ensureCommitted()) return;
     if (prepareDeferred && (!await prepare(true) || !await ensureCommitted())) return;
-    // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check).
-    const rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
-    if (rc.lost) return fail(rc.lost);
+    // A builder that finished a conflicted refresh: its resolution must keep what both sides added (keep-lines check). Lost
+    // lines resume the builder's session with the feedback, config.keepFixes times per pass, before a counted failure; the
+    // conflict record stays until a check passes, and the branch must still contain the recorded merge.
+    let rc = skipBuild ? { note: '' } as { lost?: string; note: string } : await checkResolution(id, branch, wt);
+    let keepsLeft = config.keepFixes;
+    while (rc.lost) {
+      if (!builderSession || keepsLeft <= 0) return fail(rc.lost);
+      keepsLeft--;
+      if (await stopped()) return;
+      const rec = loadState(root).features.find((x) => x.id === id)?.conflict;
+      tag = runTag(readdirSync(runDir), attempt);
+      await set(id, { status: 'building' });
+      log(root, id, 'keep-fix', 'resuming the builder to restore or declare lines its merge resolution lost');
+      out(`fix ${id}: the merge resolution lost lines; resuming the builder`);
+      const kp = keepFixPrompt(config, rc.lost);
+      recordPrompt('builder', kp, builderNotes);
+      const r = await claude('builder', kp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
+      if (await stopped()) return;
+      if (!r.ok) return fail(`builder failed: ${r.error}`);
+      if (r.sessionId) builderSession = r.sessionId;
+      if (!await ensureCommitted()) return;
+      const tip = git(['rev-parse', branch], wt).out;
+      if (rec && [rec.ours, rec.theirs].some((c) => git(['merge-base', '--is-ancestor', c, tip], wt).code !== 0))
+        return fail(`the keep-lines fix rewrote the branch: it no longer contains the merge of ${config.base} it had to keep`);
+      rc = await checkResolution(id, branch, wt);
+    }
     const inline = !!config.resolver;
     let resolved = rc.note; // after a resolution in this pass: what the evaluator must also check
     // Gate-failure recovery, bounded per pass: config.gateFixes resumed fixes, then (config.diagnoser) one read-only diagnosis
@@ -879,17 +935,36 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       log(root, id, 'diagnosis', `${d.fault}: ${d.evidence.split('\n')[0]}`);
       return d;
     };
-    const afterGateFailure = async (failure: string): Promise<'retry' | 'fail' | 'done'> => {
-      if (!builderSession) return 'fail';
-      if (fixesLeft > 0) { fixesLeft--; return resumeFix(failure, null); }
+    // 'env': the diagnosis found an environment fault (the caller reruns the same build once, then stops uncounted). The
+    // diagnosis does not need a builder session (a revalidated build has none); only a builder fix does.
+    let envDiag: Diagnosis | null = null;
+    const afterGateFailure = async (failure: string): Promise<'retry' | 'fail' | 'done' | 'env'> => {
+      if (builderSession && fixesLeft > 0) { fixesLeft--; return resumeFix(failure, null); }
       if (!config.diagnoser || diagnosed) return 'fail';
       diagnosed = true;
       const d = await diagnose(failure);
       if (d === 'stopped') return 'done';
       if (!d) return 'fail';
       diagNote = `\n\nDiagnosis (${config.diagnoser.model || 'diagnoser'}): ${d.fault}: ${d.evidence}\nSuggested fix: ${d.fix}`;
-      return d.fault === 'environment' ? 'fail' : resumeFix(failure, d);
+      if (d.fault === 'environment') { envDiag = d; return 'env'; }
+      return builderSession ? resumeFix(failure, d) : 'fail';
     };
+    // An environment fault diagnosed on this commit and failure: the gate reruns once on the same build. If that fails the
+    // same way, the pass stops without spending an attempt: the build is held (envBuild) for the next pass, after
+    // config.setupRetryDelaysSec; one more episode after the last delay is an uncounted stuck. A different commit or failure
+    // gets no environment label from an earlier diagnosis.
+    let envRerun: { sha: string; id: string } | null = null;
+    const envStop = (failure: string, sha: string) => edit(id, (x) => {
+      const delays = config.setupRetryDelaysSec, n = (x.envFailures || 0) + 1, stuck = n > delays.length;
+      const stop = { attempt: (x.attempts || 0) + 1, counted: false };
+      const fb = `${failure}${diagNote}`;
+      Object.assign(x, { status: stuck ? 'stuck' : 'todo', envFailures: n, stop, updatedAt: now(), envBuild: sha,
+        envRetryAt: stuck ? undefined : new Date(Date.now() + delays[n - 1]! * 1000).toISOString(),
+        lastFeedback: `${fb}\n\nThe gate failed the same way when rerun on the same build, and the diagnosis found an environment fault: no attempt was spent and the build is kept.` });
+      log(root, id, stuck ? 'stuck' : 'failed', `${fb}\n(environment failure ${n} of ${delays.length + 1}, after a rerun of the same build; ${stuck ? 'no more retries' : `retry after ${delays[n - 1]}s`}; no attempt spent)`,
+        undefined, { stop, cause: 'environment', sha });
+      out(`${stuck ? 'stuck' : 'env-hold'} ${id}: environment fault diagnosed; ${stuck ? 'no more retries' : `retrying the same build after ${delays[n - 1]}s`}`);
+    });
     for (;;) { // fresh validation after an inline resolution or a clean base advance
       if (await stopped()) return;
       // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
@@ -908,12 +983,27 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (await stopped()) return;
       const test = { code: t.code, tail: tail(t.out + t.err) + (t.timedOut ? `\n(timed out after ${config.timeoutMin} min)` : '') };
       if (t.code !== 0) {
-        const failure = `test command \`${config.test}\` exited ${t.code}:\n${test.tail}`, next = await afterGateFailure(failure);
+        const failure = `test command \`${config.test}\` exited ${t.code}:\n${test.tail}`;
+        if (envRerun) { // the rerun of an environment-diagnosed build failed too
+          const same = envRerun.sha === sha && envRerun.id === failureId(test.tail);
+          envRerun = null;
+          if (same) return envStop(failure, sha);
+          return fail(failure + diagNote);
+        }
+        const next = await afterGateFailure(failure);
+        if (next === 'env') {
+          envRerun = { sha, id: failureId(test.tail) };
+          log(root, id, 'env-rerun', `environment fault diagnosed (${envDiag!.evidence.split('\n')[0]!.slice(0, 200)}); rerunning the gate on the same build`);
+          out(`rerun ${id}: environment fault diagnosed; rerunning the gate on the same build`);
+          continue;
+        }
         if (next === 'retry') continue;
         if (next === 'done') return;
         return fail(failure + diagNote);
       }
 
+      envRerun = null;
+      if (loadState(root).features.find((x) => x.id === id)?.envFailures) await edit(id, (x) => { delete x.envFailures; delete x.envRetryAt; });
       await set(id, { status: 'evaluating' });
       log(root, id, 'evaluating', '');
       const range = `${config.base}...${sha}`, d = (...a: string[]) => git(['diff', '--text', '--no-ext-diff', '--no-textconv', ...a], wt).out;
@@ -965,9 +1055,9 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (!has(rec.ours) || !has(rec.theirs)) { log(root, id, 'keep-check', `skipped: ${branch} does not contain the conflicted merge`); await set(id, { conflict: undefined }); return { note: '' }; }
     const k = keepCheck(wt, rec.ours, rec.theirs, tip, rec.files);
     log(root, id, 'keep-check', k.ok ? `ok: ${rec.files.join(', ')}${k.changed.length ? `; ${k.changed.length} lines changed` : ''}` : `${k.missing.length} lines lost`);
-    if (!k.ok) return { lost: keepFeedback(config.base, k.missing), note: '' };
+    if (!k.ok) return { lost: keepFeedback(config.base, k.missing, k.unmatched), note: '' };
     await set(id, { conflict: undefined });
-    return { note: [pendingBrief.get(id)?.others || `(conflicts were in ${rec.files.join(', ')})`, changedNote(k.changed)].filter(Boolean).join('\n') };
+    return { note: [pendingBrief.get(id)?.others || `(conflicts were in ${rec.files.join(', ')})`, changedNote(k.changed), declaredNote(k.declared)].filter(Boolean).join('\n') };
   }
 
   function compound(id: string, lesson: string): void {
@@ -1039,7 +1129,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (rec) {
       const b = conflictBrief({ wt, base, branch, ours, theirs: baseSha, files: list, feature: f, features: loadState(root).features });
       pendingBrief.set(id, b);
-      fb += ` Keep every line either side added; list any line you must drop or change in a commit message as \`dropped: <file>: <line>\` (a check compares).\n\n${b.text}`;
+      fb += ` Keep every line either side added. If a line must go or change, ${DROP_PROTOCOL}.\n\n${b.text}`;
     }
     log(root, id, 'refreshed', (beforeBuild ? 'before build, ' : '') + (conflicted ? `conflicts in: ${files}` : 'conflict-free'));
     out(`refresh ${id}: merged ${base} into ${branch}${conflicted ? `, conflicts in: ${files}` : ''}`);
@@ -1189,7 +1279,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         let claims: { hot: (file: string) => boolean; paths: string[]; held: [string, string[]][] } | null = null; // this tick's, computed on first use
         const held: string[] = []; // ready, but the launch limit is reached
         for (const id of a.ready) {
-          const retryAt = Date.parse(features.find((x) => x.id === id)!.setupRetryAt ?? '');
+          const fx = features.find((x) => x.id === id)!, retryAt = Math.max(Date.parse(fx.setupRetryAt ?? '') || 0, Date.parse(fx.envRetryAt ?? '') || 0);
           if (retryAt > Date.now()) { if (limit > 0) nextRetry = Math.min(nextRetry ?? retryAt, retryAt); continue; }
           const g = groupOf(features.find((x) => x.id === id)!, config.groupBy);
           if (inflight.has(id) || (g != null && busy.has(g))) continue; // its group is in flight: try the next-best one
@@ -1224,16 +1314,16 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           // Keep the pre-transition SHA for build reuse; clear disk acceptance until a fresh auto pass.
           // The human tasks this launch may mock are captured here too, by value, and kept for the whole pass: closing or
           // editing a task mid-pass neither removes nor widens the allowance. A blocker that turned unmockable defers the launch.
-          let mockTasks: HumanTask[] = [];
+          let mockTasks: MockTask[] = [];
           const f = await mutate(root, 'features', (d) => {
             const current = d.features.find((x) => x.id === id);
             if (!current || current.status !== 'todo') return null;
-            if (readSetupState(root).hold || (current.setupRetryAt && Date.parse(current.setupRetryAt) > Date.now())) return null; // under the state lock
-            const open = loadState(root).tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id));
-            if (open.some((t) => !t.mockable)) return null;
-            mockTasks = open.map((t) => ({ ...t, steps: [...(t.steps || [])], unblocks: [...(t.unblocks || [])] }));
+            if (readSetupState(root).hold || [current.setupRetryAt, current.envRetryAt].some((t) => t && Date.parse(t) > Date.now())) return null; // under the state lock
+            const m = mockTasksFor(id, d.features, loadState(root).tasks); // direct and inherited through dependencies, by value
+            if (m.blocked) return null;
+            mockTasks = m.tasks;
             const snapshot = { ...current, acceptance: [...(current.acceptance || [])], onMock: mockTasks.length > 0 };
-            Object.assign(current, { status: 'building', onMock: mockTasks.length > 0, sha: undefined, pendingLesson: undefined, setupRetryAt: undefined,
+            Object.assign(current, { status: 'building', onMock: mockTasks.length > 0, sha: undefined, pendingLesson: undefined, setupRetryAt: undefined, envRetryAt: undefined,
               stop: undefined, pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
             return snapshot;
           });

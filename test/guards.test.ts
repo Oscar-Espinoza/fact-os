@@ -1157,13 +1157,59 @@ test('I01: after the diagnosis-driven fix also fails, the failure counts once wi
   assert.match(s.feature('a').lastFeedback!, /Diagnosis \(opus\): code/);
 });
 
-test('I01: an environment diagnosis ends the pass without another fix', (t) => {
-  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG }, scenario: { a: 'break,fix:noop' } });
+test('I01: an environment diagnosis gets no builder fix; the same failure on a same-build rerun stops without spending an attempt', (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, gateFixes: 1, diagnoser: DIAG, setupRetryDelaysSec: [] }, scenario: { a: 'break,fix:noop' } });
   const file = join(s.repo, '..', 'diagnoses.json'); (s.env as Record<string, string>).FAKE_DIAGNOSES = file;
   writeFileSync(file, JSON.stringify({ a: [{ fault: 'environment', evidence: 'the database refused connections', fix: 'restart postgres' }] }));
   assert.equal(s.cli('run').status, 2);
   assert.equal(s.calls('fix', 'a').length, 1);
-  assert.match(s.feature('a').lastFeedback!, /Diagnosis \(opus\): environment/);
+  const a = s.feature('a');
+  assert.deepEqual([a.status, a.attempts, a.stop, a.envFailures], ['stuck', 0, { attempt: 1, counted: false }, 1]);
+  assert.match(a.lastFeedback!, /Diagnosis \(opus\): environment/);
+  const ev = events(s, 'a');
+  assert.equal(ev.filter((e) => e.event === 'testing').length, 3, 'the build, the fix, and one rerun of the same build');
+  assert.ok(ev.some((e) => e.event === 'env-rerun'));
+  const stop = ev.find((e) => e.event === 'stuck')!;
+  assert.equal(stop.cause, 'environment'); assert.equal(stop.sha, a.envBuild);
+  assert.equal(a.envBuild, s.git('rev-parse', 'ship/a'), 'the tested build is held for revalidation');
+});
+
+const ENV_DIAG = (n: number) => Array.from({ length: n }, () => ({ fault: 'environment', evidence: 'a worker backlog delayed the receipt past 30s', fix: 'isolate the fixture queue' }));
+const scriptDiagnoses = (s: Setup, d: Record<string, unknown[]>) => { const file = join(s.repo, '..', 'diagnoses.json'); (s.env as Record<string, string>).FAKE_DIAGNOSES = file; writeFileSync(file, JSON.stringify(d)); };
+
+test('environment: when the same-build rerun passes, the pass goes on to evaluation and merges with no attempt spent', (t) => {
+  const gate = 'test -f ../gate-$FACTOS_FEATURE || { touch ../gate-$FACTOS_FEATURE; echo "FAIL apps/worker/src/process-webhook.db.test.ts"; exit 1; }';
+  const s = setup(t, { features: [F('a')], config: { test: gate, maxAttempts: 1, diagnoser: DIAG } });
+  scriptDiagnoses(s, { a: ENV_DIAG(1) });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').envFailures], ['merged', 0, undefined]);
+  assert.equal(s.calls('fix', 'a').length, 0); assert.equal(s.calls('build', 'a').length, 1);
+});
+
+test('environment: a rerun that fails differently is an ordinary counted failure, not another environment stop', (t) => {
+  const gate = 'if [ -f ../g-$FACTOS_FEATURE ]; then echo "FAIL packages/b.test.ts"; else touch ../g-$FACTOS_FEATURE; echo "FAIL packages/a.test.ts"; fi; exit 1';
+  const s = setup(t, { features: [F('a')], config: { test: gate, maxAttempts: 1, diagnoser: DIAG, setupRetryDelaysSec: [] } });
+  scriptDiagnoses(s, { a: ENV_DIAG(1) });
+  assert.equal(s.cli('run').status, 2);
+  const a = s.feature('a');
+  assert.deepEqual([a.status, a.attempts, a.stop, a.envFailures], ['stuck', 1, { attempt: 1, counted: true }, undefined]);
+});
+
+test('environment: the held build is revalidated after the delay without a rebuild; the next episode past the delays is an uncounted stuck the observer leaves alone', async (t) => {
+  const s = setup(t, { features: [F('a')], config: { test: GATE, maxAttempts: 1, diagnoser: DIAG, setupRetryDelaysSec: [1] }, scenario: { a: 'break' } });
+  scriptDiagnoses(s, { a: ENV_DIAG(2) });
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  const a = s.feature('a');
+  assert.deepEqual([a.status, a.attempts, a.envFailures], ['stuck', 0, 2]);
+  assert.equal(s.calls('build', 'a').length, 1, 'one build; the second pass revalidated it');
+  assert.ok(events(s, 'a').some((e) => e.event === 'build-skipped' && /held after an environmental gate failure/.test(e.detail)));
+  assert.equal(s.calls('diagnose', 'a').length, 2, 'the held pass has no builder session, and is still diagnosed');
+  const obs = await observeOnce(s.repo, { out: () => {} });
+  assert.equal(obs.diagnoses.at(-1)!.cause, 'environment');
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 0], 'not reset as an infrastructure retry');
+  assert.doesNotMatch(s.log(), /"event":"observer-retry"/);
+  assert.equal(s.cli('retry', 'a').status, 0);
+  assert.equal(s.feature('a').envFailures, undefined, 'a person\'s retry clears the environment count');
 });
 
 test('I01: a diagnosis that edits the worktree is refused and its edits are undone', (t) => {
@@ -1573,4 +1619,65 @@ test('I05 review: a good setup between failures resets the streak, so no hold op
   assert.deepEqual(['a', 'b', 'c', 'd'].map((id) => s.feature(id).status), ['stuck', 'stuck', 'merged', 'stuck']);
   const st = existsSync(join(s.repo, '.fact-os/setup-hold.json')) ? JSON.parse(readFileSync(join(s.repo, '.fact-os/setup-hold.json'), 'utf8')) : { hold: null };
   assert.equal(st.hold, null, 'two failures, a success, one failure: no three in a row');
+});
+
+// ---- keep-lines repair (keepFixes) and the declaration forms builders actually write ----
+test('keepFixes: a builder resolution that lost lines resumes the same session once, declares them, and is accepted without spending an attempt', (t) => {
+  const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
+    config: { maxAttempts: 1, maxParallel: 1, conflictBrief: true, keepFixes: 1 }, scenario: { a: 'resolve-drop' } });
+  conflict(s, 'b', { branch: 'from b\n' });
+  conflict(s, 'a', { branch: 'from a\n' });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  const [fix] = s.calls('fix', 'a');
+  assert.ok(fix); assert.match(fix.prompt, /^The foreman checked the merge you resolved/);
+  assert.match(fix.prompt, /\n {2}dropped: shared\.txt: from b$/m);
+  const ev = events(s, 'a').map((e) => e.event);
+  assert.equal(ev.filter((e) => e === 'keep-fix').length, 1);
+  assert.equal(ev.filter((e) => e === 'failed' || e === 'stuck').length, 0);
+  const [evl] = s.calls('eval', 'a').slice(-1);
+  assert.match(evl!.prompt, /dropped on purpose[\s\S]*shared\.txt: `from b`/, 'the evaluator sees the declared drop');
+});
+
+test('keepFixes 0: a lost-lines resolution is a counted failure, as before', (t) => {
+  const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
+    config: { maxAttempts: 1, maxParallel: 1, conflictBrief: true, keepFixes: 0 }, scenario: { a: 'resolve-drop' } });
+  conflict(s, 'b', { branch: 'from b\n' });
+  conflict(s, 'a', { branch: 'from a\n' });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.equal(s.calls('fix', 'a').length, 0);
+  assert.match(s.feature('a').lastFeedback!, /^The merge resolution lost lines[\s\S]*dropped: shared\.txt: from b/);
+});
+
+test('keepFixes: a resume that declares nothing counts once', (t) => {
+  const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
+    config: { maxAttempts: 1, maxParallel: 1, conflictBrief: true, keepFixes: 1 }, scenario: { a: 'resolve-drop,fix:noop' } });
+  conflict(s, 'b', { branch: 'from b\n' });
+  conflict(s, 'a', { branch: 'from a\n' });
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.equal(s.calls('fix', 'a').length, 1);
+});
+
+test('the declaration form builders wrote in the field (line in backticks, reason after it) passes the keep-lines check', (t) => {
+  const s = setup(t, { features: [F('b', { branch: 'ship/b', priority: 0 }), F('a', { branch: 'ship/a' })],
+    config: { maxAttempts: 1, maxParallel: 1, conflictBrief: true, keepFixes: 0 }, scenario: { a: 'resolve-drop-bt' } });
+  conflict(s, 'b', { branch: 'from b\n' });
+  conflict(s, 'a', { branch: 'from a\n' });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  assert.ok(events(s, 'a').some((e) => e.event === 'keep-check' && /^ok/.test(e.detail)));
+});
+
+test('inherited mock allowance: a feature whose dependency is built on a named mock gets that task, with provenance, in every role', (t) => {
+  const s = setup(t, { features: [F('a', { status: 'merged', onMock: true }), F('b', { deps: ['a'] })], config: { maxAttempts: 1 } });
+  humanTasks(s, [{ ...mockTask('C02', { unblocks: ['a'], title: 'Shipping partner account' }) }]);
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(events(s, 'b').find((e) => e.event === 'launch')!.detail, 'onMock');
+  for (const mode of ['build', 'eval'] as const) {
+    const [c] = s.calls(mode, 'b');
+    assert.match(c!.prompt, /C02: Shipping partner account \(inherited: open for dependency a, which this feature builds on\)/, mode);
+  }
+  assert.equal(s.feature('b').onMock, true);
 });

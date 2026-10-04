@@ -60,6 +60,17 @@ if (mode === 'resolve') {
   }
   if (has('budget')) extra = { subtype: 'error_max_budget_usd', is_error: true, result: '' };
   else if (has('noop')) {} // no changes, no commit
+  else if ((has('resolve-drop') || has('resolve-drop-bt')) && existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
+    // finish the merge keeping only this branch's side (loses base's lines); "resolve-drop-bt" also declares them the way
+    // a builder did in the field: the line in backticks with the reason after it on the same line
+    const dropped: string[] = [];
+    for (const f of conflicted()) {
+      const theirs = git('show', `:3:${f}`);
+      writeFileSync(f, git('show', `:2:${f}`) + '\n'); git('add', f);
+      if (has('resolve-drop-bt')) for (const l of theirs.split('\n').filter((x) => x.trim())) dropped.push(`dropped: ${f}: \`${l.trim()}\` - moved elsewhere`);
+    }
+    git('commit', '-q', '-m', ['merge main, keeping this side', ...dropped].join('\n'));
+  }
   else if (has('resolve') && existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
     // finish the merge the foreman started: keep both sides of each conflicted file, commit the merge and nothing else
     for (const f of git('diff', '--name-only', '--diff-filter=U').split('\n').filter(Boolean)) {
@@ -108,7 +119,12 @@ if (mode === 'resolve') {
   // uncommitted; "gatedirty": every gate fix leaves new work uncommitted.
   const fixes = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'fix' && e.id === id; }).length : 0;
   const commitOnly = prompt.startsWith('The foreman found that your work is not committed');
-  if (!has('noop') && !(has('noop1') && fixes === 0)) {
+  const keepFix = prompt.startsWith('The foreman checked the merge you resolved'), reviewFix = prompt.startsWith('An independent evaluator rejected');
+  if (keepFix) { // declare every lost line exactly as the feedback shows it
+    const recs = [...prompt.matchAll(/^ {2}(dropped: .+)$/gm)].map((m) => m[1]!);
+    if (!has('noop') && recs.length) git('commit', '-q', '--allow-empty', '-m', ['declare the lines the merge dropped', ...recs.flatMap((r) => [r, 'Reason: moved'])].join('\n'));
+  } else if (reviewFix) { if (!has('noop')) commit(`${id}-review-fix.txt`, 'fixed what the evaluator found\n'); }
+  else if (!has('noop') && !(has('noop1') && fixes === 0)) {
     if (existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
       for (const f of conflicted()) { writeFileSync(f, git('show', `:2:${f}`) + '\n' + git('show', `:3:${f}`) + '\n'); git('add', f); }
       git('add', '-A'); git('commit', '-q', '--no-edit');
