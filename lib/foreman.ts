@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, NAME } from './state.ts';
+import { paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
 import { analyze, validate } from './ready.ts';
 import { DEFAULT_CLAIMS, changedNote, claimBlock, conflictBrief, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole, tierApplies } from './profiles.ts';
@@ -478,7 +478,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
   const P = paths(root);
   const out = opts.out || ((s: string) => console.log(s));
   const children = new Set<ChildProcess>(), inflight = new Map<string, Promise<unknown>>();
-  let stopping = false, launched = 0, onceDone = false, chain: Promise<unknown> = Promise.resolve(), lastWaiting = '', lastManualWaiting = '', lastOrphans = '', lastParked = '';
+  let stopping = false, lastSetupHold = '', launched = 0, onceDone = false, chain: Promise<unknown> = Promise.resolve(), lastWaiting = '', lastManualWaiting = '', lastOrphans = '', lastParked = '';
   // control.json: the control applied last tick (null before the first read), the last valid one read, the invalid content
   // last reported, and the ready features last logged as held by its limit.
   let lastControl: Control | null = null, lastGood: Control | null = null, lastBad: string | null = null, lastHeld = '';
@@ -570,6 +570,33 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     for (const id of r.merged) log(root, id, 'recovered', `already merged into ${config.base}`);
     return r.alive;
   });
+
+  const setupFailed = async (id: string, msg: string): Promise<void> => {
+    const delays = config.setupRetryDelaysSec;
+    await edit(id, (x) => {
+      const n = (x.setupFailures || 0) + 1, stuck = n > delays.length, stop = { attempt: (x.attempts || 0) + 1, counted: false };
+      Object.assign(x, { status: stuck ? 'stuck' : 'todo', setupFailures: n, stop, updatedAt: now(),
+        setupRetryAt: stuck ? undefined : new Date(Date.now() + delays[n - 1]! * 1000).toISOString(), ...(stuck ? { lastFeedback: msg } : {}) });
+      log(root, id, stuck ? 'stuck' : 'failed', `${msg}\n(setup failure ${n} of ${delays.length + 1}; ${stuck ? 'no more retries' : `retry after ${delays[n - 1]}s`}; no attempt spent)`, undefined, { stop });
+      out(`${stuck ? 'stuck' : 'setup failed'} ${id}: ${msg.split('\n')[0]}${stuck ? '' : ` (retry after ${delays[n - 1]}s)`}`);
+    });
+    const opened = await updateSetupState(root, (st) => {
+      const t = Date.now();
+      st.failures = [...st.failures.filter((x) => t - Date.parse(x.ts) < SETUP_HOLD_WINDOW_MS), { feature: id, ts: new Date(t).toISOString() }];
+      const recent = st.failures.slice(-SETUP_HOLD_AFTER), who = [...new Set(recent.map((x) => x.feature))];
+      if (st.hold || recent.length < SETUP_HOLD_AFTER || who.length < 2) return null;
+      st.hold = { since: new Date(t).toISOString(), reason: msg.split('\n').slice(0, 3).join(' ').slice(0, 300), features: who };
+      return st.hold;
+    });
+    if (opened) {
+      log(root, null, 'setup-hold', `${SETUP_HOLD_AFTER} setups failed in a row (${opened.features.join(', ')}); no new launches until \`${NAME} setup-resume\`: ${opened.reason}`);
+      out(`ALERT: setup keeps failing (${opened.features.join(', ')}); launching nothing more until \`${NAME} setup-resume\``);
+    }
+  };
+  const setupSucceeded = async (id: string): Promise<void> => {
+    if (loadState(root).features.find((x) => x.id === id)?.setupFailures) await edit(id, (x) => { delete x.setupFailures; delete x.setupRetryAt; });
+    if (readSetupState(root).failures.length) await updateSetupState(root, (st) => { if (!st.hold) st.failures = []; });
+  };
 
   type Fail = (fb: string) => Promise<void>;
   const failer = (id: string): Fail => (fb) => edit(id, (x) => { applyFailure(x, fb, config.maxAttempts); log(root, id, x.status === 'stuck' ? 'stuck' : 'failed', fb, undefined, { stop: x.stop }); out(`${x.status === 'stuck' ? 'stuck' : 'retry'} ${id}: ${fb.split('\n')[0]}`); });
@@ -731,11 +758,15 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       }
     }
     // Optional per-worktree setup (dependencies, task databases), run before every build; must be idempotent.
+    // A failed setup is the environment's fault more often than the builder's: it spends no attempt. The feature is retried
+    // after config.setupRetryDelaysSec, then goes stuck as an uncounted stop; repeated failures across features open a launch
+    // hold (setupFailed). A good setup clears the feature's count and, while no hold is open, the cross-feature streak.
     const prepare = async (): Promise<boolean> => {
       if (!config.prepare) return true;
       const pr = await exec('sh', ['-c', `exec 2>&1\n${config.prepare}`], { cwd: wt, env, children, timeoutMin: config.timeoutMin, onSpawn });
       if (await stopped()) return false;
-      if (pr.code !== 0) { await fail(`prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`); return false; }
+      if (pr.code !== 0) { await setupFailed(id, `prepare \`${config.prepare}\` exited ${pr.code}:\n${tail(pr.out + pr.err)}`); return false; }
+      await setupSucceeded(id);
       return true;
     };
     if (!prepareDeferred && !await prepare()) return;
@@ -1146,13 +1177,20 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (!manualWaiting.length) lastManualWaiting = '';
       const overBudget = config.budgetUsdTotal != null && spent >= config.budgetUsdTotal; // null = unlimited
       let claimDeferred = false; // a ready feature the locked claim refused this tick (see the idle/exit decision)
+      const setupHold = readSetupState(root).hold;
+      if (setupHold && setupHold.since !== lastSetupHold) { lastSetupHold = setupHold.since; out(`setup hold since ${setupHold.since}: no new launches until \`${NAME} setup-resume\``); }
+      if (!setupHold) lastSetupHold = '';
+      // The earliest delayed setup retry among ready features: the foreman wakes for it instead of exiting or sleeping past it.
+      let nextRetry: number | null = null;
       const capped = () => opts.maxFeatures != null && launched >= opts.maxFeatures;
-      if (!stopping && !overBudget && !onceDone && !tampered()) {
+      if (!stopping && !overBudget && !onceDone && !setupHold && !tampered()) {
         const running = features.filter((f) => IN_FLIGHT.includes(f.status) || inflight.has(f.id));
         const busy = new Set(running.map((f) => groupOf(f, config.groupBy)));
         let claims: { hot: (file: string) => boolean; paths: string[]; held: [string, string[]][] } | null = null; // this tick's, computed on first use
         const held: string[] = []; // ready, but the launch limit is reached
         for (const id of a.ready) {
+          const retryAt = Date.parse(features.find((x) => x.id === id)!.setupRetryAt ?? '');
+          if (retryAt > Date.now()) { nextRetry = Math.min(nextRetry ?? retryAt, retryAt); continue; }
           const g = groupOf(features.find((x) => x.id === id)!, config.groupBy);
           if (inflight.has(id) || (g != null && busy.has(g))) continue; // its group is in flight: try the next-best one
           // The limit counts this foreman's own launches in flight; a feature that went back to todo mid-pipeline is a new
@@ -1190,11 +1228,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           const f = await mutate(root, 'features', (d) => {
             const current = d.features.find((x) => x.id === id);
             if (!current || current.status !== 'todo') return null;
+            if (readSetupState(root).hold || (current.setupRetryAt && Date.parse(current.setupRetryAt) > Date.now())) return null; // under the state lock
             const open = loadState(root).tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id));
             if (open.some((t) => !t.mockable)) return null;
             mockTasks = open.map((t) => ({ ...t, steps: [...(t.steps || [])], unblocks: [...(t.unblocks || [])] }));
             const snapshot = { ...current, acceptance: [...(current.acceptance || [])], onMock: mockTasks.length > 0 };
-            Object.assign(current, { status: 'building', onMock: mockTasks.length > 0, sha: undefined, pendingLesson: undefined,
+            Object.assign(current, { status: 'building', onMock: mockTasks.length > 0, sha: undefined, pendingLesson: undefined, setupRetryAt: undefined,
               stop: undefined, pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
             return snapshot;
           });
@@ -1229,7 +1268,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         const files = { features: P.features, human: P.human }, done = () => stopping || woke;
         await Promise.race([...inflight.values(), ...(free ? [waitForChange(files, stamp(files), done)] : []),
           ...(!stopping && !onceDone ? [waitForChange({ control: P.control }, ctlSeen, done)] : []),
-          ...(orphans.length && !free ? [sleep(Number(envVar('POLL_MS')) || 5000)] : [])]);
+          ...(orphans.length && !free ? [sleep(Number(envVar('POLL_MS')) || 5000)] : []),
+          ...(nextRetry != null && free ? [sleep(Math.max(0, nextRetry - Date.now()) + 50)] : [])]);
         woke = true;
         continue;
       }
@@ -1250,6 +1290,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       // A launch the locked claim refused (its readiness changed since this tick's load, e.g. a human task turned unmockable):
       // decide idling or exiting on fresh state, not this tick's analysis.
       if (claimDeferred) continue;
+      // A setup hold: --watch polls for `setup-resume` (it writes no watched file); a run without --watch stops here.
+      if (setupHold) { if (!opts.watch) break; await sleep(Number(envVar('POLL_MS')) || 5000); continue; }
+      // A delayed setup retry is pending work in either mode: wait for it (bounded by config.setupRetryDelaysSec).
+      if (nextRetry != null) { await waitForChange(P, seen, () => stopping, nextRetry); continue; }
       if (!(opts.watch && (a.waiting.length || manualWaiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
       if (manualWaiting.length && manualWaiting.join() !== lastManualWaiting) {
         lastManualWaiting = manualWaiting.join();
@@ -1278,7 +1322,7 @@ export const stamp = (P: Watched): string => [P.features, P.human, P.control].ma
 
 // Sleep until the given state files (features.json, human.json, control.json) differ from `since` (a stamp taken before the
 // caller read them).
-export async function waitForChange(P: Watched, since: string, isStopping: () => boolean): Promise<void> {
+export async function waitForChange(P: Watched, since: string, isStopping: () => boolean, until: number | null = null): Promise<void> {
   const ms = Number(envVar('POLL_MS')) || 5000;
-  while (!isStopping() && stamp(P) === since) await sleep(ms);
+  while (!isStopping() && stamp(P) === since && (until == null || Date.now() < until)) await sleep(until == null ? ms : Math.max(1, Math.min(ms, until - Date.now())));
 }

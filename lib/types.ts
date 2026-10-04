@@ -52,6 +52,7 @@ export interface Config {
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass
   gateFixes: number;                  // safe integer >= 0: resumed builder fixes after a test-gate failure, per pass (0 = none)
   commitFixes: number;                // safe integer >= 0: resumes per pass to commit work the builder left uncommitted (0 = none)
+  setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
   codex: { fallback: RoleConfig; cooldownMin: number }; // a Codex run that cannot answer falls back to this Claude role config
   observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`
@@ -108,6 +109,8 @@ export interface Feature {
   onMock?: boolean;
   attempts: number;
   stop?: AttemptStop;                 // latest counted failure or uncounted stop; cleared when work resumes
+  setupFailures?: number;             // consecutive failed setups (prepare) of this feature; never attempts; cleared by a good setup or retry
+  setupRetryAt?: string;              // ISO: no launch before this time (a delayed setup retry)
   refreshes?: number;
   lastFeedback?: string;
   costUsd?: number;

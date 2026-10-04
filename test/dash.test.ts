@@ -468,3 +468,22 @@ test('profile route: sets the model profile (known name, "opus" or null), refuse
     assert.equal(c.profile, null);
   } finally { rmSync(file, { force: true }); }
 });
+
+test('I05: the state API shows a setup hold and POST /api/setup/resume releases it with pending setup delays', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'fact-os-setup-hold-')), dir = join(root, '.fact-os');
+  mkdirSync(dir, { recursive: true }); mkdirSync(join(root, '.git'));
+  writeFileSync(join(dir, 'config.json'), '{}');
+  writeFileSync(join(dir, 'features.json'), JSON.stringify({ features: [{ id: 'a', title: 'A', description: '', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
+    status: 'todo', attempts: 0, updatedAt: new Date().toISOString(), setupFailures: 2, setupRetryAt: new Date(Date.now() + 60e3).toISOString() }] }));
+  writeFileSync(join(dir, 'human.json'), '{"tasks":[]}');
+  writeFileSync(join(dir, 'setup-hold.json'), JSON.stringify({ failures: [], hold: { since: new Date().toISOString(), reason: 'prepare: dev Postgres is down', features: ['a', 'b'] } }));
+  const dash = await startDash({ root, port: 0 });
+  t.after(() => { dash.server.close(); rmSync(root, { recursive: true, force: true }); });
+  const state = await (await fetch(dash.url + '/api/state')).json() as { projects: { setupHold: { reason: string } | null }[] };
+  assert.match(state.projects[0]!.setupHold!.reason, /Postgres is down/);
+  const r = await fetch(dash.url + '/api/setup/resume', { method: 'POST', body: JSON.stringify({ project: root }) });
+  assert.equal(r.status, 200);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'setup-hold.json'), 'utf8')).hold, null);
+  const f = JSON.parse(readFileSync(join(dir, 'features.json'), 'utf8')).features[0];
+  assert.deepEqual([f.setupFailures, f.setupRetryAt], [undefined, undefined]);
+});

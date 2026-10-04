@@ -15,7 +15,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I02 | done | Codex for the read-only roles (evaluator, diagnoser), Claude fallback and cooldown |
 | I03 | done | Feature tiers set at intake, mapped to role models by the active profile |
 | I04 | done | Resume the builder once to commit work it left uncommitted (`commitFixes`) |
-| I05 | next | Setup failures: bounded delayed retries without spending attempts, then a launch hold |
+| I05 | done | Setup failures spend no attempts: delayed retries, then a sticky launch hold until setup-resume |
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
@@ -149,3 +149,13 @@ internal routes, jobs, transitions and consumers must still reach the boundary, 
 what the real integration needs goes into the verdict's notes. Re-validating a merged on-mock feature when its task closes
 is a separate follow-up (a task can close by confirming that no API exists). F17-10's own `in_production` cancellation
 defect stays a real blocking finding.
+
+## I05 — setup failures spend no attempts
+
+The largest failure bucket: 44 identical "dev Postgres is not accepting connections" failures within seconds on
+2026-10-03, each spending an attempt; 59 "dev:setup failed" on 2026-09-30. Agreed with the Codex partner: only a failed
+`prepare` counts as setup (worktree, dependency, commit, keep-lines, provider and gate failures keep their rules); it
+spends no attempt, retries after `setupRetryDelaysSec`, then stops as an uncounted stop; three failures in a row across
+at least two features open a sticky launch hold, persisted across restarts and separate from a person's pause, released
+explicitly once the environment is fixed. The foreman is the only owner of these retries; the observer's retry policy is
+unchanged (it never retries setup). Known limit: a deferred prepare that fails after a build loses that build.

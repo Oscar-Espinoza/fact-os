@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { readdirSync, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, withCheckoutLock, effectiveLimit, validLanes, MAX_LANES } from './state.ts';
+import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, withCheckoutLock, effectiveLimit, validLanes, MAX_LANES, readSetupState, releaseSetupHold, type SetupState } from './state.ts';
 import { git, parseClaudeOutput, parseVerdict, feedbackFromVerdict } from './foreman.ts';
 import { conflictFiles } from './merge.ts';
 import { analyze, taskReach } from './ready.ts';
@@ -30,6 +30,7 @@ export interface ProjectState {
   observer: ObserverSummary | null;    // null when the observer has never run here
   control?: ControlState;              // control.json with what it means now (absent when the state files are unreadable)
   inFlight?: number;                   // features building, testing or evaluating
+  setupHold?: SetupState['hold'];          // the foreman's launch hold after repeated setup failures (null = none)
 }
 // A person's pause / lanes (control.json): effective = how many may be in flight now (0 while paused); configMax = config.maxParallel.
 // An invalid file is reported as `invalid` (the reason) with effective null: the foreman then keeps its last good control, or
@@ -271,7 +272,7 @@ function projectState(dir: string): ProjectState {
       config: { base: config.base, maxParallel: config.maxParallel, maxAttempts: config.maxAttempts, groupBy: config.groupBy,
         builder: config.builder, evaluator: config.evaluator },
       stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir), observer: observer(dir, features, tasks, all),
-      control: controlState(dir, config), inFlight: features.filter((f) => IN_FLIGHT.includes(f.status)).length };
+      control: controlState(dir, config), inFlight: features.filter((f) => IN_FLIGHT.includes(f.status)).length, setupHold: readSetupState(dir).hold };
   } catch (e) {
     return { ...base, error: errMsg(e) };
   }
@@ -354,7 +355,7 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
       }
       const action = ACTIONS.find((a) => req.url === `/api/feature/${a}`);
       const ctl = CONTROL.find((c) => req.url === `/api/control/${c}`);
-      if (req.method !== 'POST' || (!action && !ctl && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged'].includes(req.url!))) return send(404, { error: 'not found' });
+      if (req.method !== 'POST' || (!action && !ctl && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged', '/api/setup/resume'].includes(req.url!))) return send(404, { error: 'not found' });
       let body = '';
       for await (const c of req) { body += c; if (body.length > 10000) return send(413, { error: 'body too large' }); }
       const parsed = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown; maxParallel?: unknown; profile?: unknown };
@@ -370,6 +371,10 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
         await writeControl(project, ctl === 'lanes' ? { maxParallel: parsed.maxParallel as number | null } : ctl === 'profile' ? { profile: parsed.profile as string | null }
           : { paused: ctl === 'pause' }, 'dashboard', config);
         return send(200, { ok: true, control: controlState(project, config) });
+      }
+      if (req.url === '/api/setup/resume') { // the environment is fixed: release the foreman's setup hold (fact-os setup-resume)
+        const was = await releaseSetupHold(project, 'a person (dashboard)');
+        return send(200, { ok: true, released: was });
       }
       if (typeof id !== 'string') return send(400, { error: 'id must be a string' });
       if (action) {

@@ -230,3 +230,13 @@ test('I02: only the evaluator and the diagnoser can use Codex; codex settings ke
     assert.throws(() => loadConfig(s.root), /config\.codex/, JSON.stringify(codex));
   }
 });
+
+test('I05: setupRetryDelaysSec is a short list of positive delays', (t) => {
+  const s = setup(t);
+  s.set({});
+  assert.deepEqual(loadConfig(s.root).setupRetryDelaysSec, [30, 120]);
+  for (const value of [[0], [-1], ['30'], 'x', Array(11).fill(1), [86401]]) {
+    s.set({ setupRetryDelaysSec: value }); assert.throws(() => loadConfig(s.root), /config\.setupRetryDelaysSec/, JSON.stringify(value));
+  }
+  s.set({ setupRetryDelaysSec: [] }); assert.deepEqual(loadConfig(s.root).setupRetryDelaysSec, [], 'no retries: the first failed setup stops the feature');
+});

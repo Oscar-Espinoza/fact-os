@@ -950,7 +950,7 @@ for (const mode of ['union', 'missing'] as const) test(`pending dependency merge
 
 for (const mode of ['fails', 'dirty', 'drops ancestry']) test(`deferred dependency preparation ${mode} safely before gates`, (t) => {
   const prepare = mode === 'fails' ? 'exit 7' : mode === 'dirty' ? 'echo changed > shared.txt' : 'git reset --hard HEAD^1';
-  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1, prepare, refreshBeforeTest: false }, scenario: { b: 'resolve' } });
+  const s = setup(t, { features: [], config: { merge: 'manual', maxAttempts: 1, prepare, refreshBeforeTest: false, setupRetryDelaysSec: [] }, scenario: { b: 'resolve' } });
   staleDependency(s, { conflict: true }); const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.equal(s.feature('b').status, 'stuck'); assert.equal(s.calls('build', 'b').length, 1);
   assert.equal(s.calls('eval', 'b').length, 0); assert.doesNotMatch(s.log(), /"event":"testing"/);
@@ -1052,8 +1052,8 @@ test('a failing mergeHook aborts the merge: main unchanged, feature back to todo
   assert.equal(s.git('status', '--porcelain', '--untracked-files=no'), '');
 });
 
-test('a failing prepare fails the attempt before the builder runs', (t) => {
-  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+test('a failing prepare stops the feature before the builder runs, without spending an attempt (no setup retries)', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, setupRetryDelaysSec: [] } });
   const cfg = JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8'));
   cfg.prepare = 'echo no database; exit 3';
   writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify(cfg));
@@ -1061,6 +1061,7 @@ test('a failing prepare fails the attempt before the builder runs', (t) => {
   assert.equal(s.feature('a').status, 'stuck');
   assert.match(s.feature('a').lastFeedback!, /prepare .* exited 3[\s\S]*no database/);
   assert.equal(s.calls('build', 'a').length, 0);
+  assert.deepEqual([s.feature('a').attempts, s.feature('a').stop], [0, { attempt: 1, counted: false }], 'I05: setup is not an attempt');
 });
 
 test('refreshBeforeTest: base moves during the build → the verified base is merged in before the test, which sees it; that sha is merged', (t) => {
@@ -1464,4 +1465,59 @@ for (const fallback of [false, true]) test(`I06 review: the Codex${fallback ? ' 
   const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
   const cp = s.calls('codex', 'a')[0]!.prompt, ep = s.calls('eval', 'a')[0]!.prompt;
   assert.equal(cp, ep); assert.match(ep, /H-API: API H-API/); assert.doesNotMatch(ep, /H-OTHER|H-DONE/);
+});
+
+// ---- I05: setup failures spend no attempts; bounded retries, then a launch hold (docs/improvements.md) ----
+const setupGate = (s: Setup) => {
+  const base = join(s.repo, '..'), down = join(base, 'db-down'), runs = join(base, 'prepare-runs');
+  return { down, runs, prepare: `echo "$FACTOS_FEATURE" >> '${runs}'; if [ -f '${down}' ]; then echo "prepare: dev Postgres is not accepting connections"; exit 3; fi`,
+    count: (id?: string) => (existsSync(runs) ? readFileSync(runs, 'utf8').split('\n').filter((l) => l && (!id || l === id)).length : 0) };
+};
+
+test('I05: a feature whose setup keeps failing retries with delays, then goes stuck without spending an attempt', (t) => {
+  const s = setup(t, { features: [F('a')], config: { setupRetryDelaysSec: [0.05, 0.05] } });
+  const g = setupGate(s); writeFileSync(g.down, ''); s.cli('init');
+  writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8')), prepare: g.prepare }));
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').stop], ['stuck', 0, { attempt: 1, counted: false }]);
+  assert.equal(g.count('a'), 3, 'the first try and two delayed retries');
+  assert.equal(s.calls('build', 'a').length, 0);
+  assert.match(s.feature('a').lastFeedback!, /not accepting connections/);
+  assert.equal(events(s, 'a').filter((e) => e.event === 'failed' && /setup failure \d of 3; retry after/.test(e.detail)).length, 2);
+});
+
+test('I05: a transient setup failure is retried and the feature then builds normally', (t) => {
+  const s = setup(t, { features: [F('a')], config: { setupRetryDelaysSec: [0.05, 0.05] } });
+  const base = join(s.repo, '..'), flag = join(base, 'fail-once');
+  writeFileSync(flag, '');
+  writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8')),
+    prepare: `if [ -f '${flag}' ]; then rm '${flag}'; echo "dev:setup failed"; exit 1; fi` }));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').setupFailures], ['merged', 0, undefined]);
+});
+
+test('I05: repeated setup failures across features open a sticky launch hold that survives a restart until setup-resume', (t) => {
+  const s = setup(t, { features: [F('a'), F('b'), F('c'), F('d', { priority: 5 })], config: { maxParallel: 3, setupRetryDelaysSec: [30, 120] } });
+  const g = setupGate(s); writeFileSync(g.down, '');
+  writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8')), prepare: g.prepare }));
+  let r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  const before = g.count();
+  assert.ok(before >= 3 && before <= 4, `three failures open the hold; at most one launch already under way overshoots (${before})`);
+  const hold = JSON.parse(readFileSync(join(s.repo, '.fact-os/setup-hold.json'), 'utf8')).hold;
+  assert.ok(hold && hold.features.length >= 2, JSON.stringify(hold));
+  assert.equal(s.log().split('\n').filter((l) => l.includes('"event":"setup-hold"')).length, 1);
+  for (const id of ['a', 'b', 'c', 'd']) assert.deepEqual([s.feature(id).status, s.feature(id).attempts], ['todo', 0]);
+  r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(g.count(), before, 'the hold survives a restart: nothing launches');
+  rmSync(g.down); assert.equal(s.cli('setup-resume').status, 0);
+  assert.equal(JSON.parse(readFileSync(join(s.repo, '.fact-os/setup-hold.json'), 'utf8')).hold, null);
+  writeFileSync(join(s.repo, '.fact-os/config.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(s.repo, '.fact-os/config.json'), 'utf8')), setupRetryDelaysSec: [0.05, 0.05] }));
+  r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const id of ['a', 'b', 'c', 'd']) assert.equal(s.feature(id).status, 'merged');
+});
+
+test('I05: a person retrying a setup-stuck feature clears its setup count', (t) => {
+  const s = setup(t, { features: [F('a', { status: 'stuck', attempts: 0, setupFailures: 3, stop: { attempt: 1, counted: false } })] });
+  assert.equal(s.cli('retry', 'a').status, 0);
+  assert.deepEqual([s.feature('a').status, s.feature('a').setupFailures], ['todo', undefined]);
 });

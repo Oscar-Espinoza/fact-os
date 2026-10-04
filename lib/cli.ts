@@ -4,7 +4,7 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME } from './state.ts';
+import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
 import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
@@ -18,6 +18,7 @@ const USAGE = `usage: ${NAME} <command>
   done <human-task-id>            mark a human task done
   pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
+  setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
   lanes <n|default>               how many features may be in flight (0-${MAX_LANES}); default = config.maxParallel
   profile [<name|default>]        model profile for new launches (opus = each role's config; fable-sonnet; config.profiles);
                                   without a name: the active profile and its role → model/effort table
@@ -58,7 +59,7 @@ function init(test: string | undefined): void {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json'].map((f) => `${paths(root).name}/${f}`)
+  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json', 'setup-hold.json'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');
@@ -231,6 +232,11 @@ try {
       break;
     }
     case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
+    case 'setup-resume': {
+      const was = await releaseSetupHold(needRoot(), 'a person (cli)');
+      console.log(was ? `setup hold released (open since ${was.since}: ${was.reason})` : 'no setup hold was open');
+      break;
+    }
     case 'doctor': process.exitCode = doctor(); break;
     case 'hook': await hook(); process.exit(0); break;
     case 'run': {

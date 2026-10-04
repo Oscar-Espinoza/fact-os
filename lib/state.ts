@@ -12,7 +12,7 @@ export const DEFAULT_CONFIG: Config = {
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
-  gateFixes: 0, commitFixes: 0, diagnoser: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
+  gateFixes: 0, commitFixes: 0, setupRetryDelaysSec: [30, 120], diagnoser: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
@@ -204,6 +204,8 @@ function configProblems(raw: unknown): string[] {
   for (const key of ['postMerge', 'prepare', 'mergeHook', 'groupBy', 'restoreFrom'])
     field(c, 'config', key, (x) => x === null || typeof x === 'string', 'a string or null');
   for (const key of ['briefFiles', 'evaluatorDiffExclude']) field(c, 'config', key, strings, 'an array of non-empty strings');
+  field(c, 'config', 'setupRetryDelaysSec', (x) => Array.isArray(x) && x.length <= 10 && x.every((d) => nonnegative(d) && (d as number) > 0 && (d as number) <= 86400),
+    'an array of at most 10 positive delays in seconds (each <= 86400)');
   for (const key of ['refreshBeforeTest', 'conflictBrief']) field(c, 'config', key, (x) => typeof x === 'boolean', 'a boolean');
   field(c, 'config', 'merge', (x) => x === 'auto' || x === 'manual', '"auto" or "manual"');
   for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes', 'commitFixes']) field(c, 'config', key, uint, 'a safe integer >= 0');
@@ -264,6 +266,32 @@ export function loadConfig(root: string): Config {
   c.worktreesDir = c.worktreesDir.replace('<repo>', basename(root));
   c.codex = { ...DEFAULT_CONFIG.codex, ...c.codex }; // a partial codex block keeps the default fallback or cooldown
   return c;
+}
+
+// ---- setup failures (prepare): the foreman's launch hold ----
+// failures: recent failed setups across features, cleared by a good setup while no hold is open. hold: open after
+// SETUP_HOLD_AFTER consecutive failures across at least two features within SETUP_HOLD_WINDOW_MS; sticky until
+// `fact-os setup-resume` (or the dashboard) releases it. Written under the state lock.
+export interface SetupState { failures: { feature: string; ts: string }[]; hold: { since: string; reason: string; features: string[] } | null }
+export const SETUP_HOLD_AFTER = 3, SETUP_HOLD_WINDOW_MS = 10 * 60e3;
+export const setupStateFile = (root: string): string => join(paths(root).dir, 'setup-hold.json');
+// Unlocked read: callers either hold the state lock already (the launch claim) or only display it.
+export function readSetupState(root: string): SetupState {
+  let s: Partial<SetupState> | null = null;
+  try { s = readJson(setupStateFile(root), null) as Partial<SetupState> | null; } catch { s = null; }
+  return { failures: Array.isArray(s?.failures) ? s.failures : [], hold: s?.hold && typeof s.hold === 'object' ? s.hold : null };
+}
+export function updateSetupState<R>(root: string, fn: (s: SetupState) => R): Promise<R> {
+  return withLock(root, () => { const s = readSetupState(root), r = fn(s); writeJsonAtomic(setupStateFile(root), s); return r; });
+}
+
+// A person says the environment is fixed: release the hold, forget the streak, and clear the pending setup delays and
+// counts of features still waiting to retry (stuck ones keep theirs until a person retries them). Returns the released hold.
+export async function releaseSetupHold(root: string, by: string): Promise<SetupState['hold']> {
+  const was = await updateSetupState(root, (s) => { const h = s.hold; s.hold = null; s.failures = []; return h; });
+  await mutate(root, 'features', (d) => { for (const f of d.features) if (f.status === 'todo' && (f.setupFailures || f.setupRetryAt)) { delete f.setupFailures; delete f.setupRetryAt; } });
+  log(root, null, 'setup-resumed', was ? `by ${by}; the hold since ${was.since} (${was.reason}) is released` : `by ${by}; no hold was open`);
+  return was;
 }
 
 // Read mutable feature/human state independently of the configuration snapshot a supervisor owns.

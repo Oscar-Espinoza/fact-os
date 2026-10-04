@@ -52,6 +52,7 @@ and one dashboard across projects.
   "lessonsFile": "CLAUDE.md",   // where compounded lessons are appended
   "postMerge": null,            // optional shell command run in the main checkout after a merge
   "prepare": null,              // optional shell command run in the feature worktree before every build (idempotent)
+  "setupRetryDelaysSec": [30, 120], // a failed prepare spends no attempt: retry after each delay, then stuck (uncounted stop)
   "refreshBeforeTest": false,   // true: merge the recorded base sha into the feature branch before its test (see Test)
   "maxRefreshes": 5,            // base refreshes after merge conflicts before a feature is stuck
   "mergeHook": null,            // optional shell command run in the main checkout on the staged merge, before its commit (see Pass)
@@ -289,6 +290,17 @@ Each tick:
    list the held paths themselves. Claims are a launch-time snapshot of known paths; new edits or
    metadata changes after the snapshot are not a guarantee of mutual exclusion. `claims: null` is off.
 3. Per feature (concurrently):
+   - **Setup failures.** A failed `prepare` (before the build, or deferred after a conflicted dependency import) is not
+     counted as an attempt: the feature returns to `todo` with `setupFailures` + 1 and `setupRetryAt` (now + the next
+     `setupRetryDelaysSec` delay), and is not launched before then; one more failure after the last delay makes it `stuck`
+     with an uncounted stop and the setup output as feedback. The events stay `failed`/`stuck` with the prepare output
+     first and "(setup failure n of m; …; no attempt spent)" last, so observer statistics keep counting them as setup.
+     A good setup clears the feature's count. Across features, `.fact-os/setup-hold.json` records recent failures: 3 in a
+     row (no good setup between) across at least 2 features within 10 minutes open a sticky launch hold (`setup-hold`
+     alert, once): no new launch while it is open, in-flight work and parked merges continue, `run` without `--watch`
+     stops, `--watch` polls. It survives restarts. `fact-os setup-resume` or the dashboard's Resume setup releases it
+     (`setup-resumed`) and clears pending setup delays and counts of `todo` features; a person's `retry` clears a stuck
+     feature's count. A deferred prepare that fails after a build loses that build (the next launch rebuilds).
    - **Dependency import.** After branch creation/restoration, before `prepare` or building, verify every
      declared merged dependency's recorded SHA is a commit reachable from current base. A legacy merged
      dependency without SHA requires current base instead. If those commits are absent from a reused

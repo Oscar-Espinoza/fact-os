@@ -60,7 +60,7 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   `maxAttempts` (2), `budgetUsdPerRun` (null = no cap; a positive number is passed as `--max-budget-usd`; hitting it gives the feedback
   "budget exhausted"), `budgetUsdTotal` (null = unlimited; stop launching once the cost reported **during the current
   `fact-os run`** reaches it — earlier runs' `costUsd` do not count; `null` = unlimited), `timeoutMin` (null = no timeout;
-  per `claude`/test/`prepare` (null; a shell command run in the feature worktree before every build, e.g. install and provision databases; must be idempotent; a failure fails the attempt) and `postMerge` (it gets `FACTOS_FEATURE` and `FACTOS_BRANCH`) child), `builder`/`evaluator` `{model, effort, permissionMode}`,
+  per `claude`/test/`prepare` (null; a shell command run in the feature worktree before every build, e.g. install and provision databases; must be idempotent; a failure spends no attempt: the feature retries after each of `setupRetryDelaysSec` ([30, 120]), then goes stuck as an uncounted stop; 3 failed setups in a row across at least 2 features within 10 minutes open a launch hold, released by `fact-os setup-resume` or the dashboard's Resume setup) and `postMerge` (it gets `FACTOS_FEATURE` and `FACTOS_BRANCH`) child), `builder`/`evaluator` `{model, effort, permissionMode}`,
   `test`, `merge` (`auto`|`manual`), `briefFiles` (appended to builder and evaluator prompts), `lessonsFile`
   (`CLAUDE.md`), `postMerge` (shell command run in the main checkout after a merge, or null), `refreshBeforeTest`
   (false; true merges the current `base` into the feature branch after the build and before the test, so two features
