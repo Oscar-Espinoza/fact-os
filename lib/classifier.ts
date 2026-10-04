@@ -5,7 +5,7 @@
 // only records them; it never changes a feature, its tier or the queue. Design and evidence: docs/improvements.md I07,
 // lessons: docs/jev-lessons.md.
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, envVar, withLock, readJson, writeJsonAtomic, loadState } from './state.ts';
@@ -180,6 +180,12 @@ export interface Scorer { version: string; target: string; battery: string; batt
   mean: number[]; scale: number[]; coef: number[]; intercept: number; code: { keywords: string; uiSurfaces: string[]; packageDepth: number };
   composites: { families: Record<string, string[]>; excludedWithoutFacts: string[]; perItem: string };
   reference: { scores: number[]; tailFraction: number; threshold: number } }
+// The extraction contracts this code implements; an artifact naming another one is not scored.
+export const SUPPORTED_SCORERS = ['i07-v2.1-rework-devfit'];
+const FROZEN_FAMILIES: Record<string, string> = { stakes: 's', uncertainty: 'u', coupling: 'c', mitigation: 'm', verification: 'v' };
+const FROZEN_EXCLUDED = ['m03_existing_writer_delegation', 'm04_verified_extension_seam'];
+// numpy.quantile(scores, q, method='higher'): the smallest sorted value at or above position q * (n - 1).
+export const quantileHigher = (xs: number[], q: number) => { const s = [...xs].sort((a, b) => a - b); return s[Math.ceil(q * (s.length - 1))]!; };
 export const CODE_FEATURES = ['n_acceptance', 'acc_chars', 'desc_chars', 'touches_missing', 'n_touches', 'n_packages', 'n_deps', 'kw_hits', 'surface_ui'];
 
 // The whole artifact is checked against this run: battery meaning, pinned model, glossary, extraction structures, coefficients
@@ -189,6 +195,7 @@ export function loadScorer(file: string, expect: { model: string; glossaryHash: 
   try { raw = readFileSync(file, 'utf8'); s = JSON.parse(raw); } catch (e) { return { ok: false, error: `scorer unreadable: ${(e as Error).message}` }; }
   const fail = (why: string) => ({ ok: false as const, error: `scorer rejected: ${why}` });
   if (!s || typeof s !== 'object') return fail('not an object');
+  if (!SUPPORTED_SCORERS.includes(s.version)) return fail(`unsupported extraction contract ${String(s.version)}`);
   if (s.batteryHash !== BATTERY_HASH) return fail(`fitted on a different question battery (${String(s.batteryHash)}, this is ${BATTERY_HASH})`);
   if (s.model !== expect.model) return fail(`fitted on ${String(s.model)} answers, this run asks ${expect.model}`);
   if ((s.glossaryHash ?? null) !== expect.glossaryHash) return fail('fitted with a different codebase glossary');
@@ -199,15 +206,21 @@ export function loadScorer(file: string, expect: { model: string; glossaryHash: 
   if (!c || typeof c.keywords !== 'string' || !Array.isArray(c.uiSurfaces) || !Number.isSafeInteger(c.packageDepth) || c.packageDepth < 1) return fail('code extraction settings missing');
   try { new RegExp(c.keywords, 'g'); } catch { return fail('keyword pattern does not compile'); }
   if (!k || !k.families || typeof k.families !== 'object' || !Array.isArray(k.excludedWithoutFacts) || k.perItem !== PER_ITEM) return fail('composite settings missing');
-  const known = new Set(Object.keys(BATTERY.questions)), names = new Set(CODE_FEATURES.concat(['deliverables_expected']));
-  for (const [fam, ids] of Object.entries(k.families)) {
-    if (!Array.isArray(ids) || ids.some((q) => !known.has(q))) return fail(`family ${fam} names unknown questions`);
+  const names = new Set(CODE_FEATURES.concat(['deliverables_expected']));
+  if (Object.keys(k.families).sort().join() !== Object.keys(FROZEN_FAMILIES).sort().join()) return fail('families differ from the frozen extraction');
+  for (const [fam, prefix] of Object.entries(FROZEN_FAMILIES)) {
+    // As exported: each family's questions by prefix, minus the evidence-dependent ones (also excluded at scoring time).
+    const want = Object.keys(BATTERY.questions).filter((q) => q.startsWith(prefix) && !FROZEN_EXCLUDED.includes(q)), ids = k.families[fam];
+    if (!Array.isArray(ids) || ids.length !== want.length || want.some((q) => !ids.includes(q))) return fail(`family ${fam} differs from the frozen extraction`);
     names.add(`${fam}_max`); names.add(`${fam}_mean`);
   }
+  if ([...k.excludedWithoutFacts].sort().join() !== FROZEN_EXCLUDED.join()) return fail('evidence-dependent exclusions differ from the frozen extraction');
   if (s.features.some((f) => !names.has(f))) return fail('feature names do not match the extraction');
   const r = s.reference;
-  if (!r || !Array.isArray(r.scores) || !r.scores.length || r.scores.some((x) => typeof x !== 'number' || !(x >= 0 && x <= 1)) || !(r.threshold >= 0 && r.threshold <= 1))
+  if (!r || !Array.isArray(r.scores) || !r.scores.length || r.scores.some((x) => typeof x !== 'number' || !(x >= 0 && x <= 1)) || typeof r.threshold !== 'number' || !(r.threshold >= 0 && r.threshold <= 1))
     return fail('reference scores or threshold out of range');
+  if (typeof r.tailFraction !== 'number' || !(r.tailFraction > 0 && r.tailFraction < 1)) return fail('reference tail fraction missing');
+  if (Math.abs(quantileHigher(r.scores, 1 - r.tailFraction) - r.threshold) > 1e-12) return fail('threshold is not the reference quantile');
   return { ok: true, scorer: s, hash: sha(raw) };
 }
 
@@ -335,8 +348,14 @@ export function loadContext(root: string, cfg: ClassifierConfig): Context {
   const policy = sha(JSON.stringify({ POLICY_VERSION, HI, DIRECT, DIRECT_AXES, MECHANISM_AXES, PLANNING, scorer: scorerHash, scorerError: scorerError ?? null }));
   return { glossary, glossaryHash, scorer, scorerHash, scorerError, policy };
 }
-// A bounded, secret-free copy of what was asked: the state sent, with the glossary replaced by its hash.
+// A bounded, secret-free copy of what was asked: the state sent, with the glossary replaced by its hash. The glossary itself is
+// kept once per content under classifier-context/, so every recorded input can be reconstructed.
 const inputSnapshot = (state: Record<string, unknown>, ctx: Context) => { const { codebase: _, ...rest } = state; return { ...rest, glossaryHash: ctx.glossaryHash }; };
+function keepGlossary(root: string, ctx: Context) {
+  if (!ctx.glossaryHash) return;
+  const file = join(paths(root).dir, 'classifier-context', `${ctx.glossaryHash}.json`);
+  if (!existsSync(file)) { mkdirSync(dirname(file), { recursive: true }); writeJsonAtomic(file, ctx.glossary); }
+}
 
 // ---- classify ----
 
@@ -348,6 +367,7 @@ export async function classify(root: string, cfg: ClassifierConfig, targets: Fea
   keyOf: () => string | null = typesafeKey, rolesOf: (f: Feature) => Roles | null = () => null): Promise<ClassifierRecord[]> {
   const ctx = loadContext(root, cfg);
   if (ctx.scorerError) out(`attention score unavailable: ${ctx.scorerError}`);
+  keepGlossary(root, ctx);
   const written: ClassifierRecord[] = [], done = new Set<string>();
   let key: string | null | undefined, stop = false;
   const redact = (s: string) => (key ? s.replaceAll(key, '[redacted]') : s);
@@ -363,7 +383,9 @@ export async function classify(root: string, cfg: ClassifierConfig, targets: Fea
       scorer: ctx.scorerHash, tier: authority.tier, authority, requestedModel: cfg.model, input: inputSnapshot(state, ctx), roles: rolesOf(f) };
     const seen = validated(hash);
     if (seen) {
-      if (seen.policy === ctx.policy && sameAuthority(seen.authority, authority)) { out(`${f.id}: unchanged since its last assessment; skipped`); continue; }
+      if (seen.policy === ctx.policy && sameAuthority(seen.authority, authority) && JSON.stringify(seen.roles ?? null) === JSON.stringify(base.roles ?? null)) {
+        out(`${f.id}: unchanged since its last assessment; skipped`); continue;
+      }
       const rec: ClassifierRecord = { ...base, resolvedModel: seen.resolvedModel, attempts: 0, elapsedMs: 0, status: 'assessed', answers: seen.answers,
         assessment: assess(f, seen.answers!, features, ctx.scorer, ctx.scorerError) };
       append(rec); out(`${f.id}: re-projected locally → ${summary(rec.assessment!)}`); continue;

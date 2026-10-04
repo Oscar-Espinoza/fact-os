@@ -77,6 +77,10 @@ not send. Typed output guarantees the interface, not the truth.
 - Demand quoted evidence and verify every quote mechanically (spec text, blob at the commit); a verified quote proves the
   source says it, not that the interpretation is right.
 - Keep agent answers as proposals beside Jev's; never average booleans into probabilities or train on them unadjudicated.
+- Let an agent add caution (a review proposal) but not remove it: a "false" is a disagreement to inspect, because no check can
+  prove a quote really excludes the mechanism.
+- Isolate the agent from the user's tool config (`codex exec --ignore-user-config`): a read-only shell sandbox does not
+  confine MCP tools or hooks.
 - OpenAI strict structured outputs reject `const` without `type`, length and pattern keywords: send a simplified schema to
   the provider and validate the full contract yourself. `codex exec` refuses a non-git directory unless given
   `--skip-git-repo-check`; Codex reports request failures as JSON events on stdout, not stderr.

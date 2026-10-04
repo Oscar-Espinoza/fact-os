@@ -237,18 +237,26 @@ thresholds changed 12 of 226 candidate tiers: the review-uncertain band and the 
 (`config.classifier.escalation.enabled`, or `fact-os classify ... --escalate`), shadow, explicit classify runs only. Selection:
 direct review axes in Jev's (.2, .9) band, priority to features with a protection/risk conflict, then review-uncertain, then
 answers nearest .5; a person's tier and quality-only scope are not sent; at most `maxQuestions` per feature, the rest stay
-unresolved; `maxPerRun` and `maxPerDay` count actual agent starts (defaults 2 and 6). The agent reads an ephemeral snapshot of
-tracked files at the base commit (no live state, no untracked files, no escaping symlinks): Sol 6.1 high through
-`codex exec --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --output-schema`, falling back once to the
+unresolved; repository-resolvable context (u03) is asked before ordinary middle-band axes; `maxPerRun` and `maxPerDay` count actual
+agent starts, fallback included (defaults 2 and 6). The agent reads an ephemeral snapshot of an allowed manifest of tracked files at
+the base commit (no factory state, run history, credential-looking files, symlinks or untracked files): Sol 6.1 high through
+`codex exec --sandbox read-only --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --output-schema` (the user's
+hooks, MCP servers and plugins are not loaded), falling back once to the
 configured Claude fallback (Opus high) only when Codex is unavailable, forced read-only after the merge
 (`--restricted --tools Read,Grep,Glob --strict-mcp-config --permission-mode plan`, a $2 cap). One deadline covers both; the
-process group is killed and waited for. Answers must echo the request and cite evidence: a spec quote is checked against the
-feature, a repo quote against the blob at the base commit; true/false needs a spec quote, and absence of code is never evidence.
-Composition is a separate advisory derivation: an agent true adds a review proposal; a false clears only a review-uncertain
-axis (< .9) with spec evidence, never a Jev floor, a person's tier or protection; unknown stays uncertain. Answers are
+process group is killed and waited for within it; cancellation (SIGINT/SIGTERM) kills the agent and never falls back; a read-only
+violation or oversized output never falls back either. Answers must echo the request and cite evidence: a spec quote must occur
+exactly in the feature, a repo quote exactly in the cited lines of an allowed manifest file (the parent attaches the blob id);
+true/false needs a spec quote. Composition is a separate advisory derivation: an agent true adds a review proposal; an agent
+false is recorded as a disagreement and the uncertainty stays (whether a quote really excludes a mechanism cannot be checked
+mechanically); unknown stays uncertain; nothing touches a Jev floor, a person's tier or protection. The answer is published
+only if the feature's scope, authority, glossary and human tasks are unchanged (else stale), and identities include the fallback
+model, so a cached answer is never reused across providers. Answers are
 `model_proposal_unadjudicated`, never automatic labels; escalations of features already launched are marked
 `retrospectiveCurrentBase`. First real runs: Sol read the repository and cited a migration and the audit package with verified
-quotes (102 s, mostly cached input); Opus fallback answered in about 20 s for $0.27.
+quotes (102 s, mostly cached input); Opus fallback answered in about 20 s for $0.27. After the third review (d9f3ffe: 14 P2 + 2 P3,
+all fixed), a real Sol run on F05-09 with the hardened runner cited checkout, orders and architecture files and recorded one
+disagreement (authoritative amount) beside five review proposals, in 138 s.
 
 **Configuration (ecommerce):** `classifier: {provider: "typesafe", mode: "shadow", glossary: ".shipyard/classifier/glossary.json",
 scorer: ".shipyard/classifier/scorer-v2.1.json"}`; key in `TYPESAFE_API_KEY` or fact-os's `.env`. The scorer is fitted to

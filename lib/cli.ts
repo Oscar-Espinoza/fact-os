@@ -241,7 +241,12 @@ try {
     case 'classify': {
       const root = needRoot(), { config, features } = load(root), { classify, report } = await import('./classifier.ts');
       if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "mode": "shadow"}} to config.json');
-      if (o.report) { console.log(report(root, features, config.classifier)); break; }
+      if (o.report) {
+        console.log(report(root, features, config.classifier));
+        const summary = (await import('./escalation.ts')).escalationSummary(root);
+        if (summary) console.log(`\n${summary}`);
+        break;
+      }
       const targets = o.all ? features : positionals.map((id) => features.find((f) => f.id === id) ?? (() => { throw new Error(`unknown feature: ${id}`); })());
       if (!targets.length) throw new Error(`usage: ${NAME} classify <feature-id>... | --all | --report`);
       // The roles each feature would get today, recorded beside the shadow candidate for comparison.
@@ -253,7 +258,7 @@ try {
       const esc = config.classifier.escalation;
       if (o.escalate || esc?.enabled) {
         const { escalate } = await import('./escalation.ts');
-        await escalate(root, config, config.classifier, esc ?? ESCALATION_DEFAULTS, targets.map((f) => f.id), (s) => console.log(s));
+        await escalate(root, config, config.classifier, { ...(esc ?? ESCALATION_DEFAULTS), enabled: true }, targets.map((f) => f.id), (s) => console.log(s));
       }
       break;
     }

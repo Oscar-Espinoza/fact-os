@@ -381,3 +381,26 @@ test('I07 v2 review: every subprocess in lib gets an explicit childEnv() (R14)',
     for (const [i, line] of readFileSync(join(lib, f), 'utf8').split('\n').entries())
       if (/\b(spawnSync|spawn|execSync|execFileSync)\(/.test(line) && !/import /.test(line)) assert.match(line, /env(: childEnv\(\)|,|: env\b)/, `${f}:${i + 1} starts a process without an explicit environment`);
 });
+
+test('I07 v3 review: the scorer contract is strict: version, frozen families and exclusions, typed threshold equal to the reference quantile (V314)', (t) => {
+  const root = project(t), file = join(root, 's.json'), { scorer } = parity(), expect = { model: MODEL, glossaryHash: null };
+  const bad = (o: object, rx: RegExp) => { writeFileSync(file, JSON.stringify({ ...scorer, ...o })); assert.match((loadScorer(file, expect) as any).error, rx, JSON.stringify(o).slice(0, 80)); };
+  bad({ version: 'i07-v9' }, /unsupported extraction contract/);
+  bad({ composites: { ...scorer.composites, families: { ...scorer.composites.families, stakes: [...scorer.composites.families.stakes!, 'm03_existing_writer_delegation'] } } }, /family stakes differs/);
+  bad({ composites: { ...scorer.composites, excludedWithoutFacts: [] } }, /exclusions differ/);
+  bad({ reference: { ...scorer.reference, threshold: '0' } }, /out of range/);
+  bad({ reference: { ...scorer.reference, tailFraction: undefined } }, /tail fraction/);
+  bad({ reference: { ...scorer.reference, threshold: 0 } }, /not the reference quantile/);
+});
+
+test('I07 v3 review: the sent glossary is kept by content so inputs can be reconstructed; a role change re-projects locally (V315)', async (t) => {
+  const a = F('a'), root = project(t, [a]);
+  writeFileSync(join(root, 'glossary.json'), JSON.stringify({ money: 'immutable context expected' }));
+  const seen = fakeTypesafe(t, [body(a)]);
+  const roles = (model: string) => () => ({ builder: { provider: 'claude' as const, model, effort: 'medium' }, evaluator: { provider: 'claude' as const, model: 'opus', effort: 'high' } });
+  const [rec] = await classify(root, cfg({ glossary: 'glossary.json' }), [a], () => {}, 'manual', fakeKey, roles('sonnet'));
+  const kept = join(root, '.fact-os', 'classifier-context', `${(rec!.input as any).glossaryHash}.json`);
+  assert.deepEqual(JSON.parse(readFileSync(kept, 'utf8')), { money: 'immutable context expected' });
+  const [again] = await classify(root, cfg({ glossary: 'glossary.json' }), [a], () => {}, 'manual', noKey, roles('opus'));
+  assert.equal(seen.length, 1); assert.equal(again!.attempts, 0); assert.equal(again!.roles!.builder.model, 'opus');
+});
