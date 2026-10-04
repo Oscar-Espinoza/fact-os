@@ -1920,3 +1920,15 @@ test('base defect: a signature containing | is capped like any other (keys are e
   s.cli('run');
   assert.equal(s.feature('a').planningHold?.cause, 'base-defect');
 });
+
+test('base defect: a signature named like an Object property (constructor) starts at zero rechecks', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  writeFileSync(join(s.repo, 'fixture.ts'), 'x\n'); s.git('add', '.'); s.git('commit', '-qm', 'fixture');
+  const base = s.git('rev-parse', 'main'), config = loadConfig(s.repo), file = join(s.repo, '.fact-os', 'features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
+  Object.assign(d.features[0]!, { baseRechecks: { S: 1 }, planningHold: { cause: 'base-defect', confidence: 'high', evidence: ['constructor'], review: 'a/1', passEnd: '', ts: '',
+    inputs: holdInputs(s.repo, config, d.features[0]!), base, paths: ['fixture.ts'], signatures: ['constructor'] } });
+  writeFileSync(file, JSON.stringify(d));
+  writeFileSync(join(s.repo, 'fixture.ts'), 'y\n'); s.git('add', '.'); s.git('commit', '-qm', 'touch');
+  s.cli('run');
+  assert.equal(s.feature('a').baseRechecks?.constructor, 1, 'its first recheck was taken');
+});

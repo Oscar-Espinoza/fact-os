@@ -1445,7 +1445,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const touched = (from: string, paths: string[]) => from !== baseSha && paths.length > 0 &&
         git(['diff', '--name-only', from, baseSha, '--', ...paths], root).out.trim() !== '';
       // Spent rechecks per signature, keyed by the exact signature (opaque: a signature may contain any character).
-      const rechecksSpent = (f: Feature, sig: string) => f.baseRechecks?.[sig] ?? 0;
+      const rechecksSpent = (f: Feature, sig: string) => (f.baseRechecks && Object.hasOwn(f.baseRechecks, sig) ? f.baseRechecks[sig]! : 0); // own keys only (`constructor`)
       const recheck = features.filter((f) => f.status === 'todo' && f.planningHold?.cause === 'base-defect' && f.planningHold.base &&
         (f.planningHold.signatures || []).every((sig) => rechecksSpent(f, sig) < 2) && touched(f.planningHold.base, f.planningHold.paths || []));
       if (recheck.length) {
