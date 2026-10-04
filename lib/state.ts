@@ -2,12 +2,13 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, appendFileSync, lstatSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import type { ClassifierConfig, Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
+import type { ClassifierConfig, EscalationConfig, Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
 import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } from './profiles.ts';
 
-// Provisional operating bounds for the shadow classifier (I07); thresholds are recalibrated after the benchmark.
-export const CLASSIFIER_DEFAULTS: ClassifierConfig = { provider: 'typesafe', model: 'jev-latest', mode: 'shadow', minConfidence: 0.8,
-  minRiskConfidence: 0.9, timeoutMs: 5000, maxRetries: 1, maxRequestsPerDay: 250 };
+// Shadow classifier operating bounds (I07 v2). The model is pinned: the battery and scorer were evaluated on jev-1.13.0.
+export const CLASSIFIER_DEFAULTS: ClassifierConfig = { provider: 'typesafe', model: 'jev-1.13.0', mode: 'shadow', timeoutMs: 20000, maxRetries: 1,
+  maxRequestsPerDay: 500, glossary: null, scorer: null, escalation: null };
+export const ESCALATION_DEFAULTS: EscalationConfig = { model: 'gpt-6.1-sol', effort: 'high', maxPerDay: 20, timeoutMin: 20 };
 
 export const DEFAULT_CONFIG: Config = {
   base: 'main', worktreesDir: '../<repo>-worktrees', branchPrefix: 'ship/', maxParallel: 3, maxAttempts: 2,
@@ -236,10 +237,20 @@ function configProblems(raw: unknown): string[] {
       field(k, 'config.classifier', 'provider', (x) => x === 'typesafe', '"typesafe"');
       field(k, 'config.classifier', 'model', str, 'a non-empty string');
       field(k, 'config.classifier', 'mode', (x) => x === 'shadow', '"shadow" (apply mode comes after the benchmark)');
-      for (const key of ['minConfidence', 'minRiskConfidence']) field(k, 'config.classifier', key, (x) => nonnegative(x) && (x as number) <= 1, 'a number from 0 to 1');
+      for (const key of ['minConfidence', 'minRiskConfidence'])
+        if (Object.hasOwn(k, key)) problems.push(`config.classifier.${key} is a v1 setting (one six-way choice); v2 thresholds live in the projection policy: remove it`);
       field(k, 'config.classifier', 'timeoutMs', (x) => uint(x) && (x as number) >= 100 && (x as number) <= 120000, 'milliseconds from 100 to 120000');
-      field(k, 'config.classifier', 'maxRetries', (x) => uint(x) && (x as number) <= 5, 'a safe integer from 0 to 5');
+      field(k, 'config.classifier', 'maxRetries', (x) => uint(x) && (x as number) <= 2, 'a safe integer from 0 to 2');
       field(k, 'config.classifier', 'maxRequestsPerDay', uint, 'a safe integer >= 0');
+      for (const key of ['glossary', 'scorer']) field(k, 'config.classifier', key, (x) => x === null || str(x), 'a path relative to the project root, or null');
+      if (Object.hasOwn(k, 'escalation') && k.escalation !== null) {
+        const e = obj(k.escalation, 'config.classifier.escalation');
+        if (e) {
+          for (const key of ['model', 'effort']) field(e, 'config.classifier.escalation', key, str, 'a non-empty string');
+          field(e, 'config.classifier.escalation', 'maxPerDay', uint, 'a safe integer >= 0');
+          field(e, 'config.classifier.escalation', 'timeoutMin', (x) => nonnegative(x) && (x as number) > 0 && (x as number) <= 120, 'minutes from 0 to 120');
+        }
+      }
     }
   }
   if (Object.hasOwn(c, 'codex')) {
@@ -289,7 +300,10 @@ export function loadConfig(root: string): Config {
   const c: Config = { ...DEFAULT_CONFIG, ...(raw as Partial<Config>) };
   c.worktreesDir = c.worktreesDir.replace('<repo>', basename(root));
   c.codex = { ...DEFAULT_CONFIG.codex, ...c.codex }; // a partial codex block keeps the default fallback or cooldown
-  if (c.classifier) c.classifier = { ...CLASSIFIER_DEFAULTS, ...(c.classifier as Partial<ClassifierConfig>) }; // provisional bounds until the benchmark
+  if (c.classifier) {
+    const k = { ...CLASSIFIER_DEFAULTS, ...(c.classifier as Partial<ClassifierConfig>) };
+    c.classifier = { ...k, escalation: k.escalation ? { ...ESCALATION_DEFAULTS, ...k.escalation } : null };
+  }
   return c;
 }
 

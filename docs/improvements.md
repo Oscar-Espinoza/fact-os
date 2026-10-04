@@ -17,7 +17,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I04 | done | Resume the builder once to commit work it left uncommitted (`commitFixes`) |
 | I05 | done | Setup failures spend no attempts: delayed retries, then a sticky launch hold until setup-resume |
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
-| I07 | phase 1 done | Shadow classifier: TypeSafe Jev judges tier and needs-split; recorded, never applied |
+| I07 | v2 shadow done | Jev classifier: 32 narrow questions → review requirements, workload, attention, planning; shadow only |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -161,16 +161,70 @@ at least two features open a sticky launch hold, persisted across restarts and s
 explicitly once the environment is fixed. The foreman is the only owner of these retries; the observer's retry policy is
 unchanged (it never retries setup). Known limit: a deferred prepare that fails after a build loses that build.
 
-## I07 — tiering and split judgments with TypeSafe Jev (phase 1: shadow)
+## I07 — feature classification with TypeSafe Jev (v2: shadow)
 
-Oscar's idea: a fast typed-judgment model (Jev) should assign tiers and flag over-scoped features instead of a big model
-at intake. Agreed with the Codex partner (/tmp/herd/sol-partner-split-jev.md): shadow first. `fact-os classify <id…>|--all`
-sends one request per feature (a six-way tier choice including `insufficient_info`, and a needs-split probability) and
-records the answers, their input hash and what apply mode would do in `.fact-os/classifier.jsonl`. Abstention: insufficient
-information, confidence below provisional thresholds (0.8, or 0.9 for protected features), a risk conflict (a feature with
-`risk: high` or risk keywords only takes risky or investigate), and a person's tier is never touched. Nothing changes a
-feature in phase 1. `fact-os classify --report` compares the shadow tiers with what features actually took.
+Goal (Oscar, 2026-10-04): a good automatic classification of each feature (how much review it needs, what kind of work it
+is, whether it should be split) using Jev, a fast typed-judgment model; throw it away if it is not good. Reusable lessons:
+[docs/jev-lessons.md](jev-lessons.md).
 
-Next, separately authorized: the benchmark (blinded labels on the ecommerce history, a fixed Sonnet classifier on the same
-state, calibration and critical-downgrade rates), then apply mode with calibrated thresholds, the launch backstop for
-untiered features, observer reassessment after repeated blockers, and split drafts that Oscar approves (never auto-queued).
+**v1 failed.** One six-way "which tier?" Choice with thin context labelled 165 of 226 ecommerce features risky (73%), never
+answered hard or investigate, and scored F15-09 (the feature that obviously needed a split) 0.59 for needs-split, beside a
+0.55 median. It added nothing over simple code-measured features. Oscar rejected it as a shallow use of the tool.
+
+**v2 (designed with the Codex Sol partner, three rounds).** 32 narrow mechanism Nouls in five families: stakes (s01-s15:
+authoritative amounts, financial commitments, financial admission, stock authority, authorization, tenant binding,
+sensitive data, destructive data, migration of existing rows, concurrent writers, replay, trusted external facts, provider
+protocol, release evidence, untrusted execution), uncertainty (u01-u04), coupling (c01-c07), mitigation (m01-m04) and
+verification (v01-v02), plus one "is this acceptance item a deliverable?" Noul per item. The battery is frozen in
+`lib/classifier-battery.json` (version i07v2.1). Code composes four separate outputs:
+
+- **review requirements**: direct consequence axes (s01-s09, s12, s15) at >= .9; [.8, .9) is `review-uncertain`; s10, s11,
+  s13, s14 are mechanisms attached to an affected effect, never a review floor alone;
+- **workload candidate**: investigate (u01), else hard (u02), else multi (c04, or c06 and c07), else normal;
+- **attention priority**: a frozen code+Jev ridge-logistic rework scorer (JSON artifact per project, fixed reference
+  threshold = top 20% of its held-out scores); an attention flag, never a tier or a review floor;
+- **planning candidates**: five structural conjunctions (new lifecycle coordination, new origin integration, client/server
+  contract, separate measurement work, open design across boundaries), shown with their reasons, never a split decision.
+
+A compatibility `candidateTier` (investigate, else risky when a review requirement exists, else the workload) is a lossy
+summary. Dispositions record a person's tier (authoritative), quality-only acceptance (needs-scope), unknown dependencies or
+an unestablished external contract (needs-context), protected-keyword conflicts, explicit `risk: normal` contradicted, and
+investigate with a critical review (routing-review). Shadow only: nothing writes features, tiers or the queue.
+
+**Evidence (ecommerce history; mostly retrospective feature text; 184 of 205 labelled features were Opus-built, so this
+measures difficulty under that policy, not a Sonnet counterfactual).** Outcome dataset: 226 features, 198 finished with a
+known outcome, 34 needed rework (evaluator rejection, log-recorded rejection or builder/commit failure). A family split was
+frozen before any v2 answer (dev 120 rows / 20 rework; holdout 78 / 14).
+
+| Holdout, fit on dev, run once | code features only | code + Jev composites (primary) | Jev composites only |
+|---|---|---|---|
+| rework AUPRC (prevalence .18) | .289 | **.503** | .617 |
+| AUROC | .634 | .723 | .729 |
+| reworked features caught flagging 20% | 36% | 50% | 57% |
+| total-cost Spearman | .390 | **.637** | .633 |
+
+Paired family bootstrap, primary minus code: AUPRC +.20 [+.02, +.38], cost rho +.24 [+.10, +.41]. First-build cost is not
+predicted. Semantics: an independent author's fresh blind challenge set (35 matched cases, labels written before any run),
+run once on the frozen battery: 241 labelled answers, 76% correct, 22% in the .2-.8 middle band, 2.9% wrong; 28/28
+targeted pair contrasts ordered; prompt-injection, missing-facts and epic-boilerplate controls all held. The weakest
+question is m01 presentation-only (calls small UI interaction changes presentation); mitigators never subtract stakes, so
+this has little effect. Full shadow run on all 226 features: candidate normal 135, multi 12, hard 29, risky 50 (v1: 73%
+risky); average cost rises normal $8.8 < multi $13.2 < hard $14.7 < risky $16.6; 62 attention flags; 32 planning
+candidates (F15-09 among them; retrospectively 42% of planning candidates needed rework vs 17% overall). Jev spend for the
+whole experiment: about $0.40.
+
+**Fixes carried from the c4b8164 review.** F1 key isolation (`childEnv`, 221b07e); F2 strict answer validation (every id,
+finite [0, 1], pinned resolved model); F3 every HTTP attempt reserved under the state lock against the daily cap,
+single-flight per input, in-batch dedupe; F4 one deadline for all attempts and backoff, Retry-After honoured or turned
+into a persisted cooldown; F5/F6 dispositions above; F7 request identity (model, battery, state) separate from policy and
+scorer identity, so policy changes re-project stored answers without a request; F8 a feature edited during its request
+is recorded stale; F9 requested/resolved model, usage, attempts and elapsed time on every record.
+
+**Configuration (ecommerce):** `classifier: {provider: "typesafe", mode: "shadow", glossary: ".shipyard/classifier/glossary.json",
+scorer: ".shipyard/classifier/scorer-v2.1.json"}`; key in `TYPESAFE_API_KEY` or fact-os's `.env`. The scorer is fitted to
+ecommerce; another project can use the battery with its own glossary, but its attention score is unavailable until it has
+its own artifact. Raw experiment data (dataset, answers, labels, partner reports, TypeSafe docs snapshot) is kept privately in
+`ecommerce-builder/.shipyard/i07-experiment/`.
+
+**Not done (each needs Oscar):** applying tiers, a launch-time backstop, observer reassessment, split drafting. Prospective
+validation: freeze the policy, assess new features before launch, and compare with their outcomes.

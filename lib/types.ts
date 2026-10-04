@@ -10,8 +10,12 @@ export type Role = 'builder' | 'evaluator' | 'resolver';
 
 // provider: 'claude' (default) or 'codex' (`codex exec`; only the evaluator and the diagnoser, which change no code).
 export type Provider = 'claude' | 'codex';
-export interface ClassifierConfig { provider: 'typesafe'; model: string; mode: 'shadow'; minConfidence: number; minRiskConfidence: number;
-  timeoutMs: number; maxRetries: number; maxRequestsPerDay: number }
+// I07 v2 shadow classifier. `timeoutMs` bounds a whole decision (every attempt and backoff); `glossary` and `scorer` are paths
+// relative to the project root (a codebase glossary sent as context; a frozen rework scorer for the attention priority).
+export interface ClassifierConfig { provider: 'typesafe'; model: string; mode: 'shadow'; timeoutMs: number; maxRetries: number; maxRequestsPerDay: number;
+  glossary: string | null; scorer: string | null; escalation: EscalationConfig | null }
+// Unsure assessments go to a reasoning agent that can read the code (Codex, with config.codex.fallback); shadow only.
+export interface EscalationConfig { model: string; effort: string; maxPerDay: number; timeoutMin: number }
 export interface RoleConfig { model?: string; effort?: string; permissionMode?: string; provider?: Provider }
 
 // Model profiles (profiles.ts): a named set of model/effort per role, chosen at runtime in control.json. "opus" is the

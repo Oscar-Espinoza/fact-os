@@ -61,7 +61,7 @@ function init(test: string | undefined): void {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json', 'setup-hold.json', 'classifier.jsonl'].map((f) => `${paths(root).name}/${f}`)
+  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json', 'setup-hold.json', 'classifier.jsonl', 'classifier-usage.json'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');
@@ -239,11 +239,11 @@ try {
     case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
     case 'classify': {
       const root = needRoot(), { config, features } = load(root), { classify, report } = await import('./classifier.ts');
-      if (o.report) { console.log(report(root, features)); break; }
-      if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "model": "jev-latest", "mode": "shadow"}} to config.json');
+      if (o.report) { console.log(report(root, features, config.classifier)); break; }
+      if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "mode": "shadow"}} to config.json');
       const targets = o.all ? features : positionals.map((id) => features.find((f) => f.id === id) ?? (() => { throw new Error(`unknown feature: ${id}`); })());
       if (!targets.length) throw new Error(`usage: ${NAME} classify <feature-id>... | --all | --report`);
-      await classify(root, config.classifier, targets, features, (s) => console.log(s));
+      await classify(root, config.classifier, targets, (s) => console.log(s));
       break;
     }
     case 'setup-resume': {

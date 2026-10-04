@@ -1,128 +1,256 @@
-// I07 phase 1: the shadow classifier against a local fake TypeSafe server (no real provider calls).
+// I07 v2: the shadow classifier against a local fake TypeSafe server (no real provider calls).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { askJev, classify, classifierState, decide, inputHash, readRecords, report, typesafeKey, QUESTIONS, type JevAnswer } from '../lib/classifier.ts';
-import { CLASSIFIER_DEFAULTS, DEFAULT_CONFIG, childEnv, loadConfig } from '../lib/state.ts';
-import type { Feature } from '../lib/types.ts';
+import { assess, classify, classifierState, codeFeatures, compositeFeatures, cooldown, loadScorer, questionsFor, readRecords, report, score,
+  typesafeKey, validateAnswers, BATTERY, DIRECT_AXES, type Scorer } from '../lib/classifier.ts';
+import { CLASSIFIER_DEFAULTS, ESCALATION_DEFAULTS, DEFAULT_CONFIG, childEnv, loadConfig, writeJsonAtomic } from '../lib/state.ts';
+import type { ClassifierConfig, Feature } from '../lib/types.ts';
 
 // Never reach the real TypeSafe API from a test: every request goes to a dead local port unless a fake server replaces it,
 // and the key never comes from fact-os's own .env (which may hold a real key).
 process.env.FACTOS_TYPESAFE_URL = 'http://127.0.0.1:9/never-real';
-const noKey = () => null, fakeKey = () => 'test-key';
+const fakeKey = () => 'test-key', noKey = () => null;
+const MODEL = 'jev-1.13.0';
 
 const F = (id: string, o: Partial<Feature> = {}): Feature => ({ id, title: `Feature ${id}`, description: `Build ${id}`, acceptance: [`${id} works`],
   surface: 'api', deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '', ...o });
-const cfg = { ...CLASSIFIER_DEFAULTS, timeoutMs: 2000, maxRetries: 1 };
-const answer = (tier: string, confidence: number, split = 0.1) => ({ model: 'jev-1.2', answers: {
-  tier: { type: 'choice', choice: tier, probabilities: { [tier]: 0.9 }, confidence }, needsSplit: { type: 'noul', noul: split } } });
+const cfg = (o: Partial<ClassifierConfig> = {}): ClassifierConfig => ({ ...CLASSIFIER_DEFAULTS, timeoutMs: 3000, maxRetries: 1, ...o });
+const ids = (f: Feature) => Object.keys(questionsFor(f));
+// A valid answer body for feature f: every question low unless overridden.
+const body = (f: Feature, over: Record<string, number> = {}, model = MODEL) => ({ model, usage: { input_tokens: 100 },
+  answers: Object.fromEntries(ids(f).map((q) => [q, { type: 'noul', noul: over[q] ?? 0.05 }])) as Record<string, { type: string; noul: number }> });
+const probs = (f: Feature, over: Record<string, number> = {}) => Object.fromEntries(Object.entries(body(f, over).answers).map(([q, a]) => [q, a.noul]));
 
-// A fake systemone endpoint: `replies` per request in order (an object is a 200 body, a number an HTTP status).
-function fakeTypesafe(t: { after: (fn: () => void) => void }, replies: (object | number)[]) {
-  const seen: { auth: string | null; body: { model: string; state: unknown; questions: typeof QUESTIONS } }[] = [];
+// A reply: a JSON body, an HTTP status, or a raw response {status, headers, raw}.
+type Raw = { status: number; headers?: Record<string, string>; raw?: string };
+type Reply = object | number | Raw;
+function fakeTypesafe(t: { after: (fn: () => void) => void }, replies: Reply[], onRequest?: () => void) {
+  const seen: { auth: string | null; body: any }[] = [];
   const server = Bun.serve({ port: 0, fetch: async (req) => {
-    seen.push({ auth: req.headers.get('authorization'), body: await req.json() as never });
+    seen.push({ auth: req.headers.get('authorization'), body: await req.json() });
+    onRequest?.();
     const r = replies.shift() ?? 500;
-    return typeof r === 'number' ? new Response('{}', { status: r }) : Response.json(r);
+    if (typeof r === 'number') return new Response('{}', { status: r });
+    if ('status' in r && !('answers' in r)) return new Response((r as Raw).raw ?? '{}', { status: (r as Raw).status, headers: (r as Raw).headers });
+    return Response.json(r);
   } });
-  const prev = { url: process.env.FACTOS_TYPESAFE_URL, key: process.env.TYPESAFE_API_KEY };
-  process.env.FACTOS_TYPESAFE_URL = `http://127.0.0.1:${server.port}/v1/systemone`; process.env.TYPESAFE_API_KEY = 'test-key';
-  t.after(() => { server.stop(true); process.env.FACTOS_TYPESAFE_URL = prev.url ?? 'http://127.0.0.1:9/never-real'; if (prev.key === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = prev.key; });
+  const prev = process.env.FACTOS_TYPESAFE_URL;
+  process.env.FACTOS_TYPESAFE_URL = `http://127.0.0.1:${server.port}/v1/systemone`;
+  t.after(() => { server.stop(true); process.env.FACTOS_TYPESAFE_URL = prev ?? 'http://127.0.0.1:9/never-real'; });
   return seen;
 }
-function project(t: { after: (fn: () => void) => void }) {
+const writeFeatures = (root: string, features: Feature[]) => writeJsonAtomic(join(root, '.fact-os', 'features.json'), { features });
+function project(t: { after: (fn: () => void) => void }, features: Feature[] = []) {
   const root = mkdtempSync(join(tmpdir(), 'fact-os-classifier-'));
   mkdirSync(join(root, '.fact-os')); mkdirSync(join(root, '.git'));
+  writeFeatures(root, features);
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
 }
+const parity = () => JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'classifier-scorer.json'), 'utf8')) as
+  { scorer: Scorer; cases: { input: any; answers: Record<string, number>; vector: number[]; score: number }[] };
 
-test('I07: the request carries the agreed questions, the feature state and the key as a bearer token', async (t) => {
-  const seen = fakeTypesafe(t, [answer('multi', 0.9)]);
-  const deps = [F('d', { status: 'merged' })], f = F('a', { deps: ['d'], touches: ['src/'] });
-  const r = await askJev(cfg, classifierState(f, [...deps, f]), 'test-key');
-  assert.ok(r.ok); assert.deepEqual([r.answer.tier, r.answer.model, r.answer.needsSplit], ['multi', 'jev-1.2', 0.1]);
-  assert.equal(seen[0]!.auth, 'Bearer test-key'); assert.equal(seen[0]!.body.model, 'jev-latest');
-  assert.deepEqual(Object.keys(seen[0]!.body.questions.tier.criteria), ['normal', 'multi', 'hard', 'risky', 'investigate', 'insufficient_info']);
-  assert.equal(seen[0]!.body.questions.needsSplit.type, 'noul');
-  assert.deepEqual((seen[0]!.body.state as { dependencies: unknown[] }).dependencies, [{ id: 'd', title: 'Feature d', status: 'merged' }]);
+test('I07 v2: the request carries the frozen battery, one question per acceptance item, the pinned model and missing touches as null', async (t) => {
+  const f = F('a', { acceptance: ['one', 'two'], deps: ['d'] }), d = F('d', { status: 'merged' });
+  const root = project(t, [f, d]), seen = fakeTypesafe(t, [body(f)]);
+  const recs = await classify(root, cfg(), [f], () => {}, 'manual', fakeKey);
+  assert.equal(recs[0]!.status, 'assessed');
+  assert.equal(seen[0]!.auth, 'Bearer test-key'); assert.equal(seen[0]!.body.model, MODEL);
+  assert.equal(Object.keys(seen[0]!.body.questions).length, Object.keys(BATTERY.questions).length + 2);
+  assert.match(JSON.stringify(seen[0]!.body.questions.a01_deliverable_1), /feature\.acceptance\[1\]/);
+  assert.equal(seen[0]!.body.state.feature.touches, null); assert.equal(seen[0]!.body.state.feature.touchesMissing, true);
+  assert.deepEqual(seen[0]!.body.state.dependencies, [{ id: 'd', title: 'Feature d' }]);
+  assert.equal(recs[0]!.resolvedModel, MODEL); assert.equal(recs[0]!.attempts, 1); assert.deepEqual(recs[0]!.usage, { input_tokens: 100 });
 });
 
-test('I07: 401 stops without retrying; 429 and 529 retry within the bound; a bad shape is an error, never a guess', async (t) => {
-  let seen = fakeTypesafe(t, [401]);
-  let r = await askJev(cfg, {}, 'k'); assert.equal(r.ok, false); assert.match((r as { error: string }).error, /401.*invalid TypeSafe API key/); assert.equal(seen.length, 1);
-  seen.length = 0; seen = fakeTypesafe(t, [429, answer('normal', 0.95)]);
-  r = await askJev(cfg, {}, 'k'); assert.ok(r.ok); assert.equal(seen.length, 2);
-  seen = fakeTypesafe(t, [529, 529, answer('normal', 0.95)]);
-  r = await askJev(cfg, {}, 'k'); assert.equal(r.ok, false, 'only maxRetries retries');
-  fakeTypesafe(t, [{ answers: { tier: { type: 'choice', choice: 'enormous', probabilities: {}, confidence: 0.9 }, needsSplit: { type: 'noul', noul: 0.2 } } }]);
-  r = await askJev(cfg, {}, 'k'); assert.equal(r.ok, false); assert.match((r as { error: string }).error, /unexpected answer shape/);
+test('I07 v2: invalid answers are errors, never low probabilities (F2)', () => {
+  const f = F('a'), q = questionsFor(f);
+  assert.ok(validateAnswers(q, body(f), MODEL).ok);
+  const missing = body(f); delete missing.answers.s01_authoritative_amount;
+  assert.match((validateAnswers(q, missing, MODEL) as any).error, /missing answer for s01/);
+  assert.match((validateAnswers(q, body(f, { s05_authorization: 1.5 }), MODEL) as any).error, /invalid .* s05/);
+  const inf = body(f); inf.answers.u01_unknown_root_cause!.noul = Infinity;
+  assert.match((validateAnswers(q, inf, MODEL) as any).error, /u01/);
+  const typed = body(f); (typed.answers as any).c01_new_lifecycle = { type: 'choice', choice: 'x' };
+  assert.match((validateAnswers(q, typed, MODEL) as any).error, /c01/);
+  assert.match((validateAnswers(q, body(f, {}, 'jev-1.14.0'), MODEL) as any).error, /model mismatch/);
+  assert.match((validateAnswers(q, { answers: body(f).answers }, MODEL) as any).error, /did not report the model/);
 });
 
-test('I07: abstention rules: insufficient info, low confidence, risk conflicts and a person\'s tier', () => {
-  const a = (tier: JevAnswer['tier'], confidence: number): JevAnswer => ({ model: 'm', tier, probabilities: {}, confidence, needsSplit: 0 });
-  const plain = F('a', { title: 'Product list page', description: 'Show products in a grid' }), money = F('b', { title: 'Refund flow', description: 'Refund a payment' });
-  assert.equal(decide(plain, a('multi', 0.85), cfg).decision, 'would-apply');
-  assert.match(decide(plain, a('multi', 0.5), cfg).reason, /confidence 0\.50 below 0\.8/);
-  assert.match(decide(plain, a('insufficient_info', 0.99), cfg).reason, /insufficient information/);
-  assert.match(decide(money, a('normal', 0.99), cfg).reason, /risk conflict/, 'a risky-looking feature is never downgraded on the model\'s word');
-  assert.match(decide(money, a('risky', 0.85), cfg).reason, /below 0\.9/, 'protected features need the higher risk confidence');
-  assert.equal(decide(money, a('risky', 0.95), cfg).decision, 'would-apply');
-  assert.equal(decide(F('c', { tier: 'hard' }), a('normal', 0.99), cfg).decision, 'skip');
+test('I07 v2: an overflowing number in the response is rejected, and errors are recorded without answers', async (t) => {
+  const f = F('a'), root = project(t, [f]);
+  const raw = JSON.stringify(body(f)).replace('"noul":0.05', '"noul":1e309');
+  fakeTypesafe(t, [{ status: 200, raw, headers: { 'content-type': 'application/json' } }]);
+  const [rec] = await classify(root, cfg(), [f], () => {}, 'manual', fakeKey);
+  assert.equal(rec!.status, 'error'); assert.match(rec!.error!, /invalid or missing answer/); assert.equal(rec!.answers, undefined);
 });
 
-test('I07: classify records shadow answers, changes no feature, skips unchanged input and a person\'s tier, and honors the daily cap', async (t) => {
-  const root = project(t), seen = fakeTypesafe(t, [answer('multi', 0.9), answer('risky', 0.95, 0.85), answer('hard', 0.9)]);
-  const features = [F('a'), F('b', { title: 'Refund flow', description: 'Refund a payment' }), F('c', { tier: 'normal' })];
-  const before = JSON.stringify(features), lines: string[] = [];
-  const recs = await classify(root, cfg, features, features, (s) => lines.push(s), 'manual', fakeKey);
-  assert.equal(JSON.stringify(features), before, 'shadow mode never changes a feature');
-  assert.deepEqual(recs.map((r) => [r.feature, r.decision]), [['a', 'would-apply'], ['b', 'would-apply'], ['c', 'skip']]);
-  assert.equal(seen.length, 3, 'a feature a person tiered is still asked, as evidence');
-  assert.equal(readRecords(root)[2]!.tier, 'hard');
-  assert.equal(readRecords(root)[1]!.needsSplit, 0.85);
-  assert.equal(readRecords(root)[0]!.hash, inputHash(classifierState(features[0]!, features)));
-  await classify(root, cfg, features.slice(0, 1), features, (s) => lines.push(s), 'manual', fakeKey);
-  assert.equal(seen.length, 3); assert.ok(lines.some((l) => /unchanged since its last classification/.test(l)));
-  await classify(root, { ...cfg, maxRequestsPerDay: 3 }, [F('d')], [F('d')], (s) => lines.push(s), 'manual', fakeKey);
-  assert.equal(seen.length, 3); assert.ok(lines.some((l) => /daily request cap 3 reached/.test(l)));
+test('I07 v2: retries are bounded and counted; 401 stops the batch; 422 is not retried; 503 is (F3, F4)', async (t) => {
+  const a = F('a'), b = F('b'), root = project(t, [a, b]);
+  let seen = fakeTypesafe(t, [429, body(a)]);
+  let [rec] = await classify(root, cfg(), [a], () => {}, 'manual', fakeKey);
+  assert.equal(rec!.status, 'assessed'); assert.equal(rec!.attempts, 2); assert.equal(seen.length, 2);
+  assert.equal(JSON.parse(readFileSync(join(root, '.fact-os', 'classifier-usage.json'), 'utf8')).attempts, 2, 'the ledger counts every attempt');
+  seen = fakeTypesafe(t, [401, body(b)]);
+  const lines: string[] = [];
+  const recs = await classify(root, cfg(), [b, F('c')], (s) => lines.push(s), 'manual', fakeKey);
+  assert.equal(recs.length, 1); assert.match(recs[0]!.error!, /401/); assert.equal(seen.length, 1); assert.ok(lines.includes('stopping'));
+  seen = fakeTypesafe(t, [422]);
+  [rec] = await classify(root, cfg(), [b], () => {}, 'manual', fakeKey);
+  assert.match(rec!.error!, /HTTP 422/); assert.equal(seen.length, 1);
+  seen = fakeTypesafe(t, [503, body(b)]);
+  [rec] = await classify(root, cfg(), [b], () => {}, 'manual', fakeKey);
+  assert.equal(rec!.status, 'assessed'); assert.equal(seen.length, 2);
 });
 
-test('I07: without a key nothing is requested; the key comes from TYPESAFE_API_KEY or fact-os .env and is never recorded', async (t) => {
-  const root = project(t), dir = mkdtempSync(join(tmpdir(), 'fact-os-env-')), env = join(dir, '.env');
+test('I07 v2: a Retry-After beyond the deadline sets a cooldown that later invocations honour (F4)', async (t) => {
+  const a = F('a'), root = project(t, [a]);
+  const seen = fakeTypesafe(t, [{ status: 429, headers: { 'retry-after': '120' } }]);
+  const [rec] = await classify(root, cfg({ timeoutMs: 2000 }), [a], () => {}, 'manual', fakeKey);
+  assert.match(rec!.error!, /429; not retried within the deadline/); assert.equal(seen.length, 1);
+  assert.match(cooldown(root)!, /cooling down until/);
+  const lines: string[] = [];
+  assert.deepEqual(await classify(root, cfg(), [a], (s) => lines.push(s), 'manual', fakeKey), []);
+  assert.match(lines[0]!, /cooling down/); assert.equal(seen.length, 1);
+});
+
+test('I07 v2: one deadline covers every attempt (F4)', async (t) => {
+  const a = F('a'), root = project(t, [a]);
+  const server = Bun.serve({ port: 0, fetch: async () => { await Bun.sleep(400); return Response.json(body(a)); } });
+  const prev = process.env.FACTOS_TYPESAFE_URL; process.env.FACTOS_TYPESAFE_URL = `http://127.0.0.1:${server.port}/`;
+  t.after(() => { server.stop(true); process.env.FACTOS_TYPESAFE_URL = prev; });
+  const started = Date.now();
+  const [rec] = await classify(root, cfg({ timeoutMs: 300, maxRetries: 2 }), [a], () => {}, 'manual', fakeKey);
+  assert.equal(rec!.status, 'error'); assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
+});
+
+test('I07 v2: the daily cap counts real attempts including retries (F3)', async (t) => {
+  const a = F('a'), b = F('b'), root = project(t, [a, b]);
+  const seen = fakeTypesafe(t, [429, body(a), body(b)]);
+  const recs = await classify(root, cfg({ maxRequestsPerDay: 2 }), [a, b], () => {}, 'manual', fakeKey);
+  assert.equal(seen.length, 2); assert.equal(recs[0]!.status, 'assessed'); assert.match(recs[1]!.error!, /daily request cap 2 reached/);
+});
+
+test('I07 v2: unchanged input is not asked again; duplicates in a batch are asked once; a policy change re-projects locally (F3, F7)', async (t) => {
+  const a = F('a'), root = project(t, [a]);
+  const seen = fakeTypesafe(t, [body(a), body(a)]);
+  await classify(root, cfg(), [a, a], () => {}, 'manual', fakeKey);
+  assert.equal(seen.length, 1);
+  const lines: string[] = [];
+  await classify(root, cfg(), [a], (s) => lines.push(s), 'manual', fakeKey);
+  assert.equal(seen.length, 1); assert.match(lines[0]!, /unchanged since its last assessment/);
+  // A scorer appears: same answers, new policy identity: re-projected without a request.
+  writeFileSync(join(root, 'scorer.json'), JSON.stringify(parity().scorer));
+  const recs = await classify(root, cfg({ scorer: 'scorer.json' }), [a], () => {}, 'manual', fakeKey);
+  assert.equal(seen.length, 1); assert.equal(recs[0]!.attempts, 0); assert.ok('score' in recs[0]!.assessment!.attention);
+  // A different model is a different input: asked again.
+  await classify(root, cfg({ model: 'jev-1.14.0' }), [a], () => {}, 'manual', fakeKey);
+  assert.equal(seen.length, 2);
+});
+
+test('I07 v2: a feature edited or tiered during its request is recorded stale, and the edit is kept (F8)', async (t) => {
+  const a = F('a'), root = project(t, [a]);
+  fakeTypesafe(t, [body(a)], () => writeFeatures(root, [{ ...a, description: 'rewritten', tier: 'hard' }]));
+  const [rec] = await classify(root, cfg(), [a], () => {}, 'manual', fakeKey);
+  assert.equal(rec!.status, 'stale'); assert.equal(rec!.assessment, undefined);
+  const now = JSON.parse(readFileSync(join(root, '.fact-os', 'features.json'), 'utf8')).features[0];
+  assert.equal(now.description, 'rewritten'); assert.equal(now.tier, 'hard');
+});
+
+test('I07 v2: shadow mode never writes features, and records never contain the key', async (t) => {
+  const a = F('a', { tier: 'normal' }), root = project(t, [a]);
+  const before = readFileSync(join(root, '.fact-os', 'features.json'), 'utf8');
+  fakeTypesafe(t, [body(a, { s02_funds_effect: 0.99 })]);
+  const [rec] = await classify(root, cfg(), [a], () => {}, 'manual', fakeKey);
+  assert.equal(readFileSync(join(root, '.fact-os', 'features.json'), 'utf8'), before);
+  assert.ok(rec!.assessment!.dispositions.some((d) => /human tier normal is authoritative/.test(d)));
+  assert.doesNotMatch(readFileSync(join(root, '.fact-os', 'classifier.jsonl'), 'utf8'), /test-key/);
+  const lines: string[] = [];
+  assert.deepEqual(await classify(root, cfg(), [F('b')], (s) => lines.push(s), 'manual', noKey), []); assert.match(lines[0]!, /no TypeSafe API key/);
+});
+
+test('I07 v2: the TypeScript scorer reproduces the Python pipeline (vectors and scores), Unicode and missing touches included', () => {
+  const { scorer, cases } = parity();
+  for (const c of cases) {
+    const v = { ...codeFeatures(scorer, c.input), ...compositeFeatures(scorer, c.answers)! };
+    scorer.features.forEach((k, i) => assert.ok(Math.abs(v[k]! - c.vector[i]!) < 1e-9, `${c.input.title}: ${k} ${v[k]} vs ${c.vector[i]}`));
+    assert.ok(Math.abs(score(scorer, v)! - c.score) < 1e-9, `${c.input.title}: score ${score(scorer, v)} vs ${c.score}`);
+  }
+  const missing = { ...cases[0]!.answers }; delete missing.s05_authorization;
+  assert.equal(compositeFeatures(scorer, missing), null, 'a partly filled vector gives no score');
+});
+
+test('I07 v2: a malformed or mismatched scorer is rejected, and the assessment says the score is unavailable', (t) => {
+  const root = project(t), file = join(root, 's.json'), { scorer } = parity();
+  writeFileSync(file, JSON.stringify({ ...scorer, coef: scorer.coef.slice(1) })); assert.match((loadScorer(file) as any).error, /do not line up/);
+  writeFileSync(file, JSON.stringify({ ...scorer, scale: scorer.scale.map((x, i) => (i ? x : 0)) })); assert.match((loadScorer(file) as any).error, /do not line up/);
+  writeFileSync(file, JSON.stringify({ ...scorer, battery: 'other' })); assert.match((loadScorer(file) as any).error, /fitted on battery other/);
+  writeFileSync(file, JSON.stringify(scorer)); assert.ok(loadScorer(file).ok);
+  assert.deepEqual(assess(F('a'), probs(F('a')), [], null, 'scorer unreadable').attention, { unavailable: 'scorer unreadable' });
+});
+
+test('I07 v2: projection: review floor, uncertainty band, mechanisms, workload precedence and the compatibility tier', () => {
+  const f = F('a', { title: 'Settings page', description: 'A page' });
+  let a = assess(f, probs(f, { s04_stock_authority: 0.93 }), [f], null);
+  assert.deepEqual(a.reviewRequirements.map((r) => r.axis), ['s04_stock_authority']); assert.equal(a.candidateTier, 'risky');
+  a = assess(f, probs(f, { s07_sensitive_data: 0.85 }), [f], null);
+  assert.equal(a.reviewRequirements.length, 0); assert.deepEqual(a.reviewUncertain.map((r) => r.axis), ['s07_sensitive_data']);
+  assert.equal(a.candidateTier, 'normal'); assert.ok(a.dispositions.some((d) => /review-uncertain: sensitive data/.test(d)));
+  a = assess(f, probs(f, { s11_replay_effect: 0.97, s14_release_evidence: 0.95 }), [f], null);
+  assert.equal(a.candidateTier, 'normal', 'replay or release machinery alone is a mechanism, not a review floor'); assert.equal(a.mechanisms.length, 2);
+  a = assess(f, probs(f, { u02_unresolved_design: 0.9, c04_existing_consumers: 0.9, s02_funds_effect: 0.95 }), [f], null);
+  assert.equal(a.workloadCandidate, 'hard', 'workload is computed even with a review requirement'); assert.equal(a.candidateTier, 'risky');
+  a = assess(f, probs(f, { c06_shared_contract: 0.9, c07_client_and_server: 0.9 }), [f], null);
+  assert.equal(a.candidateTier, 'multi'); assert.deepEqual(a.planningCandidates, ['clientServerContract']);
+  a = assess(f, probs(f, { u01_unknown_root_cause: 0.9, s05_authorization: 0.95 }), [f], null);
+  assert.equal(a.candidateTier, 'investigate'); assert.ok(a.dispositions.some((d) => /routing-review/.test(d)));
+  assert.ok(DIRECT_AXES.every((q) => q.startsWith('s')));
+});
+
+test('I07 v2: dispositions: protected conflict, explicit risk normal, quality-only acceptance, unknown dependencies, unestablished contracts (F5, F6)', () => {
+  const refund = F('r', { title: 'Refund flow', description: 'Refund a payment' });
+  assert.ok(assess(refund, probs(refund), [refund], null).dispositions.some((d) => /protected-conflict: protected feature, candidate normal/.test(d)));
+  const explicit = F('e', { risk: 'normal' });
+  assert.ok(assess(explicit, probs(explicit, { s01_authoritative_amount: 0.95 }), [explicit], null).dispositions.some((d) => /risk-review/.test(d)));
+  const g = F('g', { deps: ['ghost'] });
+  const d = assess(g, probs(g, { u04_quality_only_acceptance: 0.9, u03_unverified_external_contract: 0.9 }), [g], null).dispositions;
+  assert.ok(d.some((x) => /needs-scope/.test(x))); assert.ok(d.some((x) => /unknown dependencies ghost/.test(x))); assert.ok(d.some((x) => /external contract/.test(x)));
+});
+
+test('I07 v2: the report counts current, stale and never-assessed features separately', async (t) => {
+  const a = F('a', { status: 'merged', costUsd: 3 }), b = F('b'), c = F('c'), root = project(t, [a, b, c]);
+  fakeTypesafe(t, [body(a, { s02_funds_effect: 0.95 }), body(b)]);
+  await classify(root, cfg(), [a, b], () => {}, 'manual', fakeKey);
+  const r = report(root, [a, { ...b, description: 'changed' }, c], cfg());
+  assert.match(r, /candidate risky\s+1\s+1\s+0\s+0\.00\s+\$3\.00/);
+  assert.match(r, /1 features with a current assessment \(shadow\), 1 stale \(changed since\), 1 never assessed/);
+  assert.match(report(project(t), [], cfg()), /No v2 assessments yet/);
+});
+
+test('I07 v2: config: off by default, pinned model, v1 thresholds rejected, escalation defaults fill a partial block', (t) => {
+  const root = project(t), file = join(root, '.fact-os', 'config.json');
+  const set = (o: object) => writeFileSync(file, JSON.stringify({ ...DEFAULT_CONFIG, test: 'true', ...o }));
+  set({}); assert.equal(loadConfig(root).classifier, null);
+  set({ classifier: { provider: 'typesafe' } }); assert.deepEqual(loadConfig(root).classifier, CLASSIFIER_DEFAULTS);
+  assert.equal(CLASSIFIER_DEFAULTS.model, 'jev-1.13.0');
+  set({ classifier: { provider: 'typesafe', escalation: { maxPerDay: 3 } } });
+  assert.deepEqual(loadConfig(root).classifier!.escalation, { ...ESCALATION_DEFAULTS, maxPerDay: 3 });
+  for (const c of [{ minConfidence: 0.8 }, { provider: 'openai' }, { mode: 'apply' }, { timeoutMs: 10 }, { maxRetries: 3 }, { scorer: 5 },
+    { escalation: { timeoutMin: 0 } }, { escalation: 'x' }, 'x']) {
+    set({ classifier: c }); assert.throws(() => loadConfig(root), /config\.classifier/, JSON.stringify(c));
+  }
+});
+
+test('I07: the key comes from TYPESAFE_API_KEY or fact-os .env', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fact-os-env-')), env = join(dir, '.env');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(env, '# local\nexport TYPESAFE_API_KEY="from-env-file"\nOTHER=1\n');
   const prev = process.env.TYPESAFE_API_KEY; delete process.env.TYPESAFE_API_KEY;
   t.after(() => { if (prev !== undefined) process.env.TYPESAFE_API_KEY = prev; });
   assert.equal(typesafeKey(env), 'from-env-file'); assert.equal(typesafeKey(join(dir, 'missing')), null);
-  const lines: string[] = [];
-  assert.deepEqual(await classify(root, cfg, [F('a')], [F('a')], (s) => lines.push(s), 'manual', noKey), []);
-  assert.match(lines[0]!, /no TypeSafe API key/);
-  fakeTypesafe(t, [answer('normal', 0.9)]);
-  await classify(root, cfg, [F('a')], [F('a')], () => {}, 'manual', fakeKey);
-  assert.doesNotMatch(readFileSync(join(root, '.fact-os', 'classifier.jsonl'), 'utf8'), /test-key/);
-});
-
-test('I07: the report puts the latest shadow tier beside what each feature actually took', async (t) => {
-  const root = project(t);
-  fakeTypesafe(t, [answer('risky', 0.95, 0.9), answer('normal', 0.9)]);
-  const features = [F('a', { status: 'stuck', attempts: 2, costUsd: 20 }), F('b', { status: 'merged', attempts: 0, costUsd: 2 })];
-  await classify(root, cfg, features, features, () => {}, 'manual', fakeKey);
-  const r = report(root, features);
-  assert.match(r, /risky\s+1\s+0\s+1\s+2\.00\s+\$20\.00\s+1/); assert.match(r, /normal\s+1\s+1\s+0\s+0\.00\s+\$2\.00/);
-  assert.match(report(project(t), features), /No shadow classifications yet/);
-});
-
-test('I07: config: classifier is off by default; shadow is the only mode; defaults fill a partial block', (t) => {
-  const root = project(t), file = join(root, '.fact-os', 'config.json');
-  const set = (o: object) => writeFileSync(file, JSON.stringify({ ...DEFAULT_CONFIG, test: 'true', ...o }));
-  set({}); assert.equal(loadConfig(root).classifier, null);
-  set({ classifier: { provider: 'typesafe' } }); assert.deepEqual(loadConfig(root).classifier, CLASSIFIER_DEFAULTS);
-  for (const c of [{ provider: 'openai' }, { mode: 'apply' }, { minConfidence: 1.5 }, { timeoutMs: 10 }, { maxRetries: 9 }, 'x']) {
-    set({ classifier: c }); assert.throws(() => loadConfig(root), /config\.classifier/, JSON.stringify(c));
-  }
 });
 
 test('I07: factory secrets never reach agents, hooks or scripts', () => {
@@ -134,4 +262,12 @@ test('I07: factory secrets never reach agents, hooks or scripts', () => {
   for (const f of readdirSync(lib).filter((f) => f.endsWith('.ts')))
     for (const [i, line] of readFileSync(join(lib, f), 'utf8').split('\n').entries())
       if (/env: process\.env|\.\.\.process\.env/.test(line) && !/const env = \{ \.\.\.process\.env \};/.test(line)) assert.fail(`${f}:${i + 1} passes process.env to a child`);
+});
+
+test('I07 v2: state shape: the classifier sees the glossary and declared touches, and is told repository facts are not supplied', (t) => {
+  const f = F('a', { touches: ['packages/orders/src/'] });
+  const s = classifierState(f, [f], { money: 'packages/orders' }) as any;
+  assert.deepEqual(s.feature.touches, ['packages/orders/src/']); assert.equal(s.feature.touchesMissing, false);
+  assert.deepEqual(s.codebase, { money: 'packages/orders' }); assert.equal(s.repoFacts.status, 'not_supplied');
+  assert.equal(readRecords(project(t)).length, 0);
 });
