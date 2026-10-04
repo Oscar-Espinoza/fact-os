@@ -338,8 +338,10 @@ Each tick:
         "blocking": string[], "notes": string[], "lesson": string|null }` with one finding per acceptance check plus a
      "production wiring" finding. It is told to look for pass-through implementations, tests that cannot fail,
      skipped/deleted tests and hard-coded results (`cheating`), and to list under `blocking` any defect in money, auth,
-     tenant isolation or state handling, fake- or dev-only paths, multi-line copies of existing helpers, unchecked
-     behaviour changes of existing exports and weakened unrelated tests, even when no acceptance check names them.
+     tenant isolation or state handling, fake- or dev-only paths, multi-line copies of existing production helpers,
+     unchecked behaviour changes of existing exports and weakened unrelated tests, even when no acceptance check names
+     them. Duplicated setup or helpers inside test files are notes, never blocking (Codex applied the rule to test helpers
+     too and rejected otherwise sound features, 2026-10-03).
      Parsing validates the whole object: boolean `pass`, a nonempty findings array,
      every finding an object with nonempty string `check`/`evidence` and boolean `ok`.
      Present `cheating`/`blocking`/`notes` must be arrays of nonempty strings, and

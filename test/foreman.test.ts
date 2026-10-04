@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE } from '../lib/foreman.ts';
+import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt } from '../lib/foreman.ts';
+import { DEFAULT_CONFIG } from '../lib/state.ts';
 import { parseVerdict, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -312,4 +313,15 @@ test('parseCodexEvents: thread id, usage and real failures; warning items are no
   assert.equal(parseCodexEvents(JSON.stringify({ type: 'turn.failed', error: { message: 'usage limit reached' } })).error, 'usage limit reached');
   assert.ok(CODEX_UNAVAILABLE.test("You've hit your usage limit") && !CODEX_UNAVAILABLE.test('stream disconnected before completion'));
   assert.deepEqual(codexArgs({ model: 'gpt-6.1-sol', effort: 'xhigh' }, '/tmp/last').slice(0, 5), ['exec', '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="xhigh"']);
+});
+
+test('evaluatorPrompt: a copied helper blocks only in production code; duplicated test setup is a note', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fact-os-evalprompt-'));
+  try {
+    const f: Feature = { id: 'a', title: 'A', description: '', acceptance: ['works'], surface: 'any', deps: [], priority: 1, status: 'todo', attempts: 0, updatedAt: '' };
+    const p = evaluatorPrompt(root, { ...DEFAULT_CONFIG, lessonsFile: 'none.md' }, f, 'ship/a', '', { code: 0, tail: '' }, []);
+    const blocking = p.slice(p.indexOf('Report under "blocking"'), p.indexOf('Minor remarks'));
+    assert.match(blocking, /multi-line copy of an existing\s+production helper/);
+    assert.match(p, /Duplicated setup or helpers inside test files go under "notes"/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

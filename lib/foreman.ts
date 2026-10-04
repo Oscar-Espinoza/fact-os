@@ -264,8 +264,9 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     'Report any under "cheating".',
     'Report under "blocking" every problem that must stop the merge even if no acceptance check names it: a defect in money, auth,',
     'tenant isolation or state handling; a path that only works with a fake or a development setting; a multi-line copy of an existing',
-    'helper (name both file:line locations); changed behaviour of an existing export whose callers were not checked; edits to unrelated',
-    'tests that weaken them. Minor remarks go under "notes" and do not block. "lesson" is only advice for future builders.', '',
+    'production helper (name both file:line locations); changed behaviour of an existing export whose callers were not checked; edits to',
+    'unrelated tests that weaken them. Duplicated setup or helpers inside test files go under "notes" (suggest the shared helper), never',
+    'under "blocking". Minor remarks go under "notes" and do not block. "lesson" is only advice for future builders.', '',
     `Test command \`${config.test}\` exited ${test.code}. Output tail:\n\`\`\`\n${test.tail}\n\`\`\``, '',
     resolved ? `This branch resolved a merge conflict with ${config.base} in this pass. Also verify that the features merged into ` +
       `${config.base} it conflicted with still behave as their acceptance checks say (a failure there fails this feature):\n${resolved}\n` : '',
