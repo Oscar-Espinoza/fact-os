@@ -1370,3 +1370,98 @@ test('I06: on-mock tasks captured at launch reach the evaluator even when the ta
   assert.doesNotMatch(s.calls('eval', 'b')[0]!.prompt, /ON MOCK/, 'a stale onMock flag without open tasks stays strict');
   assert.equal(s.feature('b').onMock, false);
 });
+
+// I06 review regressions (ported from the independent Codex review's scratch probes)
+const mockTask = (id = 'H-API', patch: Record<string, unknown> = {}) => ({ id, title: `API ${id}`, steps: [`scope ${id}`], unblocks: ['a'], mockable: true, status: 'open', ...patch });
+const humanTasks = (s: Setup, tasks: unknown[]) => writeFileSync(join(s.repo, '.fact-os/human.json'), JSON.stringify({ tasks }));
+
+test('I06 review: a blocker that turns unmockable before the claim makes --watch wait, not exit', async (t) => {
+  const s = setup(t, { features: [F('a')] }); humanTasks(s, [mockTask()]);
+  const fixture = fileURLToPath(new URL('./fixtures/onmock-watch.ts', import.meta.url));
+  const cp = spawn(process.execPath, [fixture, s.repo], { cwd: s.repo, env: s.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; cp.stdout.on('data', (d) => { out += d; }); cp.stderr.on('data', (d) => { out += d; });
+  const exit = new Promise((r) => cp.once('exit', r)); t.after(() => { if (cp.exitCode === null) cp.kill('SIGKILL'); });
+  assert.ok(await until(() => existsSync(join(s.repo, '.fact-os/launch-wait'))), out);
+  await mutate(s.repo, 'human', (d) => { d.tasks[0]!.mockable = false; });
+  writeFileSync(join(s.repo, '.fact-os/launch-release'), 'edited');
+  await sleep(400);
+  assert.equal(s.calls('build', 'a').length, 0);
+  assert.equal(cp.exitCode, null, 'watch exited instead of waiting: ' + out);
+  await mutate(s.repo, 'human', (d) => { d.tasks[0]!.mockable = true; });
+  assert.equal(await exit, 0, out);
+});
+
+test('I06 review: the inline resolver and the gate diagnoser get the same frozen mock scope', (t) => {
+  const r1 = setup(t, { features: [F('a')], config: { refreshBeforeTest: true, resolver: { model: 'fake' } }, scenario: { a: 'close-tasks,base-conflict' } });
+  humanTasks(r1, [mockTask()]); let r = r1.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r1.calls('resolve', 'a')[0]!.prompt, /ON MOCK[\s\S]*H-API: API H-API/);
+  const d1 = setup(t, { features: [F('a')], config: { test: GATE, gateFixes: 1, diagnoser: { model: 'fake' }, maxAttempts: 1 }, scenario: { a: 'break,close-tasks,fix:noop1' } });
+  humanTasks(d1, [mockTask()]); r = d1.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(d1.calls('diagnose', 'a')[0]!.prompt, /ON MOCK[\s\S]*H-API: API H-API/);
+});
+
+test('I06 review: several tasks and their scopes are shared; unrelated and done tasks never authorize a mock', (t) => {
+  const s = setup(t, { features: [F('a')] });
+  humanTasks(s, [mockTask('H-ONE'), mockTask('H-TWO'), mockTask('H-DONE', { status: 'done' }), mockTask('H-OTHER', { unblocks: [] })]);
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const mode of ['build', 'eval']) {
+    const p = s.calls(mode, 'a')[0]!.prompt;
+    for (const id of ['H-ONE', 'H-TWO']) { assert.match(p, new RegExp(`${id}: API ${id}`)); assert.match(p, new RegExp(`scope ${id}`)); }
+    assert.doesNotMatch(p, /H-DONE|H-OTHER/);
+  }
+});
+
+test('I06 review: a repeated evaluation in the same pass keeps the launch scope after tasks close, reopen and broaden', async (t) => {
+  const s = setup(t, { features: [F('a'), F('b')], config: { maxParallel: 2, refreshBeforeTest: true, maxAttempts: 1 }, scenario: { a: 'close-tasks,slow' } });
+  humanTasks(s, [mockTask('H-ONE')]); parallelGate(s, 'true');
+  const run = s.start(); assert.ok(await until(() => s.feature('a').status === 'evaluating'), run.out());
+  await mutate(s.repo, 'human', (d) => { Object.assign(d.tasks[0]!, { status: 'open', title: 'expanded title', steps: ['broadened capability'] }); });
+  assert.equal(await run.exit, 0, run.out());
+  const ev = s.calls('eval', 'a'); assert.equal(ev.length, 2);
+  for (const call of ev) { assert.match(call.prompt, /H-ONE: API H-ONE/); assert.doesNotMatch(call.prompt, /expanded title|broadened capability/); }
+});
+
+test('I06 review: a real state defect still rejects an on-mock feature and counts a failure', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 }, verdicts: { a: [{ pass: true, findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked' }],
+    cheating: [], blocking: ['cancellation ignores in_production'], notes: [], lesson: null }] } });
+  humanTasks(s, [mockTask('H-ONE')]); const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  const p = s.calls('eval', 'a')[0]!.prompt;
+  assert.match(p, /any defect in money, auth, tenant isolation or state handling/);
+  assert.match(p, /development-only setting \(outside the on-mock tasks below\)/);
+  assert.match(p, /a fake or a development setting outside the on-mock tasks below/, 'both unconditional rules carry the exception');
+  assert.match(p, /a fake enabled in production still blocks/);
+});
+
+for (const change of ['unmockable', 'edited']) test(`I06 review: the locked claim sees a task ${change} after scheduling`, async (t) => {
+  const s = setup(t, { features: [F('a')] }); humanTasks(s, [mockTask('H-API', { steps: ['original scope'] })]);
+  const fixture = fileURLToPath(new URL('./fixtures/acceptance-launch.ts', import.meta.url));
+  const cp = spawn(process.execPath, [fixture, s.repo], { cwd: s.repo, env: s.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; cp.stdout.on('data', (d) => { out += d; }); cp.stderr.on('data', (d) => { out += d; });
+  const exit = new Promise((r) => cp.once('exit', r)); t.after(() => { if (cp.exitCode === null) cp.kill('SIGKILL'); });
+  assert.ok(await until(() => existsSync(join(s.repo, '.fact-os/launch-wait'))), out);
+  await mutate(s.repo, 'human', (d) => { if (change === 'unmockable') d.tasks[0]!.mockable = false; else d.tasks[0]!.steps = ['updated at claim']; });
+  writeFileSync(join(s.repo, '.fact-os/launch-release'), 'edited');
+  assert.equal(await exit, change === 'unmockable' ? 2 : 0, out);
+  if (change === 'unmockable') { assert.equal(s.calls('build', 'a').length, 0); assert.equal(s.feature('a').status, 'todo'); }
+  else for (const mode of ['build', 'eval']) { assert.match(s.calls(mode, 'a')[0]!.prompt, /updated at claim/); assert.doesNotMatch(s.calls(mode, 'a')[0]!.prompt, /original scope/); }
+});
+
+test('I06 review: the next launch takes a fresh scope, even when it reuses the build', (t) => {
+  const s = setup(t, { features: [F('a')], config: { refreshBeforeTest: true }, scenario: { a: 'close-tasks' } });
+  humanTasks(s, [mockTask()]); writeFileSync(join(s.repo, 'README.md'), 'local edit\n');
+  let r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr); assert.equal(s.feature('a').status, 'ready');
+  s.git('checkout', '-q', 'README.md'); s.git('commit', '--allow-empty', '-qm', 'user advance');
+  r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.calls('build', 'a').length, 1); const ev = s.calls('eval', 'a'); assert.equal(ev.length, 2);
+  assert.match(ev[0]!.prompt, /H-API: API H-API/); assert.doesNotMatch(ev[1]!.prompt, /ON MOCK/);
+  assert.equal(s.feature('a').onMock, false);
+});
+
+for (const fallback of [false, true]) test(`I06 review: the Codex${fallback ? ' fallback' : ''} evaluator gets the same on-mock prompt`, (t) => {
+  const s = codexSetup(t, { features: [F('a')], config: { evaluator: SOL }, scenario: { a: 'close-tasks' + (fallback ? ',codex:fail' : '') } });
+  humanTasks(s, [mockTask(), mockTask('H-OTHER', { unblocks: ['different'] }), mockTask('H-DONE', { status: 'done' })]);
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  const cp = s.calls('codex', 'a')[0]!.prompt, ep = s.calls('eval', 'a')[0]!.prompt;
+  assert.equal(cp, ep); assert.match(ep, /H-API: API H-API/); assert.doesNotMatch(ep, /H-OTHER|H-DONE/);
+});

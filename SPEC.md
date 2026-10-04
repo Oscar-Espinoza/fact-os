@@ -209,7 +209,9 @@ that turned non-mockable defers the launch) and kept for the whole pass, closed 
 and evaluator get the same list (id, title, steps): the builder mocks exactly that external capability behind a
 swappable boundary, with production failing explicitly; the evaluator treats a missing real adapter there as a
 documented deferral (notes keyed by task id), and still blocks a mock beyond those tasks, a fake enabled in
-production and any other wiring or state defect. Without on-mock tasks the evaluator's rules are unchanged.
+production and any other wiring or state defect. The inline resolver and the gate diagnoser get the same
+scope. A claim refused because readiness changed re-ticks before `--watch` decides to idle or exit. Without on-mock
+tasks the evaluator's rules are unchanged.
 A feature blocked by an open non-mockable human task
 is **waiting-on-human**. Ready features are ordered by priority, then by how many other features
 transitively depend on them (more first), then id. Dependency cycles and unknown dep ids are reported

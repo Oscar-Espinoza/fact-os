@@ -346,11 +346,18 @@ export function commitFixPrompt(config: Config, problem: string): string {
 }
 
 // The read-only diagnosis of a gate failure that a resumed fix did not cure (config.diagnoser, run in plan mode).
-export function diagnosisPrompt(config: Config, f: Feature, branch: string, failure: string, diffStat: string, edits: string[]): string {
+// The launch's on-mock scope for the fresh sessions that did not see the builder's prompt (resolver, diagnoser).
+const onMockBrief = (tasks: HumanTask[], extra: string): string => tasks.length ? 'ON MOCK: these human tasks were open when ' +
+  'this feature launched, so it builds against an isolated mock of the external capability they provide, behind a swappable ' +
+  `boundary, with production failing explicitly while no real integration exists:\n${mockList(tasks)}\n${extra}\n` : '';
+
+export function diagnosisPrompt(config: Config, f: Feature, branch: string, failure: string, diffStat: string, edits: string[], mockTasks: HumanTask[] = []): string {
   return [`You diagnose a failed test gate for feature "${f.id}": ${f.title}`,
     `Branch ${branch}, in this worktree; the builder already tried to fix this failure once. Do not edit, create or delete files and do not ` +
     'commit: read the code and run only read-only commands (for example a single failing test file).', '',
     'Acceptance checks:', ...(f.acceptance || []).map((a) => `- ${a}`), '',
+    onMockBrief(mockTasks, 'A missing real integration of exactly that capability is a deliberate deferral, not a code fault to fix ' +
+      'now; a broken mock boundary, internal wiring or state handling is a code fault, and a fake enabled in production is never the fix.'),
     `The gate \`${config.test}\` output:`, '```', failure, '```', '',
     `What the branch changes (git diff --stat against ${config.base}):`, '```', diffStat || '(nothing)', '```',
     edits.length ? `\nEdits to tests that already exist on ${config.base}:\n${edits.map((e) => `- ${e}`).join('\n')}` : '', '',
@@ -361,10 +368,12 @@ export function diagnosisPrompt(config: Config, f: Feature, branch: string, fail
   ].join('\n');
 }
 
-function resolverPrompt(root: string, config: Config, f: Feature, branch: string, brief: string, notes = ''): string {
+function resolverPrompt(root: string, config: Config, f: Feature, branch: string, brief: string, notes = '', mockTasks: HumanTask[] = []): string {
   return [`You are the merge resolver for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}. The foreman started merging ${config.base} into it and the merge conflicts; ` +
     'the merge is in progress. Your only job is to finish it so that both sides keep working.', '', brief, '',
+    onMockBrief(mockTasks, 'Keep that mock behind its boundary while resolving: do not wire the fake into production and do not ' +
+      'replace it with a real integration here.'),
     'Rules:', '- Resolve every conflict keeping both behaviours: this feature\'s and each feature listed above. Read the code around the ' +
     'hunks, not just the markers. Where both sides add entries to one list or object, keep every entry, each with its own closing lines.',
     '- Keep every line either side added. If one must go or change (a duplicate, a key or number both sides used), list each such ' +
@@ -649,7 +658,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       log(root, id, 'resolving', rec.files.join(', '));
       out(`resolve ${id}: ${rec.files.join(', ')}`);
       const rn = notesFor('resolver');
-      const rp = resolverPrompt(root, config, f, branch, pending?.text || cur.lastFeedback || '', notesBlock(roleCfg('resolver').model, 'resolver', rn));
+      const rp = resolverPrompt(root, config, f, branch, pending?.text || cur.lastFeedback || '', notesBlock(roleCfg('resolver').model, 'resolver', rn), mockTasks);
       recordPrompt('resolver', rp, rn);
       const r = await claude('resolver', rp, `${tag}-resolve.json`);
       if (await stopped()) return null;
@@ -825,7 +834,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (await stopped()) return 'stopped';
       const head = git(['rev-parse', 'HEAD'], wt).out, dcfg = { ...config.diagnoser!, permissionMode: 'plan' };
       const mb = git(['merge-base', config.base, head], wt).out;
-      const prompt = diagnosisPrompt(config, f, branch, failure, git(['diff', '--stat=160', `${mb}..${head}`], wt).out, testEdits(wt, mb, head));
+      const prompt = diagnosisPrompt(config, f, branch, failure, git(['diff', '--stat=160', `${mb}..${head}`], wt).out, testEdits(wt, mb, head), mockTasks);
       writeFileSync(join(runDir, `${tag}-diagnose.prompt.md`), prompt);
       const r = await agent('builder', prompt, `${tag}-diagnose.json`, { cfg: dcfg });
       if (await stopped()) return 'stopped';
@@ -1136,6 +1145,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         (f.deps || []).some((d) => features.find((x) => x.id === d)?.status === 'ready')).map((f) => f.id) : [];
       if (!manualWaiting.length) lastManualWaiting = '';
       const overBudget = config.budgetUsdTotal != null && spent >= config.budgetUsdTotal; // null = unlimited
+      let claimDeferred = false; // a ready feature the locked claim refused this tick (see the idle/exit decision)
       const capped = () => opts.maxFeatures != null && launched >= opts.maxFeatures;
       if (!stopping && !overBudget && !onceDone && !tampered()) {
         const running = features.filter((f) => IN_FLIGHT.includes(f.status) || inflight.has(f.id));
@@ -1188,7 +1198,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
               stop: undefined, pid: undefined, pidStart: undefined, foremanPid: undefined, updatedAt: now() });
             return snapshot;
           });
-          if (!f) continue;
+          if (!f) { claimDeferred = true; continue; }
           busy.add(g);
           launched++;
           if (claims) claims.held.push([id, filesOf(f)]);
@@ -1237,6 +1247,9 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       }
       // --watch also waits while features are paused, or ready ones are held by a pause / lanes 0 (control.json), so resuming
       // (CLI or dashboard) launches them.
+      // A launch the locked claim refused (its readiness changed since this tick's load, e.g. a human task turned unmockable):
+      // decide idling or exiting on fresh state, not this tick's analysis.
+      if (claimDeferred) continue;
       if (!(opts.watch && (a.waiting.length || manualWaiting.length || features.some((f) => f.status === 'paused') || (limit === 0 && a.ready.length)))) break;
       if (manualWaiting.length && manualWaiting.join() !== lastManualWaiting) {
         lastManualWaiting = manualWaiting.join();
