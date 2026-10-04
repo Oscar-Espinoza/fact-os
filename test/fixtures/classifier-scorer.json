@@ -251,13 +251,17 @@
    "auroc": 0.723,
    "codeOnlyAuprc": 0.289
   },
-  "note": "Test copy of the ecommerce dev-fit scorer with training/reference feature ids removed; used only for parity checks."
+  "note": "Test copy of the ecommerce dev-fit scorer with training/reference feature ids removed; used only for parity checks.",
+  "targetContract": {
+   "id": "anyRework",
+   "positive": "rework"
+  }
  },
  "cases": [
   {
    "input": {
-    "title": "Refund flow ✓ for café orders",
-    "description": "Issue partial refunds with permission checks; ledger entries are idempotent. Ünïcödé 💳 text.",
+    "title": "Refund flow \u2713 for caf\u00e9 orders",
+    "description": "Issue partial refunds with permission checks; ledger entries are idempotent. \u00dcn\u00efc\u00f6d\u00e9 \ud83d\udcb3 text.",
     "acceptance": [
      "A refund of 500 cents creates one ledger entry.",
      "Staff without orders.refund get 403.",

@@ -8,11 +8,11 @@
 // Contract agreed with the Codex partner (round 3); repaired after the d9f3ffe review.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, normalize, isAbsolute } from 'node:path';
 import { paths, envVar, withLock, readJson, writeJsonAtomic, childEnv, loadState, pidAlive } from './state.ts';
-import { BATTERY, DIRECT_AXES, HI, DIRECT, authorityOf, classifierState, inputHash, loadContext, questionsFor, readRecords, recordsFile,
+import { BATTERY, DIRECT_AXES, HI, DIRECT, authorityOf, classifierState, credentialIn, inputHash, loadContext, questionsFor, readRecords, recordsFile,
   type Assessment, type ClassifierRecord } from './classifier.ts';
 import type { ClassifierConfig, Config, EscalationConfig, HumanTask, Tier } from './types.ts';
 
@@ -155,7 +155,8 @@ export function responseSchema(req: Request): object {
 type Ref = { kind: 'spec'; field: string; itemIndex: number | null; quote: string } | { kind: 'repo'; path: string; blobOid: string; startLine: number; endLine: number; quote: string };
 export interface AgentAnswer { value: true | false | 'unknown'; reason: string; evidence: Ref[] }
 // rejected: answers whose evidence failed verification, with the reason; they are kept for inspection and never composed.
-export interface AgentResponse { answers: Record<string, AgentAnswer>; rejected?: Record<string, string>; planning?: { concern: string; evidence: Ref[] } }
+export interface RejectedAnswer { value: true | false | 'unknown'; reason: string; evidence: unknown[]; error: string }
+export interface AgentResponse { answers: Record<string, AgentAnswer>; rejected?: Record<string, RejectedAnswer>; planning?: { concern: string; evidence: Ref[] } }
 
 const exact = (o: unknown, keys: string[]) => !!o && typeof o === 'object' && !Array.isArray(o) &&
   Object.keys(o).length === keys.length && keys.every((k) => Object.hasOwn(o, k));
@@ -174,6 +175,20 @@ export function validateResponse(raw: string, req: Request, repo: { root: string
   const ids = Object.keys(req.questions);
   if (!exact(v.answers, ids)) return { ok: false, error: 'answers do not cover exactly the requested ids' };
   const blobs = new Map<string, string[]>();
+  // Phase 1, the whole response: every reference must have exactly the contract's shape and types.
+  const shapeOk = (r: any) => r?.kind === 'spec' ? exact(r, ['kind', 'field', 'itemIndex', 'quote']) && text(r.quote) && typeof r.field === 'string' && (r.itemIndex === null || Number.isInteger(r.itemIndex))
+    : r?.kind === 'repo' ? exact(r, ['kind', 'path', 'startLine', 'endLine', 'quote']) && text(r.quote) && typeof r.path === 'string' && Number.isInteger(r.startLine) && Number.isInteger(r.endLine) : false;
+  for (const q of ids) {
+    const a = v.answers[q];
+    if (!exact(a, ['value', 'reason', 'evidence']) || ![true, false, 'unknown'].includes(a.value) || !text(a.reason) || !Array.isArray(a.evidence) || a.evidence.length > MAX_REFS || !a.evidence.every(shapeOk))
+      return { ok: false, error: `answer ${q} is malformed` };
+  }
+  if (rootKeys.includes('planning')) {
+    const p = v.planning;
+    if (!exact(p, ['concern', 'evidence']) || !text(p.concern) || !Array.isArray(p.evidence) || !p.evidence.length || p.evidence.length > MAX_REFS || !p.evidence.every(shapeOk))
+      return { ok: false, error: 'planning is malformed' };
+  }
+  // Phase 2, per answer: sources, ranges and exact quotes.
   const check = (r: any): { ref?: Ref; error?: string } => {
     if (r?.kind === 'spec') {
       if (!exact(r, ['kind', 'field', 'itemIndex', 'quote']) || !text(r.quote)) return { error: 'malformed spec reference' };
@@ -198,25 +213,20 @@ export function validateResponse(raw: string, req: Request, repo: { root: string
     }
     return { error: 'unknown reference kind' };
   };
-  // A malformed answer invalidates the whole response; an answer whose evidence fails verification is rejected on its own (kept
-  // with the reason, never composed), so one bad quote does not discard the other verified answers.
-  const answers: Record<string, AgentAnswer> = {}, rejected: Record<string, string> = {};
+  // A well-shaped answer whose evidence fails verification is rejected on its own: kept whole with the verification error, never
+  // composed, so one bad quote does not discard the other verified answers.
+  const answers: Record<string, AgentAnswer> = {}, rejected: Record<string, RejectedAnswer> = {};
   for (const q of ids) {
-    const a = v.answers[q];
-    if (!exact(a, ['value', 'reason', 'evidence']) || ![true, false, 'unknown'].includes(a.value) || !text(a.reason) || !Array.isArray(a.evidence) || a.evidence.length > MAX_REFS)
-      return { ok: false, error: `answer ${q} is malformed` };
-    const refs: Ref[] = [];
+    const a = v.answers[q], refs: Ref[] = [];
     let bad: string | null = null;
-    for (const r of a.evidence) { const c = check(r); if (c.error) { bad = `${c.error}: ${JSON.stringify(r).slice(0, 400)}`; break; } refs.push(c.ref!); }
+    for (const r of a.evidence) { const c = check(r); if (c.error) { bad = c.error; break; } refs.push(c.ref!); }
     if (!bad && a.value !== 'unknown' && !refs.some((r) => r.kind === 'spec')) bad = 'true/false needs a spec reference';
-    if (bad) { rejected[q] = `${bad} (value ${JSON.stringify(a.value)})`; continue; }
+    if (bad) { rejected[q] = { value: a.value, reason: a.reason.trim(), evidence: a.evidence, error: bad }; continue; }
     answers[q] = { value: a.value, reason: a.reason.trim(), evidence: refs };
   }
   let planning: AgentResponse['planning'];
   if (rootKeys.includes('planning')) {
-    const p = v.planning;
-    if (!exact(p, ['concern', 'evidence']) || !text(p.concern) || !Array.isArray(p.evidence) || !p.evidence.length || p.evidence.length > MAX_REFS) return { ok: false, error: 'planning is malformed' };
-    const refs: Ref[] = [];
+    const p = v.planning, refs: Ref[] = [];
     for (const r of p.evidence) { const c = check(r); if (c.error) return { ok: false, error: `planning: ${c.error}` }; refs.push(c.ref!); }
     planning = { concern: p.concern.trim(), evidence: refs };
   }
@@ -272,11 +282,13 @@ export function runBounded(cmd: string, args: string[], cwd: string, input: stri
     const outChunks: Buffer[] = [], errChunks: Buffer[] = [];
     let outBytes = 0, errBytes = 0, oversized = false, timedOut = false, cancelled = false, spawnError: string | undefined, finished = false;
     const stop = () => { if (cp.pid) void reap(cp.pid, deadlineAt); };
-    cp.stdout!.on('data', (d: Buffer) => { if (outBytes + d.length > MAX_OUTPUT) { if (!oversized) { oversized = true; stop(); } return; } outBytes += d.length; outChunks.push(d); });
+    // Overflow is a hard stop: no grace for a writer that is filling the disk or memory.
+    const kill = () => { if (cp.pid) void reap(cp.pid, Date.now()); };
+    cp.stdout!.on('data', (d: Buffer) => { if (outBytes + d.length > MAX_OUTPUT) { if (!oversized) { oversized = true; kill(); } return; } outBytes += d.length; outChunks.push(d); });
     cp.stderr!.on('data', (d: Buffer) => { if (errBytes + d.length <= 64 * 1024) { errBytes += d.length; errChunks.push(d); } });
     const timer = setTimeout(() => { timedOut = true; stop(); }, Math.max(1, budget - grace));
     // The final-message file is an output channel too: stop the agent as soon as it outgrows the cap.
-    const watch = watchFile ? setInterval(() => { try { if (statSync(watchFile).size > MAX_OUTPUT && !oversized) { oversized = true; stop(); } } catch {} }, 100) : null;
+    const watch = watchFile ? setInterval(() => { try { if (statSync(watchFile).size > MAX_OUTPUT && !oversized) { oversized = true; kill(); } } catch {} }, 100) : null;
     const onAbort = () => { cancelled = true; stop(); };
     signal?.addEventListener('abort', onAbort, { once: true });
     cp.on('error', (e) => { spawnError = e.name; });
@@ -361,10 +373,15 @@ const editLedger = <R>(root: string, fn: (u: EscUsage) => R, timeoutMs: number):
 // A lease is held while its owner process lives (a crashed owner's lease is reclaimed; a live orphan's is not, even past its time).
 const procStart = (pid: number): string | null => { try { const s = readFileSync(`/proc/${pid}/stat`, 'utf8'); return s.slice(s.lastIndexOf(')') + 2).split(' ')[19] || null; } catch { return null; } };
 // The agent recorded in a lease still runs (same pid and process start, so a reused pid is not mistaken for it).
-const agentAlive = (l: Lease) => !!l.agentPid && (groupAlive(l.agentPid) || pidAlive(l.agentPid)) && (l.agentStart == null || procStart(l.agentPid) === l.agentStart);
+// The agent's process group: alive while any member lives, even after its leader exited; a leader pid that now belongs to a
+// different process (another start time) is not ours.
+const agentAlive = (l: Lease) => { if (!l.agentPid) return false; const st = procStart(l.agentPid);
+  return (groupAlive(l.agentPid) || pidAlive(l.agentPid)) && (l.agentStart == null || st == null || st === l.agentStart); };
+const agentFile = (root: string, id: string) => join(paths(root).dir, 'classifier-agents', `${id}.json`);
+const agentOf = (root: string, id: string): Lease | null => { try { return JSON.parse(readFileSync(agentFile(root, id), 'utf8')); } catch { return null; } };
 // A claim holds while its caller lives, its agent's process group lives (even past `until`: a crashed caller's orphan keeps it),
 // or its time has not run out.
-const leaseHeld = (l: Lease | undefined) => !!l && (pidAlive(l.pid) || agentAlive(l) || Date.parse(l.until) > Date.now());
+const leaseHeld = (l: Lease | undefined, agent?: Lease | null) => !!l && (pidAlive(l.pid) || agentAlive(l) || (!!agent && agent.owner === l.owner && agentAlive(agent)) || Date.parse(l.until) > Date.now());
 
 export interface StartLog { provider: 'codex' | 'claude'; model: string | undefined; effort: string | undefined; category: Category | 'answered'; elapsedMs: number;
   usage: Record<string, number> | null; costUsd: number | null }
@@ -380,9 +397,12 @@ export function readEscalations(root: string): EscalationRecord[] {
   return readFileSync(f, 'utf8').split('\n').flatMap((l) => { try { const r = l ? JSON.parse(l) : null; return r?.kind === 'escalation' ? [r as EscalationRecord] : []; } catch { return []; } });
 }
 const completedFor = (root: string, id: string) => readEscalations(root).filter((e) => e.assessmentId === id && (e.status === 'completed' || e.status === 'recomposed')).at(-1);
-// The open human tasks for a feature, with the facts they carry (steps, who is being waited on), bounded.
-const tasksFor = (tasks: HumanTask[], id: string) => tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id)).slice(0, 10)
-  .map((t) => ({ id: t.id, title: t.title.slice(0, 300), mockable: t.mockable, steps: (t.steps || []).slice(0, 20).map((s) => s.slice(0, 500)), waitingOn: t.waitingOn?.slice(0, 200) ?? null }));
+// The open human tasks for a feature, with the facts they carry (steps, who is being waited on), complete: never clipped.
+const tasksFor = (tasks: HumanTask[], id: string) => tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id))
+  .map((t) => ({ id: t.id, title: t.title, mockable: t.mockable, steps: [...(t.steps || [])], waitingOn: t.waitingOn ?? null }));
+// Bounds on that context; beyond them the assessment is deferred rather than sent with facts cut off.
+const MAX_TASKS = 10, MAX_STEPS = 20, MAX_STEP = 500;
+const tasksTooLarge = (ts: ReturnType<typeof tasksFor>) => ts.length > MAX_TASKS || ts.some((t) => t.title.length > 300 || t.steps.length > MAX_STEPS || t.steps.some((s) => s.length > MAX_STEP) || (t.waitingOn?.length ?? 0) > 200);
 
 // ---- escalate ----
 
@@ -393,9 +413,27 @@ function keepRequest(root: string, req: Request, hash: string): string {
   return `classifier-context/escalation-${hash}.json`;
 }
 const PUBLISH_MS = 2000; // reserved at the end of every assessment's deadline for validation and publication
+// A terminal result is staged on disk before publication, so a publication that cannot get the lock in time is not lost: the
+// next run publishes it and releases its claim.
+const stagedDir = (root: string) => join(paths(root).dir, 'classifier-staged');
+async function reconcileStaged(root: string, out: (s: string) => void) {
+  if (!existsSync(stagedDir(root))) return;
+  for (const name of readdirSync(stagedDir(root))) {
+    const file = join(stagedDir(root), name);
+    await withLock(root, () => {
+      let rec: EscalationRecord; try { rec = JSON.parse(readFileSync(file, 'utf8')); } catch { rmSync(file, { force: true }); return; }
+      if (!readEscalations(root).some((e) => e.assessmentId === rec.assessmentId && e.ts === rec.ts && e.status === rec.status)) appendFileSync(recordsFile(root), JSON.stringify(rec) + '\n');
+      const u = readJson(ledger(root), null) as EscUsage | null;
+      if (u?.inflight?.[rec.assessmentId]) { delete u.inflight[rec.assessmentId]; writeJsonAtomic(ledger(root), u); }
+      rmSync(file, { force: true });
+      out(`${rec.feature}: published a staged escalation result (${rec.status})`);
+    }, { timeoutMs: 5000 }).catch(() => {});
+  }
+}
 
 export async function escalate(root: string, config: Config, cfg: ClassifierConfig, esc: EscalationConfig, featureIds: string[], out: (s: string) => void,
   signal?: AbortSignal): Promise<EscalationRecord[]> {
+  await reconcileStaged(root, out);
   const ctx = loadContext(root, cfg);
   const written: EscalationRecord[] = [], owner = `${process.pid}-${randomBytes(4).toString('hex')}`;
   const append = (rec: EscalationRecord) => { appendFileSync(recordsFile(root), JSON.stringify(rec) + '\n'); written.push(rec); return rec; };
@@ -418,6 +456,9 @@ export async function escalate(root: string, config: Config, cfg: ClassifierConf
   const humanOnly = new Set(features.filter((f) => tasks.some((t) => t.status === 'open' && !t.mockable && (t.unblocks || []).includes(f.id))).map((f) => f.id));
   const { selected, skipped } = selectCandidates(current, esc, esc.reviewPlanning, humanOnly);
   for (const s of skipped) { note(s.feature, 'excluded', s.reason); out(`${s.feature}: escalation skipped (${s.reason})`); }
+  for (const r of current) if (!selected.some((c) => c.feature === r.feature) && !skipped.some((s) => s.feature === r.feature))
+    note(r.feature, 'excluded', humanOnly.has(r.feature) && (r.answers?.u03_unverified_external_contract ?? 0) >= HI
+      ? 'needs-context: a person must supply the external contract (open human task)' : 'no unsure review question');
   if (!selected.length) { out('escalation: nothing selected'); return written; }
   const ac = new AbortController(), cancel = () => ac.abort();
   if (signal?.aborted) ac.abort();
@@ -457,6 +498,8 @@ export async function escalate(root: string, config: Config, cfg: ClassifierConf
         out(`${f.id}: escalation re-derived locally`); continue;
       }
       if (Buffer.byteLength(prompt) > MAX_REQUEST) { append(rec({ status: 'skipped', reason: `request larger than ${MAX_REQUEST} bytes` })); out(`${f.id}: escalation skipped (request too large)`); continue; }
+      if (tasksTooLarge(humanTasks)) { append(rec({ status: 'deferred', reason: 'human task context exceeds its bounds; not sent clipped' })); out(`${f.id}: escalation deferred (human task context too large)`); continue; }
+      if (credentialIn(req)) { append(rec({ status: 'skipped', reason: 'the request looks like it contains a credential; not sent or kept' })); out(`${f.id}: escalation skipped (credential in the request)`); continue; }
       if (starts >= esc.maxPerRun) { append(rec({ status: 'deferred', reason: `per-run cap ${esc.maxPerRun}` })); out(`${f.id}: escalation deferred (per-run cap ${esc.maxPerRun})`); continue; }
       const requestFile = keepRequest(root, req, requestHash);
       const deadline = Date.now() + esc.timeoutMin * 60_000, runUntil = deadline - Math.min(PUBLISH_MS, esc.timeoutMin * 60_000 / 4), t0 = Date.now(), left = () => runUntil - Date.now();
@@ -469,14 +512,17 @@ export async function escalate(root: string, config: Config, cfg: ClassifierConf
         const st = loadState(root), cur = st.features.find((x) => x.id === f.id);
         if (!cur || !isCurrent(c.parent, st.features) || JSON.stringify(tasksFor(st.tasks, f.id)) !== JSON.stringify(humanTasks) || loadContext(root, cfg).glossaryHash !== ctx.glossaryHash)
           return 'the feature changed since it was selected';
+        const ho = new Set(st.tasks.some((t) => t.status === 'open' && !t.mockable && (t.unblocks || []).includes(f.id)) ? [f.id] : []);
+        const again = selectCandidates([c.parent], esc, esc.reviewPlanning, ho).selected[0];
+        if (!again || again.questions.join() !== c.questions.join() || again.planning !== c.planning) return 'its eligible questions changed since it was selected';
         if (starts >= esc.maxPerRun) return `per-run cap ${esc.maxPerRun}`;
         if (u.starts >= esc.maxPerDay) return 'daily escalation cap reached';
         const held = u.inflight[assessmentId];
-        if (held && held.owner !== owner && leaseHeld(held)) return 'already running in another process';
+        if (held && held.owner !== owner && leaseHeld(held, agentOf(root, assessmentId))) return 'already running in another process';
         u.starts++; u.inflight[assessmentId] = { until: new Date(deadline + 60_000).toISOString(), owner, pid: process.pid };
         return null;
       }, left()).catch(() => 'deadline reached waiting for the state lock');
-      const recordAgent = (pid: number) => { void editLedger(root, (u) => { const l = u.inflight[assessmentId]; if (l?.owner === owner) { l.agentPid = pid; l.agentStart = procStart(pid); } }, 5000).catch(() => {}); };
+      const recordAgent = (pid: number) => { mkdirSync(dirname(agentFile(root, assessmentId)), { recursive: true }); writeJsonAtomic(agentFile(root, assessmentId), { until: '', owner, pid: process.pid, agentPid: pid, agentStart: procStart(pid) }); };
       const work = mkdtempSync(join(tmpdir(), 'fact-os-esc-run-')), schemaFile = join(work, 'schema.json'), lastFile = join(work, 'last.txt');
       writeFileSync(schemaFile, JSON.stringify(responseSchema(req)));
       const log: StartLog[] = [];
@@ -527,9 +573,15 @@ export async function escalate(root: string, config: Config, cfg: ClassifierConf
       // Validate, then publish the terminal record and only then release the owned lease, under the state lock (waiting at most
       // until the deadline), after re-checking scope, context, authority and human tasks (stale if any changed).
       const v = failure ? null : validateResponse(rawText, req, { root, manifest: snap.manifest });
+      const meta0 = { provider: provider ?? undefined, fallback: provider === 'claude', startsLog: log, elapsedMs: Date.now() - t0, requestFile };
+      const staged = join(stagedDir(root), `${assessmentId}.json`);
+      mkdirSync(stagedDir(root), { recursive: true });
+      writeJsonAtomic(staged, failure ? rec({ ...meta0, status: failure === 'cancelled' ? 'cancelled' : 'unavailable', reason: String(failure) })
+        : !v!.ok ? rec({ ...meta0, status: 'invalid', reason: v!.error }) : rec({ ...meta0, status: 'stale', reason: 'staged before the freshness check', response: v!.response }));
       const final = await withLock(root, () => {
-        const meta = { provider: provider ?? undefined, fallback: provider === 'claude', startsLog: log, elapsedMs: Date.now() - t0, requestFile };
+        const meta = { ...meta0, elapsedMs: Date.now() - t0 };
         let r: EscalationRecord;
+        if (ac.signal.aborted && !failure) failure = 'cancelled';
         if (failure) r = append(rec({ ...meta, status: failure === 'cancelled' ? 'cancelled' : 'unavailable', reason: String(failure) }));
         else if (!v!.ok) r = append(rec({ ...meta, status: 'invalid', reason: v!.error }));
         else {
@@ -542,9 +594,10 @@ export async function escalate(root: string, config: Config, cfg: ClassifierConf
         }
         const u = readJson(ledger(root), null) as EscUsage | null;
         if (u?.inflight?.[assessmentId]?.owner === owner) { delete u.inflight[assessmentId]; writeJsonAtomic(ledger(root), u); }
+        rmSync(staged, { force: true }); rmSync(agentFile(root, assessmentId), { force: true });
         return r;
       }, { timeoutMs: Math.max(1, deadline - Date.now()) }).catch(() => null);
-      if (!final) { out(`${f.id}: escalation answer not published within the deadline (the claim expires on its own)`); continue; }
+      if (!final) { out(`${f.id}: escalation result staged; the next run publishes it`); continue; }
       if (final.status === 'cancelled') stopReason = 'cancelled';
       out(`${f.id}: ${final.status === 'completed' ? `escalated to ${provider === 'codex' ? esc.model : config.codex.fallback.model} → ${describe(final.derivation!)}` : `escalation ${final.status} (${final.reason})`}`);
     }
@@ -568,13 +621,14 @@ function describe(d: Derivation): string {
 export function escalationSummary(root: string): string | null {
   const recs = readEscalations(root);
   if (!recs.length) return null;
-  const latest = new Map<string, EscalationRecord>();
-  for (const r of recs) latest.set(r.assessmentId || `${r.feature}:${r.status}`, r);
+  // Coverage: each feature's latest disposition. Content: the latest completion of each assessment (a cache hit never hides it).
+  const latest = new Map<string, EscalationRecord>(), completions = new Map<string, EscalationRecord>();
+  for (const r of recs) { if (r.status !== 'started') latest.set(r.feature, r); if ((r.status === 'completed' || r.status === 'recomposed') && r.derivation) completions.set(r.assessmentId, r); }
   const by: Record<string, number> = {};
   for (const r of latest.values()) by[r.status] = (by[r.status] ?? 0) + 1;
-  const done = [...latest.values()].filter((r) => r.derivation?.version === DERIVATION_VERSION); // older derivation formats count by status only
+  const done = [...completions.values()].filter((r) => r.derivation?.version === DERIVATION_VERSION); // older derivation formats count by status only
   const proposals = done.reduce((t, r) => t + r.derivation!.reviewProposals.length, 0), disagree = done.reduce((t, r) => t + r.derivation!.disagreements.length, 0);
-  const deferred = [...latest.values()].reduce((t, r) => t + r.deferred.length, 0);
-  return `Escalations (model proposals, unadjudicated): ${Object.entries(by).map(([k, v]) => `${v} ${k}`).join(', ')}; ` +
+  const deferred = [...latest.values()].reduce((t, r) => t + (r.deferred?.length ?? 0), 0);
+  return `Escalations (model proposals, unadjudicated), latest per feature: ${Object.entries(by).map(([k, v]) => `${v} ${k}`).join(', ')}; ` +
     `${proposals} review proposals, ${disagree} disagreements, ${deferred} questions deferred by the per-feature cap.`;
 }

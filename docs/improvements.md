@@ -267,7 +267,18 @@ result before releasing the claim; every requested feature gets a journal entry 
 not sent when an open non-mockable human task must supply the fact. A failed evidence check now rejects only that answer (kept
 with the offending reference, never composed) instead of discarding the whole response: the first real run lost 2 of 4 answers
 to inexact repo quotes; after adding explicit quoting guidance (one short exact line, 1-based line numbers) the next real run
-kept 4 of 4 with no rejections, in 86 s. The ecommerce pilot cap is `maxPerDay: 10`.
+kept 4 of 4 with no rejections, in 86 s. The ecommerce pilot cap is `maxPerDay: 10`. Fifth review (a81698f: 9 P2 + 3 P3, all fixed):
+one decoded-value credential check guards the glossary and every escalation request (JSON escapes cannot hide a key; a request
+carrying one is neither sent nor kept); reference shapes are validated for the whole response before evidence is checked per
+answer; output overflow is a hard kill; human task context is never clipped (an oversized one defers the assessment); a crashed
+caller's agent group keeps its claim even after its leader exits; cancellation is re-checked under the publication lock;
+eligibility is recomputed at reservation; a result that cannot be published in time is staged and published by the next run;
+rejected answers keep the agent's reason and references; the summary keeps completed proposals after cache hits.
+
+**Status and stopping point.** Five fresh reviews took the stage from 9 to 16 to 13 to 12 findings, each round narrower
+(crash recovery, cancellation timing, credential edge cases). The classifier itself (Jev battery, scorer, projection, report)
+converged by the third review. Escalation stays opt-in and disabled by default (`escalation.enabled: false`); further
+hardening rounds should follow real use rather than precede it.
 
 **Configuration (ecommerce):** `classifier: {provider: "typesafe", mode: "shadow", glossary: ".shipyard/classifier/glossary.json",
 scorer: ".shipyard/classifier/scorer-v2.1.json"}`; key in `TYPESAFE_API_KEY` or fact-os's `.env`. The scorer is fitted to

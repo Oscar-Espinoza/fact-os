@@ -83,7 +83,7 @@ test('escalation: repo evidence must cite an allowed snapshot file with an exact
   const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }], { tracked: { '.shipyard/notes.md': 'refund writes the ledger' } });
   // A failed evidence check rejects that answer only (kept with its reason, never composed); the escalation still completes.
   const rejected = async (rx: RegExp) => { const [r] = terminal(await run(root, ['a'])); assert.equal(r!.status, 'completed');
-    assert.match(r!.response!.rejected!.s02_funds_effect!, rx); assert.deepEqual(r!.derivation!.reviewProposals, []); assert.deepEqual(r!.derivation!.rejectedEvidence, ['s02_funds_effect']); };
+    assert.match(r!.response!.rejected!.s02_funds_effect!.error, rx); assert.match(r!.response!.rejected!.s02_funds_effect!.reason, /fake reason/); assert.deepEqual(r!.derivation!.reviewProposals, []); assert.deepEqual(r!.derivation!.rejectedEvidence, ['s02_funds_effect']); };
   fakeAgents(t, { codex: { values: { s02_funds_effect: true }, evidence: { repo: { kind: 'repo', path: '.shipyard/notes.md', startLine: 1, endLine: 1, quote: 'refund' } } } });
   await rejected(/not an allowed file/);
   writeFileSync(join(root, '.fact-os', 'classifier.jsonl'), readFileSync(join(root, '.fact-os', 'classifier.jsonl'), 'utf8').split('\n').filter((l) => !l.includes('"kind":"escalation"')).join('\n'));
@@ -355,4 +355,58 @@ test('escalation v4: u03 is not sent when a person must supply the external fact
   const fake = fakeAgents(t, { codex: { values: {} } });
   await run(root, ['a']);
   assert.equal(fake.calls().length, 0);
+});
+
+test('escalation v5: a credential in human task context is never sent or kept (V501); shape errors invalidate the whole response (V506)', async (t) => {
+  const f = F('a'), task = { id: 'h', title: 'Provider setup', steps: ['use api_key: abcdefgh12345678'], unblocks: ['a'], mockable: true, status: 'open' as const };
+  const root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }], { tasks: [task] });
+  const fake = fakeAgents(t, { codex: { values: {} } });
+  const recs = await run(root, ['a']);
+  assert.equal(fake.calls().length, 0); assert.match(recs.at(-1)!.reason!, /credential/);
+  assert.ok(!existsSync(join(root, '.fact-os', 'classifier-context')));
+  const root2 = project(t, [{ f, over: { s02_funds_effect: 0.5, s05_authorization: 0.5 } }]);
+  fakeAgents(t, { codex: { values: { s02_funds_effect: true, s05_authorization: true }, evidence: { repo: { kind: 'repo', path: 42, startLine: 1, endLine: 1, quote: 'x' } } } });
+  const [rec] = terminal(await run(root2, ['a']));
+  assert.equal(rec!.status, 'invalid'); assert.equal(rec!.derivation, undefined);
+});
+
+test('escalation v5: oversized human task context is deferred, never clipped (V505); a cancel while waiting to publish publishes cancelled (V508)', async (t) => {
+  const f = F('a'), task = { id: 'h', title: 'Long', steps: ['x'.repeat(501)], unblocks: ['a'], mockable: true, status: 'open' as const };
+  const root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }], { tasks: [task] });
+  const fake = fakeAgents(t, { codex: { values: { s02_funds_effect: true } } });
+  const recs = await run(root, ['a']);
+  assert.equal(fake.calls().length, 0); assert.match(recs.at(-1)!.reason!, /not sent clipped/);
+  const root2 = project(t, [{ f, over: { s02_funds_effect: 0.5 } }]);
+  fakeAgents(t, { codex: { values: { s02_funds_effect: true }, sleepMs: 200 } });
+  const ac = new AbortController();
+  let holder: Promise<unknown> | null = null;
+  setTimeout(() => { holder = withLock(root2, async () => { await Bun.sleep(400); ac.abort(); await Bun.sleep(100); }); }, 50);
+  const [rec] = terminal(await run(root2, ['a'], esc(), ac.signal));
+  await holder;
+  assert.equal(rec!.status, 'cancelled'); assert.equal(rec!.derivation, undefined);
+});
+
+test('escalation v5: a result that cannot be published in time is staged and published by the next run (V512)', async (t) => {
+  const f = F('a'), root = project(t, [{ f, over: { s02_funds_effect: 0.5 } }]);
+  // The agent answers after 700 ms; from 400 ms another writer holds the state lock past the 1.8 s deadline.
+  fakeAgents(t, { codex: { values: { s02_funds_effect: true }, sleepMs: 700 } });
+  let holder: Promise<unknown> | null = null;
+  setTimeout(() => { holder = withLock(root, () => Bun.sleep(2500)); }, 400);
+  await run(root, ['a'], esc({ timeoutMin: 0.03 }));
+  await holder;
+  assert.ok(readEscalations(root).every((e) => e.status !== 'completed'), JSON.stringify(readEscalations(root).map((e) => [e.status, e.reason])));
+  assert.ok(existsSync(join(root, '.fact-os', 'classifier-staged')), JSON.stringify(readEscalations(root).map((e) => [e.status, e.reason])));
+  const lines: string[] = [];
+  const config = loadConfig(root);
+  await escalate(root, config, config.classifier!, esc(), [], (s) => lines.push(s));
+  assert.ok(lines.some((l) => /published a staged escalation result/.test(l)));
+});
+
+test('escalation v5: the summary keeps completed proposals after cache hits and reports excluded features (V510)', async (t) => {
+  const a = F('a'), b = F('b'), root = project(t, [{ f: a, over: { s02_funds_effect: 0.5 } }, { f: b, over: {} }]);
+  fakeAgents(t, { codex: { values: { s02_funds_effect: true } } });
+  await run(root, ['a', 'b']);
+  await run(root, ['a', 'b']);
+  const s = escalationSummary(root)!;
+  assert.match(s, /1 review proposals/); assert.match(s, /1 cached/); assert.match(s, /1 excluded/);
 });

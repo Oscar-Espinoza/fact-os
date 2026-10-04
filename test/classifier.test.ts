@@ -408,7 +408,7 @@ test('I07 v3 review: the sent glossary is kept by content so inputs can be recon
 
 test('I07 v4 review: the scorer must declare the anyRework target and the exact ordered features (V406); a credential-looking glossary is not used (V407)', async (t) => {
   const root = project(t), file = join(root, 's.json'), { scorer } = parity(), expect = { model: MODEL, glossaryHash: null };
-  writeFileSync(file, JSON.stringify({ ...scorer, target: 'log(totalCost+.05)' })); assert.match((loadScorer(file, expect) as any).error, /target/);
+  writeFileSync(file, JSON.stringify({ ...scorer, targetContract: { id: 'anyRework', positive: 'success' } })); assert.match((loadScorer(file, expect) as any).error, /target contract/);
   writeFileSync(file, JSON.stringify({ ...scorer, features: scorer.features.map(() => scorer.features[0]) })); assert.match((loadScorer(file, expect) as any).error, /order or membership/);
   const a = F('a'), r2 = project(t, [a]);
   writeFileSync(join(r2, 'glossary.json'), JSON.stringify({ note: 'api_key: abcdefgh12345678' }));
@@ -416,4 +416,13 @@ test('I07 v4 review: the scorer must declare the anyRework target and the exact 
   const [rec] = await classify(r2, cfg({ glossary: 'glossary.json' }), [a], (s) => lines.push(s), 'manual', fakeKey);
   assert.ok(lines.some((l) => /looks like it contains a credential/.test(l))); assert.equal(seen[0]!.body.state.codebase, undefined);
   assert.equal((rec!.input as any).glossaryHash, null); assert.ok(!existsSync(join(r2, '.fact-os', 'classifier-context')));
+});
+
+test('I07 v5 review: a credential hidden by JSON escapes in the glossary is still refused (V502)', async (t) => {
+  const a = F('a'), root = project(t, [a]);
+  writeFileSync(join(root, 'glossary.json'), '{"context": "\\u0073\\u006b\\u002dabcdefghijklmnopqrstuvwx"}');
+  const lines: string[] = [];
+  fakeTypesafe(t, [body(a)]);
+  await classify(root, cfg({ glossary: 'glossary.json' }), [a], (s) => lines.push(s), 'manual', fakeKey);
+  assert.ok(lines.some((l) => /looks like it contains a credential/.test(l)));
 });

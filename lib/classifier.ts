@@ -220,7 +220,8 @@ export function loadScorer(file: string, expect: { model: string; glossaryHash: 
   if ([...k.excludedWithoutFacts].sort().join() !== FROZEN_EXCLUDED.join()) return fail('evidence-dependent exclusions differ from the frozen extraction');
   if (s.features.some((f) => !names.has(f))) return fail('feature names do not match the extraction');
   if (s.features.join() !== CONTRACT_FEATURES.join()) return fail('feature order or membership differs from the supported contract');
-  if (typeof s.target !== 'string' || !s.target.startsWith('anyRework')) return fail('target is not the supported anyRework contract');
+  const t = (s as unknown as { targetContract?: { id?: unknown; positive?: unknown } }).targetContract;
+  if (!t || t.id !== 'anyRework' || t.positive !== 'rework') return fail('target contract is not {id: "anyRework", positive: "rework"}');
   const r = s.reference;
   if (!r || !Array.isArray(r.scores) || !r.scores.length || r.scores.some((x) => typeof x !== 'number' || !(x >= 0 && x <= 1)) || typeof r.threshold !== 'number' || !(r.threshold >= 0 && r.threshold <= 1))
     return fail('reference scores or threshold out of range');
@@ -349,14 +350,24 @@ interface Context { glossary: unknown; glossaryHash: string | null; scorer: Scor
 // fails either check is not used at all (never silently redacted, so what is kept is exactly what was sent).
 export const MAX_GLOSSARY = 16 * 1024;
 const CREDENTIAL = /(sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(api[_-]?key|secret|password|token)\s*["']?\s*[:=]\s*["']?[^\s"']{8,})/i;
+const CREDENTIAL_KEY = /^(api[_-]?key|secret|password|token|authorization|private[_-]?key)$/i;
+// Does any decoded key or string value (after JSON parsing, so escapes cannot hide it) look like a credential or contain the
+// active TypeSafe key? Used for everything fact-os sends to a provider or keeps on disk as context.
+export function credentialIn(value: unknown, key = typesafeKey()): boolean {
+  const seen = (s: string) => CREDENTIAL.test(s) || (!!key && s.includes(key));
+  const walk = (v: unknown): boolean => typeof v === 'string' ? seen(v)
+    : Array.isArray(v) ? v.some(walk)
+    : v && typeof v === 'object' ? Object.entries(v).some(([k, x]) => seen(k) || (CREDENTIAL_KEY.test(k) && typeof x === 'string' && x.length >= 8) || walk(x)) : false;
+  return walk(value);
+}
 export function loadContext(root: string, cfg: ClassifierConfig): Context & { glossaryError?: string } {
   let glossary: unknown = null, glossaryHash: string | null = null, glossaryError: string | undefined;
   if (cfg.glossary) {
     try {
-      const raw = readFileSync(resolve(root, cfg.glossary)), text = raw.toString('utf8'), key = typesafeKey();
+      const raw = readFileSync(resolve(root, cfg.glossary));
       if (raw.length > MAX_GLOSSARY) glossaryError = `glossary larger than ${MAX_GLOSSARY} bytes; not used`;
-      else if (CREDENTIAL.test(text) || (key && text.includes(key))) glossaryError = 'glossary looks like it contains a credential; not used';
-      else { glossary = JSON.parse(text); glossaryHash = sha(raw); }
+      else { const parsed = JSON.parse(raw.toString('utf8'));
+        if (credentialIn(parsed)) glossaryError = 'glossary looks like it contains a credential; not used'; else { glossary = parsed; glossaryHash = sha(raw); } }
     } catch { glossary = null; glossaryError = 'glossary unreadable; not used'; }
   }
   let scorer: Scorer | null = null, scorerHash: string | null = null, scorerError: string | undefined;
