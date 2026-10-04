@@ -4,11 +4,11 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold, readSetupState } from './state.ts';
+import { childEnv, paths, DEFAULT_CONFIG, ESCALATION_DEFAULTS, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold, readSetupState } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
-import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
+import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask, type RoleConfig } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
-import { profileNames, profileLabel, roleTable, riskyOpen } from './profiles.ts';
+import { profileNames, profileLabel, roleTable, riskyOpen, resolveRole } from './profiles.ts';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const USAGE = `usage: ${NAME} <command>
@@ -21,6 +21,7 @@ const USAGE = `usage: ${NAME} <command>
   setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
   classify <id...> | --all        shadow-classify features with TypeSafe Jev (tier, needs split); records only, changes nothing
   classify --report               shadow tiers beside what the features actually took (tries, stuck, cost)
+  classify ... --escalate         also send unsure review questions to a read-only agent (Sol, Opus fallback), capped
   lanes <n|default>               how many features may be in flight (0-${MAX_LANES}); default = config.maxParallel
   profile [<name|default>]        model profile for new launches (opus = each role's config; fable-sonnet; config.profiles);
                                   without a name: the active profile and its role → model/effort table
@@ -33,7 +34,7 @@ const USAGE = `usage: ${NAME} <command>
 
 // Main checkout of the repo containing dir (works from worktrees), or null.
 function projectRoot(dir = process.cwd()): string | null {
-  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir, encoding: 'utf8' });
+  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir, encoding: 'utf8', env: childEnv() });
   return r.status === 0 ? dirname(r.stdout.trim()) : null;
 }
 function needRoot(): string {
@@ -41,7 +42,7 @@ function needRoot(): string {
   if (!root) throw new Error('not inside a git repository');
   return root;
 }
-const resolves = (cmd: string) => !!cmd && spawnSync('sh', ['-c', 'command -v "$1"', 'sh', cmd], { stdio: 'ignore' }).status === 0;
+const resolves = (cmd: string) => !!cmd && spawnSync('sh', ['-c', 'command -v "$1"', 'sh', cmd], { stdio: 'ignore', env: childEnv() }).status === 0;
 
 function init(test: string | undefined): void {
   const root = needRoot(), P = paths(root);
@@ -221,9 +222,9 @@ async function hook(): Promise<void> {
 const argv = process.argv.slice(2);
 const { values, positionals } = parseArgs({ args: argv.slice(1), allowPositionals: true, options: {
   test: { type: 'string' }, watch: { type: 'boolean' }, once: { type: 'boolean' }, 'max-features': { type: 'string' },
-  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' }, all: { type: 'boolean' }, report: { type: 'boolean' } }, strict: !['hook', 'lanes'].includes(argv[0]!) });
+  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' }, all: { type: 'boolean' }, report: { type: 'boolean' }, escalate: { type: 'boolean' } }, strict: !['hook', 'lanes'].includes(argv[0]!) });
 // strict parsing (every command but hook, which ignores o) guarantees these types.
-const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean; all?: boolean; report?: boolean };
+const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean; all?: boolean; report?: boolean; escalate?: boolean };
 try {
   switch (argv[0]) {
     case 'init': init(o.test); break;
@@ -239,11 +240,21 @@ try {
     case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
     case 'classify': {
       const root = needRoot(), { config, features } = load(root), { classify, report } = await import('./classifier.ts');
-      if (o.report) { console.log(report(root, features, config.classifier)); break; }
       if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "mode": "shadow"}} to config.json');
+      if (o.report) { console.log(report(root, features, config.classifier)); break; }
       const targets = o.all ? features : positionals.map((id) => features.find((f) => f.id === id) ?? (() => { throw new Error(`unknown feature: ${id}`); })());
       if (!targets.length) throw new Error(`usage: ${NAME} classify <feature-id>... | --all | --report`);
-      await classify(root, config.classifier, targets, (s) => console.log(s));
+      // The roles each feature would get today, recorded beside the shadow candidate for comparison.
+      const ctl = readControlFile(root, config), profile = ctl.ok ? ctl.control.profile ?? null : null;
+      const pick = (r: RoleConfig) => ({ provider: r.provider ?? 'claude', model: r.model, effort: r.effort });
+      await classify(root, config.classifier, targets, (s) => console.log(s), 'manual', undefined,
+        (f) => ({ builder: pick(resolveRole(config, profile, 'builder', { feature: f })), evaluator: pick(resolveRole(config, profile, 'evaluator', { feature: f })) }));
+      // Escalation is opt-in: config.classifier.escalation.enabled, or --escalate for this run (defaults when unconfigured).
+      const esc = config.classifier.escalation;
+      if (o.escalate || esc?.enabled) {
+        const { escalate } = await import('./escalation.ts');
+        await escalate(root, config, config.classifier, esc ?? ESCALATION_DEFAULTS, targets.map((f) => f.id), (s) => console.log(s));
+      }
       break;
     }
     case 'setup-resume': {

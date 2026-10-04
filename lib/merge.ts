@@ -4,6 +4,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { childEnv } from './state.ts';
 import type { ClaimsConfig, Feature, LogEvent } from './types.ts';
 
 export const DEFAULT_CLAIMS: ClaimsConfig = { hot: [], minScore: 3, days: 7 };
@@ -154,7 +155,7 @@ export function conflictHunks(text: string, context = 3, max = 4000): string {
 // ---- git reads ----
 
 const git = (args: string[], cwd: string): { code: number; out: string } => {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 << 20 });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 << 20, env: childEnv() });
   return { code: r.status ?? 1, out: (r.stdout || '').trimEnd() };
 };
 const lines = (args: string[], cwd: string) => git(args, cwd).out.split('\n').filter(Boolean);

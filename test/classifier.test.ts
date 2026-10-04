@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assess, classify, classifierState, codeFeatures, compositeFeatures, cooldown, loadScorer, questionsFor, readRecords, report, score,
+import { assess, classify, classifierState, codeFeatures, compositeFeatures, cooldown, loadScorer, questionsFor, readRecords, report, retryAfterMs, score,
   typesafeKey, validateAnswers, BATTERY, DIRECT_AXES, type Scorer } from '../lib/classifier.ts';
-import { CLASSIFIER_DEFAULTS, ESCALATION_DEFAULTS, DEFAULT_CONFIG, childEnv, loadConfig, writeJsonAtomic } from '../lib/state.ts';
+import { CLASSIFIER_DEFAULTS, ESCALATION_DEFAULTS, DEFAULT_CONFIG, childEnv, loadConfig, withLock, writeJsonAtomic } from '../lib/state.ts';
 import type { ClassifierConfig, Feature } from '../lib/types.ts';
 
 // Never reach the real TypeSafe API from a test: every request goes to a dead local port unless a fake server replaces it,
@@ -76,7 +76,7 @@ test('I07 v2: invalid answers are errors, never low probabilities (F2)', () => {
   assert.match((validateAnswers(q, inf, MODEL) as any).error, /u01/);
   const typed = body(f); (typed.answers as any).c01_new_lifecycle = { type: 'choice', choice: 'x' };
   assert.match((validateAnswers(q, typed, MODEL) as any).error, /c01/);
-  assert.match((validateAnswers(q, body(f, {}, 'jev-1.14.0'), MODEL) as any).error, /model mismatch/);
+  assert.match((validateAnswers(q, body(f, {}, 'jev-1.14.0'), MODEL) as any).error, /different model than the pinned/);
   assert.match((validateAnswers(q, { answers: body(f).answers }, MODEL) as any).error, /did not report the model/);
 });
 
@@ -139,6 +139,13 @@ test('I07 v2: unchanged input is not asked again; duplicates in a batch are aske
   const seen = fakeTypesafe(t, [body(a), body(a)]);
   await classify(root, cfg(), [a, a], () => {}, 'manual', fakeKey);
   assert.equal(seen.length, 1);
+  // A person tiers it afterwards: re-projected locally, without a key, with the human-tier disposition.
+  writeFeatures(root, [{ ...a, tier: 'hard' }]);
+  const [re] = await classify(root, cfg(), [{ ...a, tier: 'hard' }], () => {}, 'manual', noKey);
+  assert.equal(re!.attempts, 0); assert.ok(re!.assessment!.dispositions.some((d) => /human tier hard/.test(d)));
+  writeFeatures(root, [a]);
+  await classify(root, cfg(), [a], () => {}, 'manual', fakeKey);
+  assert.equal(seen.length, 1);
   const lines: string[] = [];
   await classify(root, cfg(), [a], (s) => lines.push(s), 'manual', fakeKey);
   assert.equal(seen.length, 1); assert.match(lines[0]!, /unchanged since its last assessment/);
@@ -185,10 +192,18 @@ test('I07 v2: the TypeScript scorer reproduces the Python pipeline (vectors and 
 
 test('I07 v2: a malformed or mismatched scorer is rejected, and the assessment says the score is unavailable', (t) => {
   const root = project(t), file = join(root, 's.json'), { scorer } = parity();
-  writeFileSync(file, JSON.stringify({ ...scorer, coef: scorer.coef.slice(1) })); assert.match((loadScorer(file) as any).error, /do not line up/);
-  writeFileSync(file, JSON.stringify({ ...scorer, scale: scorer.scale.map((x, i) => (i ? x : 0)) })); assert.match((loadScorer(file) as any).error, /do not line up/);
-  writeFileSync(file, JSON.stringify({ ...scorer, battery: 'other' })); assert.match((loadScorer(file) as any).error, /fitted on battery other/);
-  writeFileSync(file, JSON.stringify(scorer)); assert.ok(loadScorer(file).ok);
+  const expect = { model: MODEL, glossaryHash: null };
+  const bad = (o: object, rx: RegExp) => { writeFileSync(file, JSON.stringify({ ...scorer, ...o })); assert.match((loadScorer(file, expect) as any).error, rx, JSON.stringify(o).slice(0, 80)); };
+  bad({ coef: scorer.coef.slice(1) }, /do not line up/);
+  bad({ scale: scorer.scale.map((x, i) => (i ? x : 0)) }, /do not line up/);
+  bad({ batteryHash: 'other' }, /different question battery/);
+  bad({ model: 'jev-9.99.0' }, /fitted on jev-9\.99\.0 answers/);
+  bad({ glossaryHash: 'abc' }, /different codebase glossary/);
+  bad({ reference: { ...scorer.reference, scores: ['bad'] } }, /reference/);
+  bad({ reference: { ...scorer.reference, threshold: 2 } }, /reference/);
+  bad({ composites: undefined }, /composite settings missing/);
+  bad({ features: [...scorer.features.slice(1), 'mystery'] }, /feature names/);
+  writeFileSync(file, JSON.stringify(scorer)); assert.ok(loadScorer(file, expect).ok);
   assert.deepEqual(assess(F('a'), probs(F('a')), [], null, 'scorer unreadable').attention, { unavailable: 'scorer unreadable' });
 });
 
@@ -226,7 +241,7 @@ test('I07 v2: the report counts current, stale and never-assessed features separ
   await classify(root, cfg(), [a, b], () => {}, 'manual', fakeKey);
   const r = report(root, [a, { ...b, description: 'changed' }, c], cfg());
   assert.match(r, /candidate risky\s+1\s+1\s+0\s+0\.00\s+\$3\.00/);
-  assert.match(r, /1 features with a current assessment \(shadow\), 1 stale \(changed since\), 1 never assessed/);
+  assert.match(r, /1 current .*, 1 stale .*, 0 with only failed attempts, 1 never attempted/);
   assert.match(report(project(t), [], cfg()), /No v2 assessments yet/);
 });
 
@@ -238,7 +253,7 @@ test('I07 v2: config: off by default, pinned model, v1 thresholds rejected, esca
   assert.equal(CLASSIFIER_DEFAULTS.model, 'jev-1.13.0');
   set({ classifier: { provider: 'typesafe', escalation: { maxPerDay: 3 } } });
   assert.deepEqual(loadConfig(root).classifier!.escalation, { ...ESCALATION_DEFAULTS, maxPerDay: 3 });
-  for (const c of [{ minConfidence: 0.8 }, { provider: 'openai' }, { mode: 'apply' }, { timeoutMs: 10 }, { maxRetries: 3 }, { scorer: 5 },
+  for (const c of [{ minConfidence: 0.8 }, { provider: 'openai' }, { mode: 'apply' }, { timeoutMs: 10 }, { maxRetries: 3 }, { scorer: 5 }, { model: 'jev-latest' },
     { escalation: { timeoutMin: 0 } }, { escalation: 'x' }, 'x']) {
     set({ classifier: c }); assert.throws(() => loadConfig(root), /config\.classifier/, JSON.stringify(c));
   }
@@ -270,4 +285,99 @@ test('I07 v2: state shape: the classifier sees the glossary and declared touches
   assert.deepEqual(s.feature.touches, ['packages/orders/src/']); assert.equal(s.feature.touchesMissing, false);
   assert.deepEqual(s.codebase, { money: 'packages/orders' }); assert.equal(s.repoFacts.status, 'not_supplied');
   assert.equal(readRecords(project(t)).length, 0);
+});
+
+
+test('I07 v2 review: overlapping batches never pay twice for an answer another process published (R03)', async (t) => {
+  const a = F('a'), b = F('b'), root = project(t, [a, b]);
+  const posts: string[] = [];
+  const server = Bun.serve({ port: 0, fetch: async (req) => {
+    const id = (await req.json() as any).state.feature.id; posts.push(id);
+    if (id === 'a') await Bun.sleep(300);
+    return Response.json(body(id === 'a' ? a : b));
+  } });
+  const prev = process.env.FACTOS_TYPESAFE_URL; process.env.FACTOS_TYPESAFE_URL = `http://127.0.0.1:${server.port}/`;
+  t.after(() => { server.stop(true); process.env.FACTOS_TYPESAFE_URL = prev; });
+  const first = classify(root, cfg(), [a], () => {}, 'manual', fakeKey);
+  await Bun.sleep(50);
+  const lines: string[] = [];
+  await Promise.all([first, (async () => { await Bun.sleep(400); await classify(root, cfg(), [b, a], (s) => lines.push(s), 'manual', fakeKey); })()]);
+  assert.deepEqual(posts, ['a', 'b']);
+  assert.ok(lines.some((l) => /a: (unchanged|assessed meanwhile)/.test(l)));
+});
+
+test('I07 v2 review: a provider cooldown stops the rest of the batch, and HTTP-date Retry-After is honoured (R04)', async (t) => {
+  const a = F('a'), b = F('b'), root = project(t, [a, b]);
+  const seen = fakeTypesafe(t, [{ status: 429, headers: { 'retry-after': new Date(Date.now() + 120_000).toUTCString() } }, body(b)]);
+  const recs = await classify(root, cfg({ timeoutMs: 2000 }), [a, b], () => {}, 'manual', fakeKey);
+  assert.equal(seen.length, 1, 'b is not requested during the cooldown'); assert.equal(recs.length, 1);
+  assert.ok(Date.parse(JSON.parse(readFileSync(join(root, '.fact-os', 'classifier-usage.json'), 'utf8')).cooldownUntil) > Date.now() + 100_000);
+  assert.ok(Math.abs(retryAfterMs(new Date(Date.now() + 30_000).toUTCString()) - 30_000) < 1500); assert.equal(retryAfterMs('7'), 7000);
+  assert.ok(Number.isNaN(retryAfterMs('soon'))); assert.ok(Number.isNaN(retryAfterMs(null)));
+});
+
+test('I07 v2 review: waiting for the state lock counts against the deadline; an expired decision sends nothing (R05)', async (t) => {
+  const a = F('a'), root = project(t, [a]);
+  const seen = fakeTypesafe(t, [body(a)]);
+  const holder = withLock(root, () => Bun.sleep(600));
+  await Bun.sleep(20);
+  const lines: string[] = [];
+  const recs = await classify(root, cfg({ timeoutMs: 150 }), [a], (s) => lines.push(s), 'manual', fakeKey);
+  await holder;
+  assert.equal(seen.length, 0, 'no request after the deadline'); assert.equal(recs.length, 0); assert.match(lines[0]!, /deadline 150 ms reached waiting for the state lock/);
+});
+
+test('I07 v2 review: investigate keeps routing-review for protected work and risk-review for explicit normal (R06)', () => {
+  const refund = F('r', { title: 'Refund flow', description: 'Refund a payment', risk: 'high' });
+  assert.ok(assess(refund, probs(refund, { u01_unknown_root_cause: 0.95 }), [refund], null).dispositions.some((d) => /routing-review/.test(d)));
+  const e = F('e', { risk: 'normal' });
+  const d = assess(e, probs(e, { u01_unknown_root_cause: 0.95, s02_funds_effect: 0.95 }), [e], null).dispositions;
+  assert.ok(d.some((x) => /risk-review/.test(x))); assert.ok(d.some((x) => /routing-review/.test(x)));
+});
+
+test('I07 v2 review: the report separates stale, failed and never-attempted features, re-projects with today\'s scorer, and never averages unknown cost (R07, R08)', async (t) => {
+  const a = F('a', { status: 'merged' }), b = F('b'), c = F('c'), d = F('d'), root = project(t, [a, b, c, d]);
+  fakeTypesafe(t, [body(a), body(b), 422]);
+  await classify(root, cfg(), [a, b, c], () => {}, 'manual', fakeKey);
+  let r = report(root, [a, { ...b, description: 'changed' }, c, d], cfg());
+  assert.match(r, /1 current .*, 1 stale .*, 1 with only failed attempts, 1 never attempted/); assert.match(r, /candidate normal\s+1\s+1\s+0\s+0\.00\s+unknown/);
+  writeFileSync(join(root, 'scorer.json'), JSON.stringify(parity().scorer));
+  r = report(root, [a], cfg({ scorer: 'scorer.json' }));
+  assert.match(r, /Attention score available for 1 of 1/);
+});
+
+test('I07 v2 review: provider metadata is allowlisted, untrusted model strings are not recorded, extra answers and aliases are rejected (R09, R10)', async (t) => {
+  const f = F('a'), q = questionsFor(f);
+  const v = validateAnswers(q, { ...body(f), usage: { input_tokens: 5, output_tokens: -1, debug_auth: 'leak' } }, MODEL);
+  assert.ok(v.ok); assert.deepEqual((v as any).usage, { input_tokens: 5 });
+  const echoed = validateAnswers(q, body(f, {}, 'test-key-echo'), MODEL);
+  assert.ok(!echoed.ok); assert.doesNotMatch((echoed as any).error, /test-key-echo/);
+  const extra = body(f); (extra.answers as any).unrequested = { type: 'noul', noul: 0.5 };
+  assert.match((validateAnswers(q, extra, MODEL) as any).error, /not asked/);
+  const root = project(t, [f]);
+  fakeTypesafe(t, [{ ...body(f), usage: { input_tokens: 1, note: 'test-key' } }]);
+  await classify(root, cfg(), [f], () => {}, 'manual', fakeKey);
+  assert.doesNotMatch(readFileSync(join(root, '.fact-os', 'classifier.jsonl'), 'utf8'), /test-key/);
+});
+
+test('I07 v2 review: records keep a secret-free input snapshot, the authority and the roles in effect (R11)', async (t) => {
+  const f = F('a', { risk: 'high' }), root = project(t, [f]);
+  fakeTypesafe(t, [body(f)]);
+  const roles = { builder: { provider: 'claude' as const, model: 'sonnet', effort: 'medium' }, evaluator: { provider: 'codex' as const, model: 'gpt-6.1-sol', effort: 'high' } };
+  const [rec] = await classify(root, cfg(), [f], () => {}, 'manual', fakeKey, () => roles);
+  assert.deepEqual(rec!.roles, roles); assert.deepEqual(rec!.authority, { tier: null, risk: 'high' });
+  assert.equal((rec!.input as any).feature.title, 'Feature a'); assert.equal((rec!.input as any).glossaryHash, null); assert.equal((rec!.input as any).codebase, undefined);
+  assert.ok('score' in rec!.assessment!.attention === false);
+});
+
+test('I07 v2 review: Python-compatible keyword folding for dotted and dotless i (R13)', () => {
+  const { scorer } = parity();
+  assert.equal(codeFeatures(scorer, { title: 'Adjust prİce and dıscount', description: '', acceptance: [], surface: 'api', touches: [], deps: [] }).kw_hits, 2);
+});
+
+test('I07 v2 review: every subprocess in lib gets an explicit childEnv() (R14)', () => {
+  const lib = join(import.meta.dir, '..', 'lib');
+  for (const f of readdirSync(lib).filter((f) => f.endsWith('.ts')))
+    for (const [i, line] of readFileSync(join(lib, f), 'utf8').split('\n').entries())
+      if (/\b(spawnSync|spawn|execSync|execFileSync)\(/.test(line) && !/import /.test(line)) assert.match(line, /env(: childEnv\(\)|,|: env\b)/, `${f}:${i + 1} starts a process without an explicit environment`);
 });

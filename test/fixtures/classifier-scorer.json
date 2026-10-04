@@ -4,9 +4,9 @@
   "target": "anyRework (evaluator rejection, log-recorded rejection, or builder/commit failure; ecommerce history under the historical builder/reviewer policy)",
   "domain": "ecommerce-builder",
   "battery": "i07v2.1-2026-10-04",
-  "batteryHash": "97e004ebe09363fb",
+  "batteryHash": "3cbcd829cf0aff31",
   "model": "jev-1.13.0",
-  "glossaryHash": "5c249f83dde3ccde",
+  "glossaryHash": null,
   "datasetHash": "adc221af794c3f49",
   "splitHash": "9ece913b4d71d4c7",
   "learner": "StandardScaler + LogisticRegression(C=0.2, lbfgs, unweighted)",
@@ -256,8 +256,8 @@
  "cases": [
   {
    "input": {
-    "title": "Refund flow \u2713 for caf\u00e9 orders",
-    "description": "Issue partial refunds with permission checks; ledger entries are idempotent. \u00dcn\u00efc\u00f6d\u00e9 \ud83d\udcb3 text.",
+    "title": "Refund flow ✓ for café orders",
+    "description": "Issue partial refunds with permission checks; ledger entries are idempotent. Ünïcödé 💳 text.",
     "acceptance": [
      "A refund of 500 cents creates one ledger entry.",
      "Staff without orders.refund get 403.",
@@ -534,7 +534,7 @@
     0,
     0.9531,
     0.4664142857142857,
-    0.0,
+    0,
     0,
     0,
     0.6176,

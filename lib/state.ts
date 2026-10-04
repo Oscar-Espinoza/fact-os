@@ -8,7 +8,9 @@ import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } f
 // Shadow classifier operating bounds (I07 v2). The model is pinned: the battery and scorer were evaluated on jev-1.13.0.
 export const CLASSIFIER_DEFAULTS: ClassifierConfig = { provider: 'typesafe', model: 'jev-1.13.0', mode: 'shadow', timeoutMs: 20000, maxRetries: 1,
   maxRequestsPerDay: 500, glossary: null, scorer: null, escalation: null };
-export const ESCALATION_DEFAULTS: EscalationConfig = { model: 'gpt-6.1-sol', effort: 'high', maxPerDay: 20, timeoutMin: 20 };
+// Small pilot limits (agreed with the Codex partner), not learned thresholds.
+export const ESCALATION_DEFAULTS: EscalationConfig = { enabled: false, model: 'gpt-6.1-sol', effort: 'high', maxPerDay: 6, maxPerRun: 2, timeoutMin: 5,
+  maxQuestions: 6, fallbackMaxBudgetUsd: 2, reviewPlanning: false };
 
 export const DEFAULT_CONFIG: Config = {
   base: 'main', worktreesDir: '../<repo>-worktrees', branchPrefix: 'ship/', maxParallel: 3, maxAttempts: 2,
@@ -235,7 +237,7 @@ function configProblems(raw: unknown): string[] {
     const k = obj(c.classifier, 'config.classifier');
     if (k) {
       field(k, 'config.classifier', 'provider', (x) => x === 'typesafe', '"typesafe"');
-      field(k, 'config.classifier', 'model', str, 'a non-empty string');
+      field(k, 'config.classifier', 'model', (x) => typeof x === 'string' && /^jev-\d+\.\d+\.\d+$/.test(x), 'a pinned Jev version such as "jev-1.13.0" (the scorer is calibrated on one version)');
       field(k, 'config.classifier', 'mode', (x) => x === 'shadow', '"shadow" (apply mode comes after the benchmark)');
       for (const key of ['minConfidence', 'minRiskConfidence'])
         if (Object.hasOwn(k, key)) problems.push(`config.classifier.${key} is a v1 setting (one six-way choice); v2 thresholds live in the projection policy: remove it`);
@@ -247,8 +249,11 @@ function configProblems(raw: unknown): string[] {
         const e = obj(k.escalation, 'config.classifier.escalation');
         if (e) {
           for (const key of ['model', 'effort']) field(e, 'config.classifier.escalation', key, str, 'a non-empty string');
-          field(e, 'config.classifier.escalation', 'maxPerDay', uint, 'a safe integer >= 0');
-          field(e, 'config.classifier.escalation', 'timeoutMin', (x) => nonnegative(x) && (x as number) > 0 && (x as number) <= 120, 'minutes from 0 to 120');
+          for (const key of ['enabled', 'reviewPlanning']) field(e, 'config.classifier.escalation', key, (x) => typeof x === 'boolean', 'a boolean');
+          for (const key of ['maxPerDay', 'maxPerRun']) field(e, 'config.classifier.escalation', key, uint, 'a safe integer >= 0');
+          field(e, 'config.classifier.escalation', 'maxQuestions', (x) => uint(x) && (x as number) >= 1 && (x as number) <= 11, 'an integer from 1 to 11');
+          field(e, 'config.classifier.escalation', 'timeoutMin', (x) => nonnegative(x) && (x as number) > 0 && (x as number) <= 60, 'minutes above 0, at most 60');
+          field(e, 'config.classifier.escalation', 'fallbackMaxBudgetUsd', (x) => nonnegative(x) && (x as number) > 0, 'a positive number of dollars');
         }
       }
     }

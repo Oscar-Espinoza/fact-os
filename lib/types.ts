@@ -14,8 +14,10 @@ export type Provider = 'claude' | 'codex';
 // relative to the project root (a codebase glossary sent as context; a frozen rework scorer for the attention priority).
 export interface ClassifierConfig { provider: 'typesafe'; model: string; mode: 'shadow'; timeoutMs: number; maxRetries: number; maxRequestsPerDay: number;
   glossary: string | null; scorer: string | null; escalation: EscalationConfig | null }
-// Unsure assessments go to a reasoning agent that can read the code (Codex, with config.codex.fallback); shadow only.
-export interface EscalationConfig { model: string; effort: string; maxPerDay: number; timeoutMin: number }
+// Unsure assessments go to a reasoning agent that reads the code read-only (Codex; config.codex.fallback when Codex is
+// unavailable); shadow only, explicit classify runs only. maxPerRun/maxPerDay count actual agent starts, fallback included.
+export interface EscalationConfig { enabled: boolean; model: string; effort: string; maxPerDay: number; maxPerRun: number; timeoutMin: number;
+  maxQuestions: number; fallbackMaxBudgetUsd: number; reviewPlanning: boolean }
 export interface RoleConfig { model?: string; effort?: string; permissionMode?: string; provider?: Provider }
 
 // Model profiles (profiles.ts): a named set of model/effort per role, chosen at runtime in control.json. "opus" is the

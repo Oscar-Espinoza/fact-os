@@ -44,7 +44,10 @@ not send. Typed output guarantees the interface, not the truth.
 9. **Confidence is not correctness.** Choice confidence measures how concentrated the distribution is; a Noul has no
    confidence, only a probability. Use .8/.2 display bands and a middle band that abstains or escalates, and fit real
    thresholds on labelled data.
-10. **Escalate the unsure cases.** Jev handles the bulk; answers in the middle band, or questions that need code evidence,
+10. **Small answer moves flip thresholds.** Two full runs moved 0.1% of answers by more than .1, yet changed 5% of
+    candidate tiers, because those answers sat near .8/.9. Keep an explicit uncertainty band instead of a single cut, and
+    treat a flip across it as "unsure", not as two different verdicts.
+11. **Escalate the unsure cases.** Jev handles the bulk; answers in the middle band, or questions that need code evidence,
     go to a reasoning agent that can read the code (Oscar's design: Sol 6.1 high, Opus high fallback). The agent's
     answers are also labels for improving the questions.
 
@@ -66,6 +69,17 @@ not send. Typed output guarantees the interface, not the truth.
   "difficulty", and recover the input as it was before the outcome (saved prompts), never the post-failure rewrite.
 - **History cannot answer counterfactuals.** 184 of 205 labelled features were built by Opus: the data measures difficulty
   under that policy, not whether Sonnet would have failed.
+
+## Escalating to an agent
+
+- Send only the unsure questions, never Jev's probabilities or the predicted tier (that anchors the agent).
+- Run the agent strictly read-only on a snapshot at one commit, not on a live checkout; never run a writable job and undo it.
+- Demand quoted evidence and verify every quote mechanically (spec text, blob at the commit); a verified quote proves the
+  source says it, not that the interpretation is right.
+- Keep agent answers as proposals beside Jev's; never average booleans into probabilities or train on them unadjudicated.
+- OpenAI strict structured outputs reject `const` without `type`, length and pattern keywords: send a simplified schema to
+  the provider and validate the full contract yourself. `codex exec` refuses a non-git directory unless given
+  `--skip-git-repo-check`; Codex reports request failures as JSON events on stdout, not stderr.
 
 ## Engineering checklist
 

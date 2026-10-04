@@ -431,7 +431,7 @@ export function claudeArgs(config: Config, role: Role | RoleConfig, root: string
 // ---- processes ----
 
 export function git(args: string[], cwd: string): { code: number; out: string; err: string } {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 << 20 });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 << 20, env: childEnv() });
   // trimEnd: keep the leading status column of `status --porcelain`
   return { code: r.status ?? 1, out: (r.stdout || '').trimEnd(), err: (r.stderr || r.error?.message || '').trim() };
 }
@@ -522,7 +522,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (hit) return `${why}: it now contains ${hit.slice(0, 12)} from a feature branch`;
     const blobs = (...a: string[]) => { // blob ids among the objects rev-list --objects reaches, minus the empty blob
       const ids = lines('--objects', ...a).map((l) => l.split(' ')[0]);
-      const r = spawnSync('git', ['cat-file', '--batch-check=%(objecttype) %(objectname)'], { cwd: root, input: ids.join('\n'), encoding: 'utf8', maxBuffer: 256 << 20 });
+      const r = spawnSync('git', ['cat-file', '--batch-check=%(objecttype) %(objectname)'], { cwd: root, input: ids.join('\n'), encoding: 'utf8', maxBuffer: 256 << 20, env: childEnv() });
       return (r.stdout || '').split('\n').filter((l) => l.startsWith('blob ') && l !== 'blob e69de29bb2d1d6434b8b29ae775ad8c2e48c5391').map((l) => l.slice(5));
     };
     const branchBlobs = refs.length ? new Set(blobs(...refs, `^${baseSha}`, ...done)) : new Set();

@@ -17,7 +17,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I04 | done | Resume the builder once to commit work it left uncommitted (`commitFixes`) |
 | I05 | done | Setup failures spend no attempts: delayed retries, then a sticky launch hold until setup-resume |
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
-| I07 | v2 shadow done | Jev classifier: 32 narrow questions → review requirements, workload, attention, planning; shadow only |
+| I07 | v2 shadow done | Jev classifier: 32 narrow questions → review requirements, workload, attention, planning; Sol escalation for unsure cases; shadow only |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -219,6 +219,36 @@ single-flight per input, in-batch dedupe; F4 one deadline for all attempts and b
 into a persisted cooldown; F5/F6 dispositions above; F7 request identity (model, battery, state) separate from policy and
 scorer identity, so policy changes re-project stored answers without a request; F8 a feature edited during its request
 is recorded stale; F9 requested/resolved model, usage, attempts and elapsed time on every record.
+
+**Second review (f8be7e0, 11 P2 + 3 P3), all fixed:** every subprocess (including git helpers) gets `childEnv()`; the
+scorer artifact is checked whole (canonical battery hash, pinned model, glossary hash, extraction structures, reference range)
+and a mismatch only makes the score unavailable; claiming an input re-checks published answers, and the answer is published and
+the claim released together under the lock; the provider cooldown is checked before every attempt and HTTP-date Retry-After is
+honoured; lock waits count against the deadline; a person's tier or explicit risk is part of a separate authority identity, so a
+change re-projects locally (no key needed); investigate keeps routing-review for protected work and risk-review for explicit
+normal; the report re-projects with today's policy and separates stale, failed and never-attempted features, and never
+averages unknown cost; provider usage is allowlisted and the key is redacted from records; extra answers and unpinned models are
+rejected; records keep a secret-free input snapshot and the roles in effect; keyword matching folds dotted/dotless i like Python.
+
+**Stability:** two full runs a few hours apart moved only 11 of 8,418 answers by more than .1, but those moves near the .8/.9
+thresholds changed 12 of 226 candidate tiers: the review-uncertain band and the escalation stage exist for exactly these cases.
+
+**Escalation (Oscar's design: unsure cases go to an agent; contract agreed with the Codex partner, round 3).** Opt-in
+(`config.classifier.escalation.enabled`, or `fact-os classify ... --escalate`), shadow, explicit classify runs only. Selection:
+direct review axes in Jev's (.2, .9) band, priority to features with a protection/risk conflict, then review-uncertain, then
+answers nearest .5; a person's tier and quality-only scope are not sent; at most `maxQuestions` per feature, the rest stay
+unresolved; `maxPerRun` and `maxPerDay` count actual agent starts (defaults 2 and 6). The agent reads an ephemeral snapshot of
+tracked files at the base commit (no live state, no untracked files, no escaping symlinks): Sol 6.1 high through
+`codex exec --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --output-schema`, falling back once to the
+configured Claude fallback (Opus high) only when Codex is unavailable, forced read-only after the merge
+(`--restricted --tools Read,Grep,Glob --strict-mcp-config --permission-mode plan`, a $2 cap). One deadline covers both; the
+process group is killed and waited for. Answers must echo the request and cite evidence: a spec quote is checked against the
+feature, a repo quote against the blob at the base commit; true/false needs a spec quote, and absence of code is never evidence.
+Composition is a separate advisory derivation: an agent true adds a review proposal; a false clears only a review-uncertain
+axis (< .9) with spec evidence, never a Jev floor, a person's tier or protection; unknown stays uncertain. Answers are
+`model_proposal_unadjudicated`, never automatic labels; escalations of features already launched are marked
+`retrospectiveCurrentBase`. First real runs: Sol read the repository and cited a migration and the audit package with verified
+quotes (102 s, mostly cached input); Opus fallback answered in about 20 s for $0.27.
 
 **Configuration (ecommerce):** `classifier: {provider: "typesafe", mode: "shadow", glossary: ".shipyard/classifier/glossary.json",
 scorer: ".shipyard/classifier/scorer-v2.1.json"}`; key in `TYPESAFE_API_KEY` or fact-os's `.env`. The scorer is fitted to
