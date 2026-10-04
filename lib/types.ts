@@ -198,7 +198,8 @@ export type StateName = keyof StateFiles;
 
 export interface Finding { check: string; ok: boolean; evidence: string }
 // A failure the evaluator reproduced on the base commit as well, with the same signature: not this feature's to fix.
-export interface BaseDefect { check: string; command: string; signature: string; baseSha: string; featureSha: string; evidence: string; paths?: string[] }
+export interface BaseDefect { check: string; command: string; signature: string; baseSha: string; featureSha: string; evidence: string; paths?: string[];
+  setup?: string; baseOutput?: string; featureOutput?: string } // the reproduction: equivalent setup, and each run's failing output
 export interface Verdict {
   pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string;
   baseDefects?: BaseDefect[]; // failures reproduced on base too; each names the failed finding (check) it explains

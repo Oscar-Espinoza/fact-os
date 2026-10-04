@@ -1835,7 +1835,7 @@ test('base defect: a rejection only for a defect reproduced on base holds the bu
   writeFileSync(join(s.repo, 'echo-worker.ts'), 'export const queues = [];\n'); s.git('add', '.'); s.git('commit', '-qm', 'fixture');
   const base = s.git('rev-parse', 'main');
   writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'the producer fixture fails' }], cheating: [], blocking: [],
-    baseDefects: [{ check: 'a.txt exists', command: 'pnpm test producer-queue.db.test.ts', signature: 'Queue catalog.product-changed does not exist', baseSha: '$BASE_SHA', featureSha: '$FEATURE_SHA', evidence: 'fails on base and branch', paths: ['echo-worker.ts'] }] }] }));
+    baseDefects: [{ check: 'a.txt exists', command: 'pnpm test producer-queue.db.test.ts', signature: 'Queue catalog.product-changed does not exist', baseSha: '$BASE_SHA', featureSha: '$FEATURE_SHA', evidence: 'fails on base and branch', paths: ['echo-worker.ts'], setup: 'fresh task schema, worker stopped', baseOutput: 'FAIL: Queue catalog.product-changed does not exist', featureOutput: 'FAIL: Queue catalog.product-changed does not exist' }] }] }));
   s.cli('run');
   const a = s.feature('a');
   assert.deepEqual([a.status, a.attempts, a.stop, a.planningHold?.cause], ['todo', 0, { attempt: 1, counted: false }, 'base-defect']);
@@ -1861,7 +1861,7 @@ test('base defect: mixed with a real blocker it counts as usual, with the base d
   const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
   const base = s.git('rev-parse', 'main');
   writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'x' }], cheating: [], blocking: ['a real defect of this feature'],
-    baseDefects: [{ check: 'a.txt exists', command: 'cmd', signature: 'sig', baseSha: '$BASE_SHA', featureSha: '$FEATURE_SHA', evidence: 'both' }] }] }));
+    baseDefects: [{ check: 'a.txt exists', command: 'cmd', signature: 'sig', baseSha: '$BASE_SHA', featureSha: '$FEATURE_SHA', evidence: 'both', setup: 'same', baseOutput: 'sig', featureOutput: 'sig' }] }] }));
   assert.equal(s.cli('run').status, 2);
   const a = s.feature('a');
   assert.deepEqual([a.status, a.attempts, a.planningHold], ['stuck', 1, undefined]);
@@ -1877,7 +1877,7 @@ test('base defect: an attribution not pinned to this evaluation\'s commits is tr
   assert.equal(s.cli('run').status, 2);
   const a = s.feature('a');
   assert.deepEqual([a.status, a.attempts, a.planningHold], ['stuck', 1, undefined]);
-  assert.match(a.lastFeedback!, /Base attribution not verified for this evaluation's commits/);
+  assert.match(a.lastFeedback!, /Base attribution not proven for this evaluation's commits/);
 });
 
 test('base defect: a signature with two automatic rechecks spent stays held, whatever companion signatures come with it', (t) => {
@@ -1890,4 +1890,21 @@ test('base defect: a signature with two automatic rechecks spent stays held, wha
   writeFileSync(join(s.repo, 'fixture.ts'), 'y\n'); s.git('add', '.'); s.git('commit', '-qm', 'touch the implicated path');
   s.cli('run');
   assert.equal(s.feature('a').planningHold?.cause, 'base-defect'); assert.equal(s.calls('build', 'a').length, 0);
+});
+
+test('base defect: a pinned attribution without its reproduction (setup and both failing outputs) is the feature\'s failure', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'x' }], cheating: [], blocking: [],
+    baseDefects: [{ check: 'a.txt exists', command: 'cmd', signature: 'Queue x does not exist', baseSha: '$BASE_SHA', featureSha: '$FEATURE_SHA', evidence: 'both', setup: 'same', baseOutput: 'some other error', featureOutput: 'Queue x does not exist' }] }] }));
+  assert.equal(s.cli('run').status, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').planningHold], ['stuck', 1, undefined]);
+});
+
+test('base defect: a person\'s release (or an edit) of a base-defect hold makes the next pass merge current base first', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
+  const config = loadConfig(s.repo), file = join(s.repo, '.fact-os', 'features.json'), d = JSON.parse(readFileSync(file, 'utf8')) as FeaturesFile;
+  Object.assign(d.features[0]!, { planningHold: { cause: 'base-defect', confidence: 'high', evidence: ['S'], review: 'a/1', passEnd: '', ts: '', inputs: holdInputs(s.repo, config, d.features[0]!), base: s.git('rev-parse', 'main'), paths: [], signatures: ['S'] } });
+  writeFileSync(file, JSON.stringify(d));
+  assert.equal(s.cli('release', 'a').status, 0);
+  assert.equal(s.feature('a').baseRecheck, true);
 });

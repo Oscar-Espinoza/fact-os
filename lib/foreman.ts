@@ -76,8 +76,10 @@ export function parseVerdict(text: unknown): Verdict {
       for (const k of ['baseSha', 'featureSha'] as const) if (typeof b[k] !== 'string' || !/^[0-9a-f]{7,40}$/.test(b[k] as string)) return fail(`${at}.${k} must be a commit sha`);
       if (!findings.some((f) => f.ok !== true && f.check === (b.check as string).trim())) return fail(`${at}.check must name a failed finding`);
       if (b.paths !== undefined && !(Array.isArray(b.paths) && b.paths.every(nonempty))) return fail(`${at}.paths must be an array of nonempty strings`);
+      for (const k of ['setup', 'baseOutput', 'featureOutput'] as const) if (b[k] !== undefined && typeof b[k] !== 'string') return fail(`${at}.${k} must be a string`);
       baseDefects.push({ check: (b.check as string).trim(), command: (b.command as string).trim(), signature: (b.signature as string).trim(), baseSha: b.baseSha as string, featureSha: b.featureSha as string,
-        evidence: (b.evidence as string).trim(), ...(b.paths ? { paths: (b.paths as string[]).map((p) => p.trim()) } : {}) });
+        evidence: (b.evidence as string).trim(), ...(b.paths ? { paths: (b.paths as string[]).map((p) => p.trim()) } : {}),
+        ...Object.fromEntries((['setup', 'baseOutput', 'featureOutput'] as const).filter((k) => nonempty(b[k])).map((k) => [k, (b[k] as string).trim()])) });
     }
   }
   if (v.lesson !== undefined && v.lesson !== null && typeof v.lesson !== 'string') return fail('verdict.lesson must be a string or null');
@@ -356,7 +358,8 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     `A failure that also happens on ${config.base} without this branch is not this feature's to fix. Only when you reproduced it on the base ` +
     'commit too (same command, equivalent isolated setup, same failure signature) report it under "baseDefects": {"check": the failed ' +
     'finding it explains, "command", "signature" (the normalized failure), "baseSha" (the base commit you ran), "evidence" (both runs), ' +
-    '"paths" (the files implicated)}, keep that finding failed, and do not repeat it under "blocking". A failure you did not reproduce on base ' +
+    '"paths" (the files implicated), "setup" (how both runs were set up, equivalently), "baseOutput" and "featureOutput" (each run\'s failing ' +
+    'output, both containing the signature)}, keep that finding failed, and do not repeat it under "blocking". A failure you did not reproduce on base ' +
     'is the feature\'s. ' +
     'Answer with ONLY a JSON object: {"pass": boolean, "findings": [{"check": string, "ok": boolean, "evidence": string}], ' +
     '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null, "baseDefects"?: [...]}. One finding per acceptance check, plus one ' +
@@ -1003,7 +1006,6 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     }
     let fixesLeft = config.gateFixes, diagnosed = false, diagNote = '', reviewsLeft = config.reviewFixes;
     let forceRefresh = !!f.baseRecheck;
-    if (f.baseRecheck) await edit(id, (x) => { delete x.baseRecheck; });
     const resumeFix = async (failure: string, d: Diagnosis | null): Promise<'retry' | 'done'> => {
       if (await stopped()) return 'done';
       const before = git(['rev-parse', 'HEAD'], wt).out;
@@ -1078,12 +1080,13 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (await stopped()) return;
       // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
       if (config.refreshBeforeTest || forceRefresh) { // a base-defect recheck validates against the new base whatever the setting
-        forceRefresh = false;
+        forceRefresh = false; // the durable marker is cleared only once the refresh succeeded (below)
         const r = await serial<'halted' | 'current' | 'clean' | 'conflicted' | void>(() => tampered() ? 'halted'
           : git(['merge-base', '--is-ancestor', baseSha, branch], wt).code === 0 ? 'current' : refresh(f, branch, fail, true, inline));
         if (r === 'halted') { log(root, id, 'refresh-skipped', `${halted}; back to todo`); return set(id, { status: 'todo' }); }
         if (r === 'conflicted') { const note = await resolveNow(); if (note == null) return; resolved = note; continue; }
         if (r !== 'current' && r !== 'clean') return; // conflicted (back to todo), stuck, or failed
+        if (loadState(root).features.find((x) => x.id === id)?.baseRecheck) await edit(id, (x) => { delete x.baseRecheck; }); // the new base is in: done
       }
       const sha = git(['rev-parse', branch], wt).out; // what gets tested, evaluated and merged
 
@@ -1134,10 +1137,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (await stopped()) return;
       const v0: Verdict = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };
       // A base attribution counts only for the pinned commits of this evaluation; any other is treated as this feature's failure.
-      const pinned = (d: BaseDefect) => evalBase.startsWith(d.baseSha) && sha.startsWith(d.featureSha);
+      // …and only with its reproduction: the setup, and both runs' failing output, each containing the same failure signature.
+      const has = (out: string | undefined, sig: string) => !!out && out.replace(/\s+/g, ' ').toLowerCase().includes(sig.replace(/\s+/g, ' ').toLowerCase());
+      const pinned = (d: BaseDefect) => evalBase.startsWith(d.baseSha) && sha.startsWith(d.featureSha) && !!d.setup && has(d.baseOutput, d.signature) && has(d.featureOutput, d.signature);
       const unverified = (v0.baseDefects ?? []).filter((d) => !pinned(d));
       const v: Verdict = !unverified.length ? v0 : { ...v0, baseDefects: (v0.baseDefects ?? []).filter(pinned),
-        blocking: [...v0.blocking, ...unverified.map((d) => `Base attribution not verified for this evaluation's commits (treated as this feature's): ${d.check}: ${d.signature} — ${d.evidence}`)] };
+        blocking: [...v0.blocking, ...unverified.map((d) => `Base attribution not proven for this evaluation's commits (treated as this feature's): ${d.check}: ${d.signature} — ${d.evidence}`)] };
       const lesson = v.lesson;
       // An actionable rejection resumes the builder's session once per pass (config.reviewFixes), then the gate and a fresh
       // evaluator run again on the new commit; acceptance is unchanged. The superseded rejection's lesson is not compounded:
@@ -1439,15 +1444,17 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       // failure signatures (persisted); without implicated paths, or after the cap, it waits for an edit or a release.
       const touched = (from: string, paths: string[]) => from !== baseSha && paths.length > 0 &&
         git(['diff', '--name-only', from, baseSha, '--', ...paths], root).out.trim() !== '';
+      // Spent rechecks per signature; an older joined key ("S|T") counts for each signature in it.
+      const rechecksSpent = (f: Feature, sig: string) => Math.max(0, ...Object.entries(f.baseRechecks ?? {}).filter(([k]) => k.split('|').includes(sig)).map(([, n]) => n));
       const recheck = features.filter((f) => f.status === 'todo' && f.planningHold?.cause === 'base-defect' && f.planningHold.base &&
-        (f.planningHold.signatures || []).every((sig) => (f.baseRechecks?.[sig] ?? 0) < 2) && touched(f.planningHold.base, f.planningHold.paths || []));
+        (f.planningHold.signatures || []).every((sig) => rechecksSpent(f, sig) < 2) && touched(f.planningHold.base, f.planningHold.paths || []));
       if (recheck.length) {
         await mutate(root, 'features', (d) => {
           for (const f of d.features) {
             if (!recheck.some((x) => x.id === f.id) || f.planningHold?.cause !== 'base-defect') continue;
             const sigs = f.planningHold.signatures || [];
-            if (!sigs.every((sig) => (f.baseRechecks?.[sig] ?? 0) < 2)) continue; // rechecked under the lock
-            f.baseRechecks = { ...(f.baseRechecks || {}), ...Object.fromEntries(sigs.map((sig) => [sig, (f.baseRechecks?.[sig] ?? 0) + 1])) };
+            if (!sigs.every((sig) => rechecksSpent(f, sig) < 2)) continue; // rechecked under the lock
+            f.baseRechecks = { ...(f.baseRechecks || {}), ...Object.fromEntries(sigs.map((sig) => [sig, rechecksSpent(f, sig) + 1])) };
             const n = Math.max(...sigs.map((sig) => f.baseRechecks![sig]!));
             log(root, f.id, 'planning-hold-released', `${config.base} changed the code implicated in its base defect; recheck ${n} of 2`);
             delete f.planningHold;
@@ -1462,6 +1469,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         await mutate(root, 'features', (d) => {
           for (const f of d.features) if (edited.some((x) => x.id === f.id) && f.planningHold && f.planningHold.inputs !== holdInputs(root, config, f)) {
             log(root, f.id, 'planning-hold-released', `its inputs changed since the hold (${f.planningHold.cause}, review ${f.planningHold.review})`);
+            if (f.planningHold.cause === 'base-defect') f.baseRecheck = true; // validate against current base, not the held build's
             delete f.planningHold;
           }
         });

@@ -14,6 +14,7 @@ export function apply(f: Feature, action: Action, maxAttempts: number): string |
     Object.assign(f, { status: 'paused', pausedAt: now(), updatedAt: now() });
   } else if (action === 'release') { // a person overrides the observer's planning hold: launch it as it is
     if (!f.planningHold) return 'no planning hold to release';
+    if (f.planningHold.cause === 'base-defect') f.baseRecheck = true; // validate against current base, not the held build's
     delete f.planningHold;
     f.updatedAt = now();
   } else if (action === 'resume') {
