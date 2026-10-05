@@ -325,7 +325,11 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
     const id = e.feature; if (!id) continue;
     const title = titles[id] ?? id, d = e.detail || '', t = (text: string, badge: string, tone: StoryState['tone'], needsYou = false) => out.push({ ts: e.ts, id, title, text, badge, tone, needsYou });
     if (CYCLE_START[e.event] || (e.event === 'resumed' && e.attemptsReset)) { tryOf.delete(id); continue; }
-    if (e.event === 'launch') { const n = (tryOf.get(id) ?? 0) + 1; if (!tryOf.has(`${id}#open`)) { tryOf.set(id, n); tryOf.set(`${id}#open`, 1); t(`Started try ${n}.`, 'Running', 'run'); } fixedInTry.delete(id); continue; }
+    if (e.event === 'launch') {
+      if (tryOf.has(`${id}#open`)) t(`Resumed try ${tryOf.get(id) ?? 1}.`, 'Running', 'run'); // the same try: no retry was spent
+      else { const n = (tryOf.get(id) ?? 0) + 1; tryOf.set(id, n); tryOf.set(`${id}#open`, 1); t(`Started try ${n}.`, 'Running', 'run'); fixedInTry.delete(id); }
+      continue;
+    }
     const n = e.stop?.counted && e.stop.attempt ? e.stop.attempt : tryOf.get(id) ?? 1; // a recorded attempt number wins
     if (e.event === 'review-fix') { fixedInTry.add(id); t('The review asked for changes; fixing them in the same session (no retry used).', 'Fixing', 'fix'); }
     else if (e.event === 'gate-fix') { fixedInTry.add(id); t('Checks failed; fixing them in the same session (no retry used).', 'Fixing', 'fix'); }

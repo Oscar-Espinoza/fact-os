@@ -162,4 +162,5 @@ test('transitions: a base-defect hold and its release keep the same try in the f
   clock = Date.parse('2026-10-04T20:00:00Z');
   const t = transitions([ev('launch'), ev('failed', 'BASE', { cause: 'base-defect', stop: { attempt: 1, counted: false } }), ev('planning-hold-released', 'recheck'), ev('launch')], { a: 'A' }, 3, 'main');
   assert.ok(!t.some((x) => /Started try 2/.test(x.text)));
+  assert.equal(t[0]!.text, 'Resumed try 1.');
 });
