@@ -157,3 +157,9 @@ test('recheck fixes: an interruption keeps the try (stop.attempt wins); a reject
     runs: [{ tag: '1.2', role: 'build', at: new Date(Date.parse(at(2)) + 2e3).toISOString(), text: 'The work is committed and clean.' }], maxAttempts: 3, base: 'main' });
   assert.equal(s2.current!.steps[0]!.text, 'Builder finished; its output was not recorded for this step.');
 });
+
+test('transitions: a base-defect hold and its release keep the same try in the feed', () => {
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const t = transitions([ev('launch'), ev('failed', 'BASE', { cause: 'base-defect', stop: { attempt: 1, counted: false } }), ev('planning-hold-released', 'recheck'), ev('launch')], { a: 'A' }, 3, 'main');
+  assert.ok(!t.some((x) => /Started try 2/.test(x.text)));
+});

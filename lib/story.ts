@@ -122,7 +122,7 @@ export function buildStory(inp: StoryInput): Story {
   // The artifact of a step that ended at `end`: the newest unused one of `roles` written during the step. The foreman writes
   // a run's output before logging the event that ends the step, so a later repair's output never belongs to it.
   const artifact = (roles: StoryRun['role'][], start: string | undefined, end: string, peek = false) => {
-    const s = start ? Date.parse(start) - 5e3 : -Infinity, e = Date.parse(end) + 500; // clock granularity only
+    const s = start ? Date.parse(start) - 5e3 : -Infinity, e = Date.parse(end); // never after the event that ends the step
     const hit = runs.filter((r) => roles.includes(r.role) && !used.has(r) && Date.parse(r.at) >= s && Date.parse(r.at) <= e).pop();
     if (hit && !peek) used.add(hit);
     return hit;
@@ -338,7 +338,7 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
     else if (e.event === 'failed' || e.event === 'stuck') {
       const reason = reasonOf(d), stuck = e.event === 'stuck';
       if (e.cause === 'environment') { t(stuck ? 'Stopped after repeated environment faults; needs a person.' : 'Test-environment fault; waiting to retry the same build (no retry used).', stuck ? 'Stuck · needs you' : 'Waiting to retry', stuck ? 'bad' : 'hold', stuck); }
-      else if (e.cause === 'base-defect') { tryOf.delete(`${id}#open`); t(`On hold: the same failure happens on ${base}; no retry used.`, 'On hold', 'hold'); }
+      else if (e.cause === 'base-defect') { t(`On hold: the same failure happens on ${base}; no retry used.`, 'On hold', 'hold'); }
       else if (!counted(e)) t(`Stopped without using a retry: ${reason}.`, stuck ? 'Stuck · needs you' : 'Waiting', stuck ? 'bad' : 'hold', stuck);
       else { tryOf.delete(`${id}#open`); t(stuck || n >= maxAttempts ? `Stuck after ${n} ${n === 1 ? 'try' : 'tries'}: ${reason}.` : `Try ${n} ended: ${reason}. Queued for try ${n + 1}.`, stuck || n >= maxAttempts ? 'Stuck · needs you' : `Queued · try ${n + 1} of ${maxAttempts}`, stuck || n >= maxAttempts ? 'bad' : 'fix', stuck || n >= maxAttempts); }
     }
