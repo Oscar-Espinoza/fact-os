@@ -39,3 +39,11 @@ test('scorecard: cells by model, effort and recorded tier with feature counts; u
   const many = Array.from({ length: JUDGE_MIN }, (_, i) => [ep(`s${i}`, 'sonnet', 'normal', 'rejected'), ep(`o${i}`, 'opus', 'normal', 'accepted')]).flat();
   assert.match(scorecard(many).verdict, /^Same-tier rows with 8\+ features each: normal\. .*not a fair comparison\. Routing stays as configured\.$/);
 });
+
+test('recheck: a review written just before the next fresh prompt stays with the build it reviewed', () => {
+  clock = Date.parse('2026-10-05T00:00:00Z');
+  const events = [ev('launch'), ev('prompt', 'builder', run('1', 'sonnet', 'medium')), ev('launch'), ev('prompt', 'builder', run('2', 'opus', 'high'))];
+  const at = (i: number) => Date.parse(events[i]!.ts);
+  const [a, b] = episodes('a', events, [file('1', 'eval', { mtime: at(3) - 1000, verdict: V(false) }), file('2', 'eval', { mtime: at(3) + 5000, verdict: V(true) })]);
+  assert.deepEqual([a!.firstReview, b!.firstReview, b!.finalReview], ['rejected', 'accepted', 'accepted']);
+});

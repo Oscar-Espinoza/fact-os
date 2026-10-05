@@ -44,7 +44,8 @@ export function episodes(feature: string, events: LogEvent[], files: RunFile[]):
   }
   for (let i = 0; i < out.length; i++) {
     const x = out[i]!, next = out[i + 1]?.at ?? Infinity;
-    const mine = files.filter((f) => f.mtime >= x.at - 2000 && f.mtime < next - 2000).sort((a, b) => a.mtime - b.mtime);
+    // Exact boundaries: an artifact is written after its run's prompt event, so it belongs to the latest prompt before it.
+    const mine = files.filter((f) => f.mtime >= x.at && f.mtime < next).sort((a, b) => a.mtime - b.mtime);
     const evals = mine.filter((f) => f.role === 'eval'), builds = mine.filter((f) => f.role === 'build');
     x.firstReview = review(evals[0]); x.finalReview = review(evals.at(-1)); x.repairs = Math.max(0, builds.length - 1);
     const v = evals[0]?.verdict;

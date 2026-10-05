@@ -129,32 +129,42 @@ export function refsHold(refs: AtomRef[], rev: string, cwd: string, git: Git): s
   return null;
 }
 
-// The lines that define `symbol`: its declaration (or, failing that, a definition like `name(`, `name:` or `name =` outside
-// comments) through the end of its block. Null when the file does not define it.
-export function symbolSection(src: string, symbol: string): string | null {
-  const lines = src.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
+// The lines that define `symbol`: its declaration (or, failing that, a definition like `name(`, `name:` or `name =`), never one
+// inside a comment, through the end of its block. Null when the file does not define it. `complete` is false when the block's
+// end could not be established (an open template literal or bracket, or more than SECTION_MAX lines): callers then treat the
+// whole file as the definition rather than certify part of it.
+const SECTION_MAX = 300;
+export function symbolSection(src: string, symbol: string): string | null { return symbolDef(src, symbol)?.text ?? null; }
+export function symbolDef(src: string, symbol: string): { text: string; complete: boolean } | null {
+  // Comments blanked (line count kept), so a declaration inside one is never found.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' ')).replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+  const lines = code.split('\n'), orig = src.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
   const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${sym}\\b`);
   const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly )*${sym}\\s*(\\(|:|=|<)`);
   let at = lines.findIndex((l) => decl.test(l));
-  if (at < 0) at = lines.findIndex((l) => !/^\s*(\/\/|\*|\/\*)/.test(l) && def.test(l));
+  if (at < 0) at = lines.findIndex((l) => def.test(l));
   if (at < 0) return null;
   const indent = /^\s*/.exec(lines[at]!)![0].length;
-  let end = at;
-  for (let i = at + 1; i < Math.min(lines.length, at + 300); i++) {
+  let end = at, capped = false;
+  for (let i = at + 1; i < lines.length; i++) {
+    if (i - at >= SECTION_MAX) { capped = true; break; }
     const l = lines[i]!;
     if (!l.trim()) continue;
     const ind = /^\s*/.exec(l)![0].length;
     if (ind < indent || (ind === indent && !/^\s*[)}\]]/.test(l))) break;
     end = i;
   }
-  return lines.slice(at, end + 1).join('\n');
+  const body = lines.slice(at, end + 1).join('\n'), count = (re: RegExp) => (body.match(re) ?? []).length;
+  const balanced = count(/`/g) % 2 === 0 && count(/[{([]/g) === count(/[})\]]/g);
+  return { text: orig.slice(at, end + 1).join('\n'), complete: balanced && !capped };
 }
 
 // What each ref's verification covered: the defining section of a symbol, or the whole file. A change there means the advice
 // must be checked again; an unrelated change elsewhere in the file does not.
 export function refPrints(refs: AtomRef[], rev: string, cwd: string, git: Git): string[] {
   return refs.map((r) => {
-    const src = git(['show', `${rev}:${r.path}`], cwd).out, part = r.symbol ? symbolSection(src, r.symbol) ?? '' : src;
+    const src = git(['show', `${rev}:${r.path}`], cwd).out, d = r.symbol ? symbolDef(src, r.symbol) : null;
+    const part = r.symbol ? (d?.complete ? d.text : `whole file:\n${src}`) : src; // an uncertain section: the whole file
     return createHash('sha256').update(part).digest('hex').slice(0, 16);
   });
 }
@@ -208,14 +218,18 @@ export function renderContext(map: CandidateMap, pick: AtomPick): string {
 // bullet names that a candidate file falls under, then words it shares with the spec), then in the file's own order, whole
 // bullets only, under their section headings, with the count left out and where the full file is. Under budget: unchanged.
 export function selectLessons(text: string, candidates: string[], spec: string, budget: number, fullFile: string | null): { text: string; included: number; total: number } {
+  // Entries: bullets (`-`, `*`, `1.`) with their continuation lines; a file without bullets is taken by paragraphs.
   const lines = text.split('\n'), bullets: { head: string; text: string; i: number; score: number }[] = [];
-  let head = '';
+  const isItem = (l: string) => /^([-*]|\d+[.)])\s/.test(l), anyItem = lines.some(isItem); // indented sub-items stay with their parent
+  let head = '', open = false;
   for (const l of lines) {
-    if (/^#{2,4} /.test(l)) { head = l; continue; }
-    if (/^- /.test(l)) bullets.push({ head, text: l, i: bullets.length, score: 0 });
-    else if (bullets.length && /^\s+\S/.test(l) && bullets.at(-1)!.head === head) bullets.at(-1)!.text += '\n' + l;
+    if (/^#{1,4} /.test(l)) { head = l; open = false; continue; }
+    if (!l.trim()) { open = anyItem && open; if (!anyItem) open = false; continue; }
+    if (anyItem ? isItem(l) : !open) { bullets.push({ head, text: l, i: bullets.length, score: 0 }); open = true; continue; }
+    if (open && bullets.length && bullets.at(-1)!.head === head) bullets.at(-1)!.text += '\n' + l;
   }
-  if (Buffer.byteLength(text) <= budget || !bullets.length) return { text, included: bullets.length, total: bullets.length };
+  if (Buffer.byteLength(text) <= budget) return { text, included: bullets.length, total: bullets.length };
+  if (!bullets.length) return { text: fullFile ? `(The lessons are in ${fullFile}; read them before you start.)` : '', included: 0, total: 0 };
   const words = new Set((spec.toLowerCase().match(/[a-z][a-z-]{4,}/g) ?? []).filter((w) => !STOP.has(w)));
   for (const b of bullets) {
     const refs = [...b.text.matchAll(/`([\w@.-]+\/[\w@./<>*-]*)`/g)].map((m) => m[1]!.replace(/<.*$|\*.*$/, ''));
@@ -232,7 +246,10 @@ export function selectLessons(text: string, candidates: string[], spec: string, 
   const out: string[] = [];
   let last: string | null = null;
   for (const b of bullets) if (picked.has(b.i)) { if (b.head !== last) { if (b.head) out.push('', b.head); last = b.head; } out.push(b.text); }
-  return { text: out.join('\n').trim() + footer(bullets.length - picked.size), included: picked.size, total: bullets.length };
+  const result = out.join('\n').trim() + footer(bullets.length - picked.size);
+  // Only a budget smaller than the footer itself can overflow: then the reference alone (config keeps budgets >= 1000).
+  return Buffer.byteLength(result) <= budget || !picked.size ? { text: picked.size ? result : footer(bullets.length).trim(), included: picked.size, total: bullets.length }
+    : { text: footer(bullets.length).trim(), included: 0, total: bullets.length };
 }
 
 // ---- recap ----
@@ -246,17 +263,26 @@ export function recap(feedback: string, fullFile: string | null, maxBytes = 4000
   const KEY = /^(FAILED |BLOCKING:|CHEATING:|BASE DEFECT|Evaluator:|test command `|The merge resolution|builder failed|no progress|merge conflict)/;
   const lines = feedback.split('\n'), keys = lines.filter((l) => KEY.test(l)), pick = keys.length ? keys : lines.filter((l) => l.trim()).slice(0, maxLines);
   const total = Buffer.byteLength(feedback);
-  const footer = (more: number) => [more ? `… and ${more} more failure line${more === 1 ? '' : 's'}, listed in full in the file below.` : '',
-    fullFile ? `The full feedback (${total} bytes) is in ${fullFile}; read it before you change anything.` : `(${total} bytes of feedback, shortened here.)`].filter(Boolean).join('\n');
-  const clipBytes = (l: string, n: number) => { if (Buffer.byteLength(l) <= n) return l; let t = l; while (Buffer.byteLength(t) > Math.max(0, n - 4)) t = t.slice(0, Math.floor(t.length * 0.9)); return t + ' […]'; };
-  // As many failure lines as the line cap allows, each given an equal share of the bytes left after the footer.
+  // The reference is mandatory and never shortened: when nothing else fits, it is all there is.
+  const ref = fullFile ? `The full feedback (${total} bytes) is in ${fullFile}; read it before you change anything.` : `(${total} bytes of feedback, shortened here.)`;
+  const footer = (more: number) => [more ? `… and ${more} more failure line${more === 1 ? '' : 's'}, listed in full in the file below.` : '', ref].filter(Boolean).join('\n');
   for (let n = Math.min(pick.length, maxLines - 2); n >= 1; n--) {
     const more = pick.length - n, foot = footer(more), share = Math.floor((maxBytes - Buffer.byteLength(foot) - n) / n);
     if (share < 60) continue;
     const out = [...pick.slice(0, n).map((l) => clipBytes(l, share)), foot].join('\n');
     if (Buffer.byteLength(out) <= maxBytes) return out;
   }
-  return clipBytes(footer(pick.length), maxBytes);
+  return `${pick.length} failure line${pick.length === 1 ? '' : 's'} did not fit here. ${ref}`;
+}
+// `l` within `n` UTF-8 bytes, the marker included.
+const MARK = ' […]';
+export function clipBytes(l: string, n: number): string {
+  if (Buffer.byteLength(l) <= n) return l;
+  const room = n - Buffer.byteLength(MARK);
+  if (room <= 0) return '';
+  let t = l;
+  while (Buffer.byteLength(t) > room) t = t.slice(0, Math.max(0, Math.min(t.length - 1, Math.floor(t.length * 0.9))));
+  return t + MARK;
 }
 
 export const readIfExists = (p: string): string | null => (existsSync(p) ? readFileSync(p, 'utf8') : null);

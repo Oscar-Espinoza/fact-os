@@ -243,3 +243,11 @@ test('I05: setupRetryDelaysSec is a short list of positive delays', (t) => {
   }
   s.set({ setupRetryDelaysSec: [] }); assert.deepEqual(loadConfig(s.root).setupRetryDelaysSec, [], 'no retries: the first failed setup stops the feature');
 });
+
+test('context budgets: 0 or at least 1000 bytes, so the file reference always fits', (t) => {
+  const s = setup(t);
+  s.set({});
+  assert.deepEqual([loadConfig(s.root).contextMaxBytes, loadConfig(s.root).lessonsMaxBytes, loadConfig(s.root).recapMaxBytes], [1200, 6000, 4000]);
+  for (const key of ['lessonsMaxBytes', 'recapMaxBytes']) for (const value of [200, -1, '4000']) { s.set({ [key]: value }); assert.throws(() => loadConfig(s.root), new RegExp(`config\\.${key} must be 0 or a safe integer >= 1000`)); }
+  s.set({ lessonsMaxBytes: 0, recapMaxBytes: 1000, contextMaxBytes: 0 }); assert.equal(loadConfig(s.root).recapMaxBytes, 1000);
+});

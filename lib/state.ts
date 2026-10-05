@@ -223,7 +223,9 @@ function configProblems(raw: unknown): string[] {
     'an array of at most 10 positive delays in seconds (each <= 86400)');
   for (const key of ['refreshBeforeTest', 'conflictBrief']) field(c, 'config', key, (x) => typeof x === 'boolean', 'a boolean');
   field(c, 'config', 'merge', (x) => x === 'auto' || x === 'manual', '"auto" or "manual"');
-  for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes', 'commitFixes', 'keepFixes', 'progressFixes', 'reviewFixes', 'contextMaxBytes', 'lessonsMaxBytes', 'recapMaxBytes']) field(c, 'config', key, uint, 'a safe integer >= 0');
+  for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes', 'commitFixes', 'keepFixes', 'progressFixes', 'reviewFixes', 'contextMaxBytes']) field(c, 'config', key, uint, 'a safe integer >= 0');
+  // 0 turns the budget off; a positive one must leave room for the file reference it always keeps.
+  for (const key of ['lessonsMaxBytes', 'recapMaxBytes']) field(c, 'config', key, (v: unknown) => uint(v) && (v === 0 || (v as number) >= 1000), '0 or a safe integer >= 1000');
   field(c, 'config', 'maxAttempts', (x) => uint(x) && (x as number) >= 1, 'a safe integer >= 1');
   for (const key of ['budgetUsdPerRun', 'budgetUsdTotal'])
     field(c, 'config', key, (x) => x === null || nonnegative(x), 'a finite number >= 0 or null');

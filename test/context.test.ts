@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { atomStale, candidateMap, specIdentifiers, pickAtoms, recap, parsePointer, refPrints, renderContext, refsHold, selectLessons, symbolSection, type Atom } from '../lib/context.ts';
+import { atomStale, candidateMap, clipBytes, specIdentifiers, pickAtoms, recap, parsePointer, refPrints, renderContext, refsHold, selectLessons, symbolDef, symbolSection, type Atom } from '../lib/context.ts';
 import { parseAtomCheck } from '../lib/observe.ts';
 import { git } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -96,4 +96,39 @@ test('parsePointer and parseAtomCheck: bounded, repository-relative, malformed i
   assert.equal(parsePointer({ text: 'x', refs: [], scope: ['apps/'] }), null); assert.equal(parsePointer('nope'), null);
   assert.deepEqual(parseAtomCheck('{"accurate": true, "applies": false, "reason": "one-off"}'), { ok: false, reason: 'one-off' });
   assert.equal(parseAtomCheck('{"accurate": "yes"}'), null);
+});
+
+test('recheck: an open template literal or an over-long body fingerprints the whole file; a declaration inside a comment is not one', () => {
+  assert.deepEqual(symbolDef('export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;\n', 'tenantSql'), { text: 'export const tenantSql = `', complete: false });
+  const long = 'export function big() {\n' + '  x();\n'.repeat(400) + '}\n';
+  assert.equal(symbolDef(long, 'big')!.complete, false);
+  assert.equal(symbolDef('/*\nexport function ghost() {}\n*/\n// export const ghost2 = 1\n', 'ghost'), null);
+  assert.equal(symbolDef('// export const ghost2 = 1\n', 'ghost2'), null);
+  assert.deepEqual(symbolDef('export function f() {\n  return 1;\n}\n', 'f'), { text: 'export function f() {\n  return 1;\n}', complete: true });
+  const d = mkdtempSync(join(tmpdir(), 'ctx-'));
+  try {
+    const g = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: d });
+    writeFileSync(join(d, 'q.ts'), 'export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;\n'); g('init', '-q'); g('add', '.'); g('commit', '-qm', 'x');
+    const refs = [{ path: 'q.ts', symbol: 'tenantSql' }], a = atom('A1', ['q'], { refs, verifiedAt: new Date().toISOString(), prints: refPrints(refs, 'HEAD', d, git) });
+    writeFileSync(join(d, 'q.ts'), 'export const tenantSql = `\nSELECT * FROM t\n`;\n'); g('commit', '-qam', 'drop the tenant filter');
+    assert.equal(atomStale(a, 'HEAD', d, git), 'its code changed since it was verified');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('recheck: the recap never shortens its file reference; clipping counts its marker; prose lessons are budgeted by paragraph', () => {
+  const path = '/home/oscar/Projects/ecommerce-builder/.shipyard/runs/F99-44-collect-direct-full-gate-timings/1-previous-feedback.md';
+  const many = Array.from({ length: 30 }, (_, i) => `BLOCKING: blocker ${i} ` + 'x'.repeat(300)).join('\n'), r = recap(many, path, 1000);
+  assert.ok(r.includes(path)); assert.ok(Buffer.byteLength(r) <= 1000); assert.match(r, /^BLOCKING: blocker 0 /);
+  assert.match(recap(many, path, 200), new RegExp(`^30 failure lines did not fit here\\. The full feedback \\(\\d+ bytes\\) is in ${path.replace(/[./-]/g, '\\$&')};`));
+  assert.equal(Buffer.byteLength(clipBytes('ééééééééé', 10)), 10); assert.equal(clipBytes('abcdef', 1), '');
+  const prose = Array.from({ length: 30 }, (_, i) => `Paragraph ${i} about migrations and grants.\n${'y'.repeat(600)}`).join('\n\n');
+  const s = selectLessons(prose, [], 'migrations', 6000, '/runs/a/1-lessons.md');
+  assert.ok(Buffer.byteLength(s.text) <= 6000); assert.equal(s.total, 30); assert.ok(s.included > 0 && s.included < 30);
+  assert.match(s.text, /more lessons not shown here; all 30 are in \/runs\/a\/1-lessons\.md/);
+});
+
+test('selectLessons: indented sub-items stay with their parent lesson', () => {
+  const text = '### Reuse\n- Reuse these helpers:\n  - `a` in `x/`\n  - `b` in `y/`\n- ' + 'z'.repeat(2000);
+  const s = selectLessons(text, ['x/f.ts'], '', 1000, '/l.md');
+  assert.equal(s.total, 2); assert.match(s.text, /- Reuse these helpers:\n  - `a` in `x\/`\n  - `b` in `y\/`/);
 });
