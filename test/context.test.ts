@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { atomStale, candidateMap, clipBytes, specIdentifiers, pickAtoms, recap, parsePointer, refPrints, renderContext, refsHold, selectLessons, symbolDef, symbolSection, type Atom } from '../lib/context.ts';
+import { atomStale, candidateMap, clipBytes, specIdentifiers, pickAtoms, recap, parsePointer, refPrints, renderContext, refsHold, selectLessons, symbolDefined, type Atom } from '../lib/context.ts';
 import { parseAtomCheck } from '../lib/observe.ts';
 import { git } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -60,7 +60,7 @@ test('recap: short feedback passes; long feedback stays within its byte and line
   assert.match(m, /^BLOCKING: blocker 0 /); assert.match(m, /… and 17 more failure lines, listed in full in the file below\./);
 });
 
-test('atoms stay honest: symlinks and comment mentions do not hold; a changed definition or an old verification makes an atom stale, an unrelated change does not', () => {
+test('atoms stay honest: symlinks and comment mentions do not hold; any change to a referenced file or an old verification makes an atom stale, another file\'s change does not', () => {
   const d = mkdtempSync(join(tmpdir(), 'ctx-'));
   try {
     const g = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: d });
@@ -70,13 +70,12 @@ test('atoms stay honest: symlinks and comment mentions do not hold; a changed de
     g('init', '-q'); g('add', '.'); g('commit', '-qm', 'x');
     assert.match(refsHold([{ path: 'src/outside.ts' }], 'HEAD', d, git)!, /not a regular file/);
     assert.match(refsHold([{ path: 'src/t.ts', symbol: 'ghostFn' }], 'HEAD', d, git)!, /ghostFn is not defined/);
-    assert.equal(symbolSection('export function tenantScoped(x: number) {\n  return true;\n}\n\nexport const other = 1;\n', 'tenantScoped'), 'export function tenantScoped(x: number) {\n  return true;\n}');
     const a = atom('A1', ['src/'], { refs: [{ path: 'src/t.ts', symbol: 'tenantScoped' }], verifiedAt: new Date().toISOString(), prints: refPrints([{ path: 'src/t.ts', symbol: 'tenantScoped' }], 'HEAD', d, git) });
     assert.equal(atomStale(a, 'HEAD', d, git), null);
-    writeFileSync(join(d, 'src/t.ts'), 'export function tenantScoped(x: number) {\n  return true;\n}\n\nexport const other = 2;\n'); g('commit', '-qam', 'unrelated');
+    writeFileSync(join(d, 'src/other.ts'), 'x'); g('add', '.'); g('commit', '-qm', 'another file');
     assert.equal(atomStale(a, 'HEAD', d, git), null);
-    writeFileSync(join(d, 'src/t.ts'), 'export function tenantScoped(x: number) {\n  return false;\n}\n'); g('commit', '-qam', 'changed');
-    assert.equal(atomStale(a, 'HEAD', d, git), 'its code changed since it was verified');
+    writeFileSync(join(d, 'src/t.ts'), 'export function tenantScoped(x: number) {\n  return true;\n}\n\nexport const other = 2;\n'); g('commit', '-qam', 'same file');
+    assert.equal(atomStale(a, 'HEAD', d, git), 'its file changed since it was verified');
     assert.equal(atomStale({ ...a, prints: refPrints(a.refs, 'HEAD', d, git), verifiedAt: '2020-01-01T00:00:00Z' }, 'HEAD', d, git), 'its verification is over 30 days old');
     assert.equal(atomStale({ ...a, prints: undefined }, 'HEAD', d, git), 'it has no verified fingerprint');
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -98,27 +97,13 @@ test('parsePointer and parseAtomCheck: bounded, repository-relative, malformed i
   assert.equal(parseAtomCheck('{"accurate": "yes"}'), null);
 });
 
-test('recheck: an open template literal or an over-long body fingerprints the whole file; a declaration inside a comment is not one', () => {
-  assert.deepEqual(symbolDef('export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;\n', 'tenantSql'), { text: 'export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;', complete: true });
-  // Strings, comments and regexes never decide structure.
-  assert.match(symbolDef("export const tenantSql = '-- // audited query\\n' + `\nSELECT * FROM items WHERE tenant_id = $1\n`;\nexport const z = 1;\n", 'tenantSql')!.text, /tenant_id = \$1\n`;$/);
-  assert.deepEqual(symbolDef('export function tenantScoped(marker = "}") {\nreturn true;\n}\n', 'tenantScoped'), { text: 'export function tenantScoped(marker = "}") {\nreturn true;\n}', complete: true });
-  assert.deepEqual(symbolDef('export const OPEN = "/*";\nexport function tenantScoped() {\n  return true;\n}\nexport const CLOSE = "*/";\n', 'tenantScoped'), { text: 'export function tenantScoped() {\n  return true;\n}', complete: true });
-  assert.deepEqual(symbolDef('export const re = /[/]}/g;\nexport const n = 1;\n', 're'), { text: 'export const re = /[/]}/g;', complete: true });
-  assert.equal(symbolDef('export const s = "unterminated\n', 's')!.complete, false);
-  const long = 'export function big() {\n' + '  x();\n'.repeat(400) + '}\n';
-  assert.equal(symbolDef(long, 'big')!.complete, false);
-  assert.equal(symbolDef('/*\nexport function ghost() {}\n*/\n// export const ghost2 = 1\n', 'ghost'), null);
-  assert.equal(symbolDef('// export const ghost2 = 1\n', 'ghost2'), null);
-  assert.deepEqual(symbolDef('export function f() {\n  return 1;\n}\n', 'f'), { text: 'export function f() {\n  return 1;\n}', complete: true });
-  const d = mkdtempSync(join(tmpdir(), 'ctx-'));
-  try {
-    const g = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: d });
-    writeFileSync(join(d, 'q.ts'), 'export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;\n'); g('init', '-q'); g('add', '.'); g('commit', '-qm', 'x');
-    const refs = [{ path: 'q.ts', symbol: 'tenantSql' }], a = atom('A1', ['q'], { refs, verifiedAt: new Date().toISOString(), prints: refPrints(refs, 'HEAD', d, git) });
-    writeFileSync(join(d, 'q.ts'), 'export const tenantSql = `\nSELECT * FROM t\n`;\n'); g('commit', '-qam', 'drop the tenant filter');
-    assert.equal(atomStale(a, 'HEAD', d, git), 'its code changed since it was verified');
-  } finally { rmSync(d, { recursive: true, force: true }); }
+test('symbolDefined: code only — never a comment or a string; a regex after return is a regex', () => {
+  assert.equal(symbolDefined('/*\nexport function ghost() {}\n*/\n', 'ghost'), false);
+  assert.equal(symbolDefined('// export const ghost2 = 1\n', 'ghost2'), false);
+  assert.equal(symbolDefined('const s = `\nexport function ghost3() {}\n`;\n', 'ghost3'), false);
+  assert.equal(symbolDefined('export const OPEN = "/*";\nexport function tenantScoped() {\n  return true;\n}\nexport const CLOSE = "*/";\n', 'tenantScoped'), true);
+  assert.equal(symbolDefined('export function a(i: string) {\n  return /}/.test(i) ? 1 // x\n    : 2;\n}\nexport function b() {}\n', 'b'), true);
+  assert.equal(symbolDefined('class A {\n  run(a: number) {}\n}\n', 'run'), true);
 });
 
 test('recheck: the recap never shortens its file reference; clipping counts its marker; prose lessons are budgeted by paragraph', () => {

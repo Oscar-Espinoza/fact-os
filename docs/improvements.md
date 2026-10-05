@@ -439,9 +439,10 @@ features, risky tiers backfilled from today: no model ranking yet).
   pairs, and what the top files export; at most eight lines, a prediction, never a scope.
 - Context atoms: a prompt review may propose a one-line pointer with refs and a scope; deterministic checks keep it only
   when each ref is a regular tracked file (no symlink or submodule) and each symbol is defined there; the curator verifies
-  it against one pinned commit, and the atom stores a fingerprint of each symbol's definition (or the file). At launch and
-  in the observer an atom is unusable when a ref is gone (quarantined), its fingerprinted code changed or its verification
-  is over 30 days old (back to the curator). A fresh build gets only usable atoms whose scope covers its candidate files,
+  it against one pinned commit, and the atom stores a fingerprint of each referenced file (whole: telling a harmless edit
+  from a relevant one would need a real parser). At launch and in the observer an atom is unusable when a ref is gone
+  (quarantined), a referenced file changed or its verification is over 30 days old (back to the curator). Symbol checks
+  read code only: comments, strings, template and regex literals are blanked first. A fresh build gets only usable atoms whose scope covers its candidate files,
   whole, within `contextMaxBytes`; included and deferred ids are recorded.
 - Lessons: a lessons file over `lessonsMaxBytes` (6000) reaches a fresh build as its most relevant whole bullets (paths it
   names under the candidate files, then words shared with the spec, then file order) under their headings, with the count

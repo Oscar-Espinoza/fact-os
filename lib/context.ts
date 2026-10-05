@@ -124,7 +124,7 @@ export function refsHold(refs: AtomRef[], rev: string, cwd: string, git: Git): s
     const e = git(['ls-tree', rev, '--', r.path], cwd).out.split('\n')[0] ?? '';
     if (!e) return `${r.path} does not exist at ${rev.slice(0, 12)}`;
     if (!/^100(644|755) blob /.test(e)) return `${r.path} is not a regular file at ${rev.slice(0, 12)}`;
-    if (r.symbol && symbolSection(git(['show', `${rev}:${r.path}`], cwd).out, r.symbol) == null) return `${r.symbol} is not defined in ${r.path} at ${rev.slice(0, 12)}`;
+    if (r.symbol && !symbolDefined(git(['show', `${rev}:${r.path}`], cwd).out, r.symbol)) return `${r.symbol} is not defined in ${r.path} at ${rev.slice(0, 12)}`;
   }
   return null;
 }
@@ -155,7 +155,7 @@ export function codeMask(src: string): { text: string; ok: boolean; inLiteral: S
       if (src[k] === '$') { stack.push(depth); out[k] = ' '; i = k + 2; prev = '('; continue; } // `${` opens an expression
       i = k + 1; prev = 'x'; continue;
     }
-    if (c === '/' && (prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev))) {
+    if (c === '/' && (prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev) || /\b(return|yield|typeof|case|do|else|in|of|new|delete|void|throw|await)\s*$/.test(src.slice(Math.max(0, i - 12), i)))) {
       let k = i + 1, cls = false;
       while (k < src.length && src[k] !== '\n' && (cls || src[k] !== '/')) { if (src[k] === '[') cls = true; else if (src[k] === ']') cls = false; k += src[k] === '\\' ? 2 : 1; }
       if (src[k] !== '/') return { text: out.join(''), ok: false, inLiteral };
@@ -168,47 +168,20 @@ export function codeMask(src: string): { text: string; ok: boolean; inLiteral: S
   return { text: out.join(''), ok: true, inLiteral };
 }
 
-// The lines that define `symbol`: its declaration (or, failing that, a definition like `name(`, `name:` or `name =`), read from
-// code only (never inside a comment or a string), through the end of its statement or block. Null when the file does not
-// define it. `complete` is false when that end cannot be established (the scan is unsure, a bracket stays open, or the body
-// runs past SECTION_MAX lines): callers then fingerprint the whole file rather than certify part of it.
-const SECTION_MAX = 300;
-export function symbolSection(src: string, symbol: string): string | null { return symbolDef(src, symbol)?.text ?? null; }
-export function symbolDef(src: string, symbol: string): { text: string; complete: boolean } | null {
-  const m = codeMask(src), code = m.text, lines = code.split('\n'), orig = src.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
+// Whether `src` defines `symbol`: a declaration (or, failing that, a definition like `name(`, `name:` or `name =`) in code, never
+// inside a comment or a string. Only existence is decided here; what an atom was verified against is the whole file.
+export function symbolDefined(src: string, symbol: string): boolean {
+  const lines = codeMask(src).text.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
   const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${sym}\\b`);
   const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly |get |set )*${sym}\\s*(\\(|:|=|<)`);
-  let at = lines.findIndex((l) => decl.test(l)), isDecl = at >= 0;
-  if (at < 0) at = lines.findIndex((l) => def.test(l));
-  if (at < 0) return null;
-  // Walk the code from the definition: it ends at a `;` (or `,` for a member) outside brackets, or where its block closes.
-  let off = lines.slice(0, at).reduce((n, l) => n + l.length + 1, 0), depth = 0, opened = false, endLine = -1;
-  for (let line = at; off < code.length && line - at < SECTION_MAX; off++) {
-    const c = code[off]!;
-    if (c === '\n') {
-      line++;
-      if (m.inLiteral.has(off)) continue; // inside a template literal or comment: not a statement boundary
-      // A statement without a semicolon ends at a line break outside brackets that does not continue it.
-      if (depth === 0 && opened) { endLine = line - 1; break; }
-      if (depth === 0 && line < lines.length && (/^\s*(export\s|import\s|const\s|let\s|var\s|function\s|class\s|interface\s|type\s|enum\s)/.test(lines[line]!) || !orig[line]!.trim()) && line > at && !/[=,(\[{:?+\-*&|]\s*$/.test(lines[line - 1]!)) { endLine = line - 1; break; }
-      continue;
-    }
-    if ('({['.includes(c)) { depth++; continue; }
-    if (')}]'.includes(c)) { depth--; if (depth < 0) break; if (depth === 0 && c === '}' && (isDecl ? /^\s*(export\s+)?(default\s+)?(declare\s+)?(abstract\s+)?(async\s+)?(function|class|interface|enum)\b/.test(lines[at]!) : true)) opened = true; continue; }
-    if (depth === 0 && (c === ';' || (!isDecl && c === ','))) { endLine = code.slice(0, off).split('\n').length - 1; break; }
-  }
-  const complete = m.ok && endLine >= at;
-  return { text: orig.slice(at, (complete ? endLine : at) + 1).join('\n'), complete };
+  return lines.some((l) => decl.test(l) || def.test(l));
 }
 
-// What each ref's verification covered: the defining section of a symbol, or the whole file. A change there means the advice
-// must be checked again; an unrelated change elsewhere in the file does not.
+// What each ref's verification covered: the whole file. Any change to it sends the atom back to the curator before it is used
+// again; deciding that a change elsewhere in the file cannot matter would need a real parser, and a wrong guess would deliver
+// stale advice as verified.
 export function refPrints(refs: AtomRef[], rev: string, cwd: string, git: Git): string[] {
-  return refs.map((r) => {
-    const src = git(['show', `${rev}:${r.path}`], cwd).out, d = r.symbol ? symbolDef(src, r.symbol) : null;
-    const part = r.symbol ? (d?.complete ? d.text : `whole file:\n${src}`) : src; // an uncertain section: the whole file
-    return createHash('sha256').update(part).digest('hex').slice(0, 16);
-  });
+  return refs.map((r) => createHash('sha256').update(git(['show', `${rev}:${r.path}`], cwd).out).digest('hex').slice(0, 16));
 }
 
 // Why a verified atom may not be used against `rev` now (null: usable): its refs no longer hold, its code changed since it was
@@ -217,7 +190,7 @@ export function atomStale(a: Atom, rev: string, cwd: string, git: Git, nowMs = D
   const why = refsHold(a.refs, rev, cwd, git);
   if (why) return why;
   if (!a.prints || a.prints.length !== a.refs.length) return 'it has no verified fingerprint';
-  if (refPrints(a.refs, rev, cwd, git).some((p, i) => p !== a.prints![i])) return 'its code changed since it was verified';
+  if (refPrints(a.refs, rev, cwd, git).some((p, i) => p !== a.prints![i])) return 'its file changed since it was verified';
   if (!a.verifiedAt || nowMs - Date.parse(a.verifiedAt) > ATOM_REVALIDATE_DAYS * 864e5) return `its verification is over ${ATOM_REVALIDATE_DAYS} days old`;
   return null;
 }
