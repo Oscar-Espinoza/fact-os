@@ -1,5 +1,5 @@
 // Dashboard: one page across every project under --root, bound to 127.0.0.1.
-import { applySpecFix, dismissSpecFix, specFixMode, undoSpecFix } from './specfix.ts';
+import { applySpecFix, dismissSpecFix, specFixMode, undoProblem, undoSpecFix } from './specfix.ts';
 import { readAtoms, readIfExists } from './context.ts';
 import type { Scorecard } from './scorecard.ts';
 import { createServer, type Server } from 'node:http';
@@ -296,6 +296,8 @@ function learningOf(dir: string, events: LogEvent[]): ObserverSummary['learning'
     if (e.event === 'observer-atom') { const m = /^(A\w+) (verified|retired|quarantined|proposed)(?: from \S+)?: (.*)$/.exec(e.detail || '');
       return m ? ({ verified: 'Added a verified pointer', retired: 'Retired a pointer', quarantined: 'Paused a pointer (its code changed)', proposed: 'Proposed a pointer' } as Record<string, string>)[m[2]!]! + `: ${m[3]}` : null; }
     if (e.event === 'observer-notes') return `Updated prompt notes for ${e.detail}`;
+    if (e.event === 'spec-fix-applied') return `${e.feature}: spec fixed ${/^\S+ auto:/.test(e.detail || '') ? 'automatically' : 'by a person'}: ${(e.detail || '').replace(/^\S+ \w+: /, '')}`;
+    if (e.event === 'spec-fix-undone') return `${e.feature}: a spec fix was undone`;
     if (e.event === 'prompt' && e.run?.rule?.includes('→')) return `${e.feature}: fresh try escalated, ${e.run.rule.replace(/^ladder: /, '')}`;
     return null;
   };
@@ -400,8 +402,10 @@ export function featureHistory(dir: string, id: string): { log: LogEvent[]; acti
     const { config, features, tasks } = load(dir), f = features.find((x) => x.id === id);
     if (f) {
       const unmet = (f.deps || []).map((d) => features.find((x) => x.id === d)).filter((x): x is Feature => !!x && x.status !== 'merged').map((x) => ({ id: x.id, title: x.shortTitle || x.title }));
-      story = buildStory({ feature: f, specFixMode: specFixMode(dir) ?? undefined, events: all, runs: storyRuns(dir, id), maxAttempts: config.maxAttempts, base: config.base, manualMerge: config.merge === 'manual',
+      story = buildStory({ feature: f, specFixMode: specFixMode(dir, config) ?? undefined, events: all, runs: storyRuns(dir, id), maxAttempts: config.maxAttempts, base: config.base, manualMerge: config.merge === 'manual',
         openTasks: tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id)).map((t) => ({ title: t.title, mockable: t.mockable })), unmetDeps: unmet, goal: goalOf(dir, f) });
+      // Undo is offered exactly when the server would accept it (the whole spec unchanged since the fix).
+      for (const r of story.fixes) r.undoable = r === story.fixes.at(-1) && !undoProblem(dir, config, f, r.id);
     }
   } catch { story = null; }
   return { story, log: all.slice(-60),
@@ -471,9 +475,9 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
         return send(200, { ok: true, released: was });
       }
       if (typeof id !== 'string') return send(400, { error: 'id must be a string' });
-      if (fix) { // apply / dismiss name the proposal they were shown (`fix`): a newer draft is never applied by an older click
-        if (fix !== 'undo' && typeof parsed.fix !== 'string') return send(400, { error: 'fix must be the proposal id' });
-        const err = fix === 'undo' ? await undoSpecFix(project, id) : fix === 'apply' ? await applySpecFix(project, id, parsed.fix as string, 'person') : await dismissSpecFix(project, id, parsed.fix as string);
+      if (fix) { // apply / dismiss / undo name the proposal or fix they were shown (`fix`): an older click never acts on a newer one
+        if (typeof parsed.fix !== 'string') return send(400, { error: 'fix must be the id of the proposal or applied fix shown' });
+        const err = fix === 'undo' ? await undoSpecFix(project, id, parsed.fix) : fix === 'apply' ? await applySpecFix(project, id, parsed.fix as string, 'person') : await dismissSpecFix(project, id, parsed.fix as string);
         return send(err ? (err === 'unknown feature' ? 404 : 409) : 200, err ? { error: `${id}: ${err}` } : { ok: true });
       }
       if (action) {

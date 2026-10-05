@@ -473,7 +473,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
     if (!stopping()) await step('template tasks', () => fileTemplateTasks(root, state, out, stopping));
     // Spec fixes: a spec-error failure gets one drafted correction (the curator), verified by a fresh Codex session.
     const ev = resolveRole(config, profile, 'evaluator'), verifier = config.diagnoser?.provider === 'codex' ? config.diagnoser : ev.provider === 'codex' ? ev : null;
-    if (!stopping()) await step('spec fixes', () => specFixPass(root, config, curator, verifier, state, all.events, io));
+    if (!stopping()) await step('spec fixes', () => specFixPass(root, config, curator, verifier, state, all.events, io, () => writeJsonAtomic(O.state, state)));
     writeJsonAtomic(O.state, state);
   }
   state.promptRates = promptRates(passes);

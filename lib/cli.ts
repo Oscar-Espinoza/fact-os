@@ -207,7 +207,7 @@ async function specFixCmd(args: string[]): Promise<void> {
   const f = load(root).features.find((x) => x.id === id);
   if (!f) throw new Error(`unknown feature ${id}`);
   const { applySpecFix, dismissSpecFix, undoSpecFix } = await import('./specfix.ts');
-  const err = what === 'undo' ? await undoSpecFix(root, id!) : !f.specFix ? 'no drafted spec fix' : what === 'apply' ? await applySpecFix(root, id!, f.specFix.id, 'person') : await dismissSpecFix(root, id!, f.specFix.id);
+  const err = what === 'undo' ? (f.specFixes?.at(-1) ? await undoSpecFix(root, id!, f.specFixes.at(-1)!.id) : 'no applied spec fix') : !f.specFix ? 'no drafted spec fix' : what === 'apply' ? await applySpecFix(root, id!, f.specFix.id, 'person') : await dismissSpecFix(root, id!, f.specFix.id);
   if (err) throw new Error(`spec-fix ${what} ${id}: ${err}`);
   console.log(`spec-fix ${what === 'apply' ? 'applied' : what === 'dismiss' ? 'dismissed' : 'undone'}: ${id}${what === 'dismiss' ? '' : ' (queued with fresh tries)'}`);
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applySpecFix, candidates, countedFailure, dismissSpecFix, keepsWording, parseDraft, parseVerify, protectedReason, shapeProblem, undoSpecFix, type FixInput } from '../lib/specfix.ts';
+import { applySpecFix, candidates, correctionOnly, countedFailure, dismissSpecFix, parseDraft, parseVerify, protectedReason, shapeProblem, specFixPass, undoSpecFix, type FixInput } from '../lib/specfix.ts';
 import { holdInputs } from '../lib/foreman.ts';
 import { loadConfig } from '../lib/state.ts';
 import type { Feature, SpecFixProposal } from '../lib/types.ts';
@@ -22,6 +22,7 @@ test('parseDraft and parseVerify: a fix, no fix, or a refusal; malformed is an e
   assert.deepEqual(parseDraft('{"fix": null, "reason": "unfinished implementation"}'), { fix: null, reason: 'unfinished implementation' });
   assert.match((parseDraft('{"fix": {"target": 0, "old": "a", "new": "b", "why": "c"}}') as { error: string }).error, /target/);
   assert.deepEqual(parseVerify('{"agree": true, "reason": "evidence shows it"}'), { agree: true, reason: 'evidence shows it' }); assert.equal(parseVerify('{"agree": "yes"}'), null);
+  assert.equal(parseVerify('{"agree": true}'), null); assert.equal(parseVerify('{"agree": true, "reason": {}}'), null); // no reason: no verification
 });
 
 test('shapeProblem: the old text must be current, the change real and bounded, every quote verbatim in its source', () => {
@@ -35,14 +36,19 @@ test('shapeProblem: the old text must be current, the change real and bounded, e
   assert.match(shapeProblem(f, { ...draft, evidence: [{ quote: 'x', source: '/etc/passwd' }] }, input(f))!, /not one of the inputs/);
 });
 
-test('protectedReason: description rewrites, risky features, sensitive wording, test weakening and dropped wording stay manual', () => {
+test('protectedReason and correctionOnly: auto only corrects a quantity on a feature that touches nothing sensitive; everything else waits for a person', () => {
   assert.equal(protectedReason(F(), draft), null);
-  assert.ok(keepsWording(OLD, NEW)); assert.ok(!keepsWording(OLD, 'Wall time is at least 3 minutes lower.'));
+  assert.equal(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within 9 seconds on one lane.'), null);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within seconds.')!, /quantity .* no replacement/);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must not complete within 6 seconds.')!, /adds "not"/);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export completes within 9 seconds.')!, /drops or reorders/);
+  assert.match(correctionOnly('Exports are named by date.', 'Exports are named by date and time.')!, /only a corrected quantity/);
+  assert.match(protectedReason(F(), { target: 1, old: 'Skip parser tests only on Windows.', new: 'Skip parser tests only on Windows and Linux.' })!, /about tests/);
   assert.match(protectedReason(F(), { target: 'description', old: 'a', new: 'b' })!, /description/);
   assert.match(protectedReason(F({ tier: 'risky' }), draft)!, /risky/);
   assert.match(protectedReason(F({ title: 'Refund payments faster' }), draft)!, /risky/);
-  assert.match(protectedReason(F(), { target: 1, old: 'Each tenant sees only its rows.', new: 'Each tenant sees only its rows mostly.' })!, /tenant/);
-  assert.match(protectedReason(F(), { target: 1, old: 'The parser test covers nulls.', new: 'The parser test covers nulls; skip the flaky tests.' })!, /weaken a test/);
+  // Another acceptance item mentioning payments protects the whole feature, whatever risk override it carries.
+  assert.match(protectedReason({ ...F({ acceptance: ['Payments must never be charged twice.', OLD] }), risk: 'normal' } as Feature, draft)!, /mention payments/i);
 });
 
 test('countedFailure: only a counted review rejection or own-code gate failure', () => {
@@ -53,51 +59,68 @@ test('countedFailure: only a counted review rejection or own-code gate failure',
   assert.ok(countedFailure(e({ stop: { attempt: 1, counted: true }, detail: 'FAILED x' }), 'a'));
 });
 
-test('apply, dismiss and undo: one guarded change; auto needs auto mode, Codex agreement, a counted failure and no protection; undo restores while unchanged', async (t) => {
+test('apply, dismiss and undo: one guarded change for the current failure; auto needs valid auto mode, Codex with a reason, a counted failure and no protection; undo names its fix and needs the whole spec unchanged', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'fact-os-fix-')); t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, '.fact-os'));
-  const config = loadConfig(root), base = F({ planningHold: { cause: 'spec-error', confidence: 'high', evidence: ['x'], review: 'a/1', passEnd: '', inputs: '', ts: '' }, rejected: { sha: 's', tree: 't', inputs: 'i' } as never });
+  const L = join(root, '.fact-os/log.jsonl'), launch = '2026-10-05T10:00:00.000Z';
+  writeFileSync(L, [{ ts: launch, feature: 'a', event: 'launch', detail: '' }, { ts: '2026-10-05T10:30:00.000Z', feature: 'a', event: 'failed', detail: 'FAILED t', stop: { attempt: 1, counted: true }, failure: 'review' }]
+    .map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const config = loadConfig(root), base = F({ lastFeedback: 'FAILED timing: too slow', rejected: { sha: 's', tree: 't', inputs: 'i' } as never });
   const inputs = holdInputs(root, config, base);
-  const proposal = (o: Partial<SpecFixProposal> = {}): SpecFixProposal => ({ id: 'S1', ts: '', status: 'proposed', inputs, review: 'a/1', sha: null, target: 2, old: OLD, new: NEW, why: 'w',
+  const hold = { cause: 'spec-error' as const, confidence: 'high' as const, evidence: ['x'], review: 'a/1', passEnd: '', inputs, ts: '' };
+  const proposal = (o: Partial<SpecFixProposal> = {}): SpecFixProposal => ({ id: 'S1', ts: '', status: 'proposed', inputs, review: 'a/1', sha: null, launch, target: 2, old: OLD, new: NEW, why: 'w',
     evidence: draft.evidence, drafter: { model: 'opus' }, verifier: { provider: 'codex', model: 'gpt-6.1-sol', agree: true, reason: 'ok' }, counted: true, ...o });
-  const write = (f: Feature, mode?: string) => {
+  const write = (f: Feature, control: object = {}) => {
     writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [f] }));
-    writeFileSync(join(root, '.fact-os/control.json'), JSON.stringify({ paused: false, maxParallel: null, ...(mode ? { specFixes: mode } : {}) }));
+    writeFileSync(join(root, '.fact-os/control.json'), JSON.stringify({ paused: false, maxParallel: null, ...control }));
   };
   const read = () => JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')).features[0] as Feature;
-  const held = { ...base, planningHold: { ...base.planningHold!, inputs } };
+  const held = { ...base, planningHold: hold };
 
   write({ ...held, specFix: proposal() });
   assert.match((await applySpecFix(root, 'a', 'S1', 'auto'))!, /not in auto mode/);
-  write({ ...held, specFix: proposal({ verifier: { provider: 'codex', model: 'x', agree: false, reason: 'no' } }) }, 'auto');
+  write({ ...held, specFix: proposal() }, { specFixes: 'auto', profile: 'misspelled-profile' });
+  assert.match((await applySpecFix(root, 'a', 'S1', 'auto'))!, /control file is invalid/);
+  write({ ...held, specFix: proposal({ verifier: { provider: 'codex', model: 'x', agree: false, reason: 'no' } }) }, { specFixes: 'auto' });
   assert.match((await applySpecFix(root, 'a', 'S1', 'auto'))!, /Codex did not verify/);
-  write({ ...held, specFix: proposal({ counted: false }) }, 'auto');
-  assert.match((await applySpecFix(root, 'a', 'S1', 'auto'))!, /counted/);
-  write({ ...held, specFix: proposal() }, 'auto');
-  assert.match((await applySpecFix(root, 'a', 'S0', 'auto'))!, /no such proposal/);
+  write({ ...held, specFix: proposal({ launch: '2026-10-05T09:00:00.000Z' }) }, { specFixes: 'auto' });
+  assert.match((await applySpecFix(root, 'a', 'S1', 'person'))!, /launched again/);
+  write({ ...base, specFix: proposal() }, { specFixes: 'auto' }); // the hold it answered was released
+  assert.match((await applySpecFix(root, 'a', 'S1', 'person'))!, /hold it answers is gone/);
+  write({ ...held, specFix: proposal() }, { specFixes: 'auto' });
+  assert.equal(await applySpecFix(root, 'a', 'S1', 'auto', { stopping: () => true }), 'stopping');
   assert.equal(await applySpecFix(root, 'a', 'S1', 'auto'), null);
   let f = read();
-  assert.equal(f.acceptance[1], NEW); assert.deepEqual([f.attempts, f.planningHold, f.rejected, f.status, f.specFix!.status, f.specFixes![0]!.by], [0, undefined, undefined, 'todo', 'applied', 'auto']);
-  assert.match(readFileSync(join(root, '.fact-os/log.jsonl'), 'utf8'), /"event":"acceptance-changed".*applied automatically.*"attemptsReset":true/);
-  // A second automatic fix on the same feature is refused; a person may still apply one.
-  write({ ...f, specFix: { ...proposal({ id: 'S2', inputs: holdInputs(root, config, f), old: NEW, new: NEW.replace('3 minutes', '2 minutes') }) } }, 'auto');
-  assert.match((await applySpecFix(root, 'a', 'S2', 'auto'))!, /one automatic fix/);
-  assert.equal(await dismissSpecFix(root, 'a', 'S2'), null); assert.equal(read().specFix!.status, 'declined');
-  // Undo restores the earlier text while it is unchanged, starts a new cycle, and never touches an in-flight feature.
-  write({ ...read(), status: 'building' });
-  assert.match((await undoSpecFix(root, 'a'))!, /building/);
-  write({ ...read(), status: 'todo', attempts: 2 });
-  assert.equal(await undoSpecFix(root, 'a'), null);
-  f = read(); assert.deepEqual([f.acceptance[1], f.attempts, !!f.specFixes![0]!.undone], [OLD, 0, true]);
-  assert.match((await undoSpecFix(root, 'a'))!, /no applied spec fix/);
-  // A protected proposal is refused automatically but applied by a person; a paused feature keeps its pause.
-  const risky = { ...held, tier: 'risky' as const, status: 'paused' as const };
-  write({ ...risky, specFix: proposal({ inputs: holdInputs(root, config, risky) }) }, 'auto');
-  assert.match((await applySpecFix(root, 'a', 'S1', 'auto'))!, /protected: the feature is risky/);
-  assert.equal(await applySpecFix(root, 'a', 'S1', 'person'), null); assert.equal(read().status, 'paused');
-  // A changed spec makes an old proposal unusable.
-  write({ ...held, description: 'changed', specFix: proposal() });
-  assert.match((await applySpecFix(root, 'a', 'S1', 'person'))!, /changed since it was drafted/);
+  assert.equal(f.acceptance[1], NEW); assert.deepEqual([f.attempts, f.planningHold, f.rejected, f.status, f.specFix!.status, f.specFixes![0]!.by, f.specFixes![0]!.verifier!.model], [0, undefined, undefined, 'todo', 'applied', 'auto', 'gpt-6.1-sol']);
+  assert.match(f.lastFeedback!, /^\[This feedback was about the earlier requirements: acceptance item 2 has since been corrected/);
+  assert.equal(f.specFixDecisions![inputs], 'applied');
+  assert.match(readFileSync(L, 'utf8'), /"event":"acceptance-changed".*applied automatically.*"attemptsReset":true/);
+  // Undo names the fix it was shown; another edit to the spec since makes it unavailable.
+  assert.match((await undoSpecFix(root, 'a', 'S0'))!, /not the latest/);
+  write({ ...read(), description: 'edited since' }); assert.match((await undoSpecFix(root, 'a', 'S1'))!, /spec changed/);
+  write({ ...read(), description: base.description, status: 'building' }); assert.match((await undoSpecFix(root, 'a', 'S1'))!, /building/);
+  write({ ...read(), status: 'todo', attempts: 2, envFailures: 1 } as Feature);
+  assert.equal(await undoSpecFix(root, 'a', 'S1'), null);
+  f = read(); assert.deepEqual([f.acceptance[1], f.attempts, !!f.specFixes![0]!.undone, f.envFailures], [OLD, 0, true, undefined]);
+  // Dismiss records the decision; a protected proposal is refused automatically but a person may apply it, keeping a pause.
+  const risky = { ...held, tier: 'risky' as const };
+  write({ ...risky, specFix: proposal({ id: 'S2', inputs: holdInputs(root, config, risky), status: 'proposed' }), planningHold: { ...hold, inputs: holdInputs(root, config, risky) }, specFixes: [] }, { specFixes: 'auto' });
+  assert.match((await applySpecFix(root, 'a', 'S2', 'auto'))!, /protected: the feature is risky/);
+  assert.equal(await dismissSpecFix(root, 'a', 'S2'), null); assert.equal(read().specFixDecisions![holdInputs(root, config, risky)], 'declined');
+  const paused = { ...risky, status: 'paused' as const };
+  write({ ...paused, specFix: proposal({ id: 'S3', inputs: holdInputs(root, config, paused) }), planningHold: { ...hold, inputs: holdInputs(root, config, paused) } });
+  assert.equal(await applySpecFix(root, 'a', 'S3', 'person'), null); assert.equal(read().status, 'paused');
+});
+
+test('specFixPass: a stopping observer applies nothing', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'fact-os-fix-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, '.fact-os'));
+  const config = loadConfig(root), f = F(), inputs = holdInputs(root, config, f);
+  writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [{ ...f, planningHold: { cause: 'spec-error', confidence: 'high', evidence: ['x'], review: 'a/1', passEnd: '', inputs, ts: '' },
+    specFix: { id: 'S1', ts: '', status: 'proposed', inputs, review: 'a/1', sha: null, target: 2, old: OLD, new: NEW, why: 'w', drafter: { model: 'opus' }, verifier: { provider: 'codex', model: 'x', agree: true, reason: 'ok' } } }] }));
+  writeFileSync(join(root, '.fact-os/control.json'), JSON.stringify({ paused: false, maxParallel: null, specFixes: 'auto' }));
+  await specFixPass(root, config, { model: 'opus' }, null, {}, [], { out: () => {}, children: new Set(), stopping: () => true });
+  assert.equal(JSON.parse(readFileSync(join(root, '.fact-os/features.json'), 'utf8')).features[0].acceptance[1], OLD);
 });
 
 test('candidates: a held todo with matching inputs, or a stuck feature reviewed after its last launch; never twice for the same inputs', (t) => {
@@ -113,4 +136,8 @@ test('candidates: a held todo with matching inputs, or a stuck feature reviewed 
   assert.deepEqual(candidates(root, config, [a, b, c], byKey, events).map((x) => x.f.id), ['a', 'b']);
   a.specFix = { id: 'S', ts: '', status: 'declined', inputs: ia, review: 'a/1', sha: null, drafter: { model: null } };
   assert.deepEqual(candidates(root, config, [a, b, c], byKey, events).map((x) => x.f.id), ['b']);
+  // A decision is remembered by its inputs even after another proposal replaced it; a stuck spec edited since its launch is not drafted.
+  a.specFix = { id: 'S9', ts: '', status: 'none', inputs: 'other', review: 'a/1', sha: null, drafter: { model: null } }; a.specFixDecisions = { [ia]: 'declined' };
+  const edited = [{ ...events[0]!, inputs: 'what-it-was-launched-with' }, events[1]!];
+  assert.deepEqual(candidates(root, config, [a, b, c], byKey, edited).map((x) => x.f.id), []);
 });
