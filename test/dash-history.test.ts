@@ -303,3 +303,26 @@ test('I01: served history lists a resumed fix as a builder run of the same try a
   assert.deepEqual(h.runs.map((r) => `${r.tag}-${r.role}-${r.n}`), ['1-build-1', '1.2-diagnose-1', '1.2-build-1']);
   assert.match(h.runs[1]!.text, /"fault":"code"/);
 });
+
+test('F99-17 served timeline: the current try starts at the re-plan, earlier work is folded, rows carry dates and structured outcomes', async (t) => {
+  const s = await fixture(t, { ...feature('testing', 0), updatedAt: '2026-10-05T23:40:00Z' });
+  writeFileSync(join(s.dir, 'log.jsonl'), readFileSync(new URL('./fixtures/story-f99-17.jsonl', import.meta.url), 'utf8'));
+  s.put('1.2-build.json', 'This is the last of the leftover gate-polling commands finishing, and it changes nothing.', Date.parse('2026-10-05T23:36:00Z'));
+  writeFileSync(join(s.dir, 'runs/a/1.2-build.exit.json'), JSON.stringify({ exit: { touched: ['a.ts', 'b.ts'], unsure: [], blocked: null } }));
+  const b = await browser(s.dash.url), j = b.node('d-journey').innerHTML as string;
+  assert.match(j, /What happened on try 1<\/h3><span class="d-tag">started (today|yesterday|[A-Z][a-z]{2} \d+(, \d{4})?,) \d/);
+  const rows = [...j.matchAll(/<span class="d-st">([^<]+)/g)].map((m) => m[1]);
+  assert.deepEqual(rows, ['Planned', 'Build', 'Test', 'Next']);
+  const times = [...j.matchAll(/<time datetime="([^"]+)">([^<]+)<\/time>/g)];
+  assert.equal(times.length, 3, 'every row shows when it started');
+  for (const [, , text] of times) assert.match(text!, /^(today|yesterday|[A-Z][a-z]{2} \d+(, \d{4})?,) \d{1,2}:\d{2}/);
+  assert.match(j, /Built: 2 files changed, commit ec0ed62\./);
+  assert.doesNotMatch(j.replace(/<pre class="d-said">[\s\S]*?<\/pre>/g, ''), /leftover gate-polling/, 'the agent\'s chat message only behind the expand');
+  assert.match(j, /What the agent said[\s\S]*leftover gate-polling/);
+  assert.match(b.node('d-earlier').innerHTML, /Earlier work \(before the spec was edited\): 2 tries/);
+  const now = Date.parse('2026-10-05T15:00:00'), F = b.F;
+  assert.match(F.dayTime('2026-10-05T11:47:00', now), /^today 11:47/);
+  assert.match(F.dayTime('2026-10-04T23:05:00', now), /^yesterday 11:05/);
+  assert.match(F.dayTime('2026-10-01T09:00:00', now), /^Oct 1, 9:00/);
+  assert.match(F.dayTime('2025-12-31T09:00:00', now), /^Dec 31, 2025, 9:00/);
+});

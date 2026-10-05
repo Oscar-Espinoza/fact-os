@@ -185,6 +185,9 @@ Refresh exhaustion and overdue-child stops record their try without increasing t
 counter, and appear as stopped without using a retry. Earlier counted failures keep their
 own labels. Retry/resume events identify counter resets; incomplete legacy history stays
 unassociated rather than assigning an old verdict to a current try.
+A feature's timeline lists its rows in real time order with their date and time (viewer's timezone); work
+before a spec edit or a reset of its tries is folded under "Earlier work"; build rows state files changed and
+the commit, with the agent's own final message behind a fold.
 Recorded runs retain full tags, resolver output and finding evidence; expanded logs keep
 original agent text and validation errors. Saved verdict validity uses the foreman parser
 and is separate from the feature’s recorded pipeline status.

@@ -172,7 +172,8 @@ details.d-sm>summary{font-size:12px;color:var(--dim)}
   .d-row{grid-template-columns:22px minmax(0,1fr) auto;gap:4px 10px}
   .d-row .d-st{grid-column:2}
   .d-row .d-what{grid-column:2/-1}
-  .d-row .d-t{grid-column:3;grid-row:1}
+  .d-row .d-t{grid-column:3;grid-row:1;white-space:normal;text-align:right}
+  .d-row .d-t .d-tl{white-space:nowrap}
   .d-tryrow>summary{grid-template-columns:auto minmax(0,1fr)}
   .d-tryrow>summary .d-tag{display:none}
   .d-tryrow>.d-rows,.d-tryrow>p{padding-left:0}

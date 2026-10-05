@@ -664,6 +664,16 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   The conflict timeline recognizes the foreman's exact refresh-limit reason and
   closes that conflict as failed at the stop time. Other stops remain retryable;
   human and observer retries clear the timeline's stuck annotation before launch.
+  The detail view's "What happened on try N" (lib/story.ts) lists rows in their real start order (a planner's
+  `Planned` row before the Build it planned for; a planner hold before any builder leaves no Build row). A reset
+  boundary (`retrying`, `observer-retry`, `acceptance-changed` from a spec fix or its undo, `superseded`, a resume
+  with `attemptsReset`) closes the current work; so does an unlogged reset (features.json edited by hand), found
+  when a launch's first run tag is numbered below the attempt already reached (labelled a spec edit when the
+  launch's `inputs` hash changed). Work before a boundary sits in a folded "Earlier work (before …)" section.
+  Build/Fix/Combine rows state their outcome from structured records only (files touched from the build's exit
+  record, the commit the checks ran on, open points it flagged), never the agent's final message, which stays
+  behind a "What the agent said" fold. Every row and the try header show the date and time in the viewer's
+  timezone ("today 11:47 AM", "yesterday …", else "Oct 3, 11:47 AM").
   Detail selects the latest retained output per role/attempt, while
   expanded recorded-run logs show every retained tag, resolver output, finding evidence and original
   provider text (summary capped at 400 characters; text is complete). Duration/cost rows sum retained

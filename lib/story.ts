@@ -7,11 +7,13 @@ import type { Feature, LogEvent, Verdict, SpecFixProposal, SpecFixRecord } from 
 export type StepKind = 'build' | 'reused' | 'save' | 'resolve' | 'test' | 'diagnose' | 'review' | 'fix' | 'merge' | 'ready' | 'end' | 'stop' | 'hold' | 'note';
 export type StepState = 'done' | 'running' | 'needs-changes' | 'failed' | 'interrupted' | 'reused' | 'info';
 export interface Reason { title: string; detail?: string }
-export interface Step { kind: StepKind; label: string; state: StepState; text: string; note?: string; reasons?: Reason[]; start?: string; end?: string; tag?: string; who?: string }
+// `said`: an agent's own final words, kept for an expand control; a row's `text` never comes from them.
+export interface Step { kind: StepKind; label: string; state: StepState; text: string; note?: string; reasons?: Reason[]; start?: string; end?: string; tag?: string; who?: string; said?: string }
 export type TryOutcome = 'running' | 'merged' | 'ready' | 'failed' | 'stuck' | 'held' | 'stopped' | 'interrupted';
 export interface Try { n: number; outcome: TryOutcome; summary: string; steps: Step[]; start?: string; end?: string }
 export interface Cycle { tries: Try[]; endedBy?: string }
-export interface StoryRun { tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; text: string; verdict?: Verdict | null }
+// files/unsure: a build's structured exit record (the files it touched, the points it reported as unsure), when one was written.
+export interface StoryRun { tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; text: string; verdict?: Verdict | null; files?: number; unsure?: string[] }
 export interface StoryState { word: string; tone: 'run' | 'fix' | 'ok' | 'queue' | 'hold' | 'bad' | 'idle'; why: string | null; next: string | null }
 export interface Story {
   title: string; goal: string | null; state: StoryState; needsYou: { what: string; why: string } | null;
@@ -72,6 +74,19 @@ export function builderText(text: string | undefined): string {
   const s = firstSentence(text || '');
   return s ? `Builder reported: ${s}` : 'Builder finished; its output is in the logs.';
 }
+// A builder step's one-line outcome, from structured records only (its exit record's file list, the commit the checks ran
+// on); the agent's own final message is never the row's text.
+export function buildOutcome(kind: 'build' | 'fix' | 'resolve', run: Pick<StoryRun, 'files' | 'unsure'> | undefined, sha: string | undefined): string {
+  const verb = kind === 'fix' ? 'Fixed' : kind === 'resolve' ? 'Combined the changes' : 'Built';
+  const parts = [run?.files != null ? `${run.files} ${run.files === 1 ? 'file' : 'files'} changed` : '', sha ? `commit ${sha.slice(0, 7)}` : ''].filter(Boolean);
+  const unsure = run?.unsure?.length ? ` It flagged ${run.unsure.length} open ${run.unsure.length === 1 ? 'point' : 'points'}.` : '';
+  return `${parts.length ? `${verb}: ${parts.join(', ')}` : run ? `${verb}; no file list or commit was recorded` : `${verb}; no build record was found for this step`}.${unsure}`;
+}
+const said = (r: StoryRun): string | undefined => {
+  const t = (r.text || '').trim(), u = r.unsure?.length ? `\n\nUnsure:\n${r.unsure.map((x) => `- ${x}`).join('\n')}` : '';
+  return t || u ? clip(t + u, 4000).trim() : undefined;
+};
+const SHA = /^[0-9a-f]{7,40}$/;
 const sentence = (s: string, n = 140) => clip((/^(.+?[.!?])(\s|$)/.exec(s.trim())?.[1] ?? s.trim()), n);
 // A review's reasons, failed findings and blocking entries first; a passing check is never a reason.
 export function reviewReasons(v: Verdict): Reason[] {
@@ -138,7 +153,34 @@ const departure = (d: string): string => /config\.json changed/.test(d) ? 'the f
 
 const COUNTED_LEGACY = (e: LogEvent) => !/no attempt spent|without using a retry/.test(e.detail || '') && !/^merge conflict with \S+: too many base refreshes \(\d+\)$/.test(e.detail || '') && !/^previous child still running/.test(e.detail || '');
 const counted = (e: LogEvent) => (e.stop && typeof e.stop.counted === 'boolean' ? e.stop.counted : COUNTED_LEGACY(e));
-const CYCLE_START: Record<string, string> = { retrying: 'before a person retried it', 'observer-retry': 'before the observer sent it back', 'acceptance-changed': 'before the requirements update', superseded: 'before it was split' };
+const CYCLE_START: Record<string, string> = { retrying: 'before a person retried it', 'observer-retry': 'before the observer sent it back', 'acceptance-changed': 'before the spec was edited', superseded: 'before it was split' };
+// An edit that reset a feature's tries without logging it (features.json changed by hand) still leaves a trace: the run tags
+// carry the attempt number (`<attempt>[.k]`), so a launch whose first run is numbered below the attempt already reached
+// started over. A synthetic `attempts-reset` event goes before that launch; its detail is `spec` when the launch's inputs
+// hash (spec, briefs, templates) differs from the launch before it.
+export function withResets(events: LogEvent[]): LogEvent[] {
+  const firstTag = new Map<number, number>(), open = new Map<string, number>();
+  events.forEach((e, i) => {
+    if (!e.feature) return;
+    if (e.event === 'launch') open.set(e.feature, i);
+    else if (e.event === 'prompt' && e.run?.tag && open.has(e.feature)) { firstTag.set(open.get(e.feature)!, parseInt(e.run.tag, 10)); open.delete(e.feature); }
+  });
+  const reached = new Map<string, number>(), inputs = new Map<string, string | undefined>(), out: LogEvent[] = [];
+  events.forEach((e, i) => {
+    const id = e.feature;
+    if (id && (CYCLE_START[e.event] || (e.event === 'resumed' && e.attemptsReset))) reached.set(id, 0);
+    if (id && e.event === 'launch') {
+      const n = firstTag.get(i), was = reached.get(id) ?? 0;
+      if (n != null && n > 0 && n < was) { out.push({ ts: e.ts, feature: id, event: 'attempts-reset', detail: inputs.has(id) && inputs.get(id) !== e.inputs ? 'spec' : '' }); reached.set(id, 0); }
+      if (n != null && n > 0) reached.set(id, Math.max(reached.get(id) ?? 0, n));
+      inputs.set(id, e.inputs);
+    }
+    out.push(e);
+  });
+  return out;
+}
+const cycleEnd = (e: LogEvent): string | null => CYCLE_START[e.event] ?? (e.event === 'resumed' && e.attemptsReset ? 'before it was resumed with fresh tries'
+  : e.event === 'attempts-reset' ? (e.detail === 'spec' ? 'before the spec was edited' : 'before its tries were reset') : null);
 
 export function buildStory(inp: StoryInput): Story {
   const f = inp.feature, runs = [...inp.runs].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), used = new Set<StoryRun>();
@@ -157,13 +199,14 @@ export function buildStory(inp: StoryInput): Story {
   };
   const push = (s: Step) => { if (!tr) return; if (pendingNote && s.kind !== 'note') { s.note = s.note ? `${pendingNote} ${s.note}` : pendingNote; pendingNote = null; } tr.steps.push(s); if (s.state === 'running') st.open = s; };
   // Closes the running step: builder steps take their artifact's sentence; a review takes its verdict.
-  const close = (ts: string, state: StepState, text?: string) => {
+  // `sha`: the commit the next step runs on (a `testing` event's detail), when the step ends there.
+  const close = (ts: string, state: StepState, text?: string, sha?: string) => {
     const s = st.open; if (!s) return; st.open = null; s.end = ts; s.state = state;
     if (text) s.text = text;
     else if (s.kind === 'build' || s.kind === 'fix' || s.kind === 'resolve') {
       const a = artifact(s.kind === 'resolve' ? ['resolve'] : ['build', 'resolve'], s.start, ts);
-      if (a) { s.text = builderText(a.text); s.tag = a.tag; }
-      else if (state === 'done') s.text = s.kind === 'resolve' ? 'Combined the changes; no output was recorded.' : 'Builder finished; its output was not recorded for this step.';
+      if (a) { s.tag = a.tag; const w = said(a); if (w) s.said = w; }
+      if (a || state === 'done') s.text = buildOutcome(s.kind, a, sha && SHA.test(sha) ? sha : undefined);
     }
   };
   const closeReview = (ts: string, state: StepState, lead: string) => {
@@ -175,12 +218,13 @@ export function buildStory(inp: StoryInput): Story {
   };
   const endTry = (ts: string, outcome: TryOutcome, summary: string) => { if (!tr) return; tr.outcome = outcome; tr.summary = summary; tr.end = ts; tr = null; st.open = null; testsInTry = 0; reviewsInTry = 0; };
 
-  for (const e of inp.events) {
-    const d = e.detail || '';
-    if (CYCLE_START[e.event] || (e.event === 'resumed' && e.attemptsReset)) {
-      if (tr) endTry(e.ts, tr.steps.some((s) => s.state === 'running') ? 'interrupted' : tr.outcome, tr.summary || 'Ended when it was reset.');
-      if (cyc().tries.length) { cyc().endedBy = CYCLE_START[e.event] ?? 'before it was resumed with fresh tries'; cycles.push({ tries: [] }); }
-      continue;
+  for (const e of withResets(inp.events)) {
+    const d = e.detail || '', ended = cycleEnd(e);
+    if (ended) {
+      if (st.open) close(e.ts, 'interrupted', `${(st.open as Step).text.replace(/\.$/, '')} (interrupted).`);
+      if (tr) endTry(e.ts, tr.outcome === 'running' ? 'interrupted' : tr.outcome, tr.summary || `Ended ${ended.replace(/^before /, 'when ')}.`);
+      if (cyc().tries.length) { cyc().endedBy = ended; cycles.push({ tries: [] }); }
+      planWho = planStart = null; continue;
     }
     if (e.event === 'launch') {
       planWho = planStart = null;
@@ -224,7 +268,7 @@ export function buildStory(inp: StoryInput): Story {
       case 'keep-fix': close(e.ts, 'failed', 'The merge lost lines one side added.'); push({ kind: 'fix', label: 'Fix', state: 'running', text: 'Restoring the lines the merge lost.', start: e.ts }); break;
       case 'progress-fix': close(e.ts, 'done'); push({ kind: 'fix', label: 'Fix', state: 'running', text: 'The rejected work was still unchanged; the builder is making the change.', start: e.ts }); break;
       case 'testing': {
-        if (st.open) close(e.ts, st.open.kind === 'save' ? 'done' : 'done');
+        if (st.open) close(e.ts, 'done', undefined, d);
         testsInTry++;
         push({ kind: 'test', label: testsInTry > 1 ? 'Test again' : 'Test', state: 'running', text: 'Running the configured checks.', start: e.ts, ...(envRetest ? { note: 'Same code, after a diagnosed environment fault.' } : {}) });
         envRetest = false; break;
@@ -259,8 +303,13 @@ export function buildStory(inp: StoryInput): Story {
         if (e.event === 'recovered' && !/back to todo/.test(d)) break;
         if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`);
         push({ kind: 'stop', label: 'Sent back', state: 'info', text: `Sent back to the queue on the same try (no retry used): ${departure(d)}.`, start: e.ts, end: e.ts }); break;
-      case 'planning-hold': push({ kind: 'hold', label: 'On hold', state: 'info', text: /^base/.test(d) ? 'On hold.' : `On hold: the ${/prompt-conflict/.test(d) ? 'instructions conflict' : 'spec cannot be met as written'}; it needs a clarification.`, start: e.ts, end: e.ts,
-        ...(planWho && /planner/.test(d) ? { who: `Planned by ${planWho}` } : {}) }); planWho = planStart = null; break;
+      case 'planning-hold': {
+        // The planner held the feature before any builder ran: the launch's Build row never happened.
+        const b = st.open;
+        if (b && b.kind === 'build' && !b.who && /before any build/.test(d)) { tr.steps.splice(tr.steps.lastIndexOf(b), 1); st.open = null; }
+        push({ kind: 'hold', label: 'On hold', state: 'info', text: /^base/.test(d) ? 'On hold.' : `On hold: the ${/prompt-conflict/.test(d) ? 'instructions conflict' : 'spec cannot be met as written'}; it needs a clarification.`, start: planStart ?? e.ts, end: e.ts,
+          ...(planWho && /planner/.test(d) ? { who: `Planned by ${planWho}` } : {}) }); planWho = planStart = null; break;
+      }
       case 'planned': { // the planner runs between the launch and the builder: its row goes before the Build row it planned for
         const rec = /^FEASIBLE, effort (\w+)/.exec(d)?.[1], split = /split suggested: (.+)$/.exec(d)?.[1], who = whoOf(e)?.who ?? planWho;
         const step: Step = { kind: 'note', label: 'Planned', state: 'info', start: planStart ?? e.ts, end: e.ts, ...(who ? { who: `Planned by ${who}` } : {}),
@@ -308,7 +357,9 @@ export function buildStory(inp: StoryInput): Story {
 
   const cur = cyc(), current = cur.tries.find((t) => t.outcome === 'running') ?? cur.tries.at(-1) ?? null;
   const earlier = cur.tries.filter((t) => t !== current).reverse();
-  const archive = cycles.slice(0, -1).filter((c) => c.tries.length).map((c) => ({ label: `${c.tries.length} earlier ${c.tries.length === 1 ? 'try' : 'tries'} ${c.endedBy ?? 'before a reset'}`, tries: [...c.tries].reverse() })).reverse();
+  // Every row in its real time order (a step's start); rows at the same instant keep the order they were recorded in.
+  for (const t of cycles.flatMap((c) => c.tries)) t.steps = t.steps.map((s, i) => ({ s, i, at: Date.parse(s.start ?? '') })).sort((a, b) => (isNaN(a.at) || isNaN(b.at) ? 0 : a.at - b.at) || a.i - b.i).map((x) => x.s);
+  const archive = cycles.slice(0, -1).filter((c) => c.tries.length).map((c) => ({ label: `Earlier work (${c.endedBy ?? 'before a reset'}): ${c.tries.length} ${c.tries.length === 1 ? 'try' : 'tries'}`, tries: [...c.tries].reverse() })).reverse();
   const d = describe(inp, current, cur);
   d.problems.earlier.push(...orphans.reverse());
   if (f.status === 'merged' && current?.outcome !== 'merged') d.state = { word: 'Merged', tone: 'ok', why: `Merged into ${inp.base}${lateMerge ? ' outside a factory try' : ''}; the earlier tries are kept below as history.`, next: null };
@@ -385,10 +436,10 @@ export interface Transition { ts: string; id: string; title: string; text: strin
 // recorded events and their stop metadata; `titles` gives each feature's display title.
 export function transitions(events: LogEvent[], titles: Record<string, string>, maxAttempts: number, base: string, limit = 10): Transition[] {
   const out: Transition[] = [], tryOf = new Map<string, number>(), fixedInTry = new Set<string>();
-  for (const e of events) {
+  for (const e of withResets(events)) {
     const id = e.feature; if (!id) continue;
     const title = titles[id] ?? id, d = e.detail || '', t = (text: string, badge: string, tone: StoryState['tone'], needsYou = false) => out.push({ ts: e.ts, id, title, text, badge, tone, needsYou });
-    if (CYCLE_START[e.event] || (e.event === 'resumed' && e.attemptsReset)) { tryOf.delete(id); continue; }
+    if (cycleEnd(e)) { tryOf.delete(id); tryOf.delete(`${id}#open`); continue; }
     if (e.event === 'launch') {
       if (tryOf.has(`${id}#open`)) t(`Resumed try ${tryOf.get(id) ?? 1}.`, 'Running', 'run'); // the same try: no retry was spent
       else { const n = (tryOf.get(id) ?? 0) + 1; tryOf.set(id, n); tryOf.set(`${id}#open`, 1); t(`Started try ${n}.`, 'Running', 'run'); fixedInTry.delete(id); }

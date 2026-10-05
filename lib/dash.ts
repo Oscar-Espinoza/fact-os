@@ -381,9 +381,12 @@ function storyRuns(dir: string, id: string): StoryRun[] {
     try {
       const file = join(rd, name), p = parseClaudeOutput(readFileSync(file, 'utf8'));
       // A build whose last turn was a stray reply: its real Summary line, recovered from the transcript (see noteExit).
-      const rec = m[2] === 'build' ? (tryJson(readIfExists(join(rd, `${m[1]}-build.exit.json`)) ?? '') as { recovered?: boolean; summary?: string } | null) : null;
+      // Its exit record also lists the files it touched and what it was unsure of: the row's outcome comes from those.
+      const rec = m[2] === 'build' ? (tryJson(readIfExists(join(rd, `${m[1]}-build.exit.json`)) ?? '') as { recovered?: boolean; summary?: string; exit?: { touched?: unknown; unsure?: unknown } } | null) : null;
       const text = rec?.recovered && rec.summary ? `Summary: ${rec.summary}` : p.text;
-      return [{ tag: m[1]!, role: m[2] as StoryRun['role'], at: new Date(statSync(file).mtimeMs).toISOString(), text, verdict: m[2] === 'eval' && p.ok ? parseVerdict(p.text) : null }];
+      const touched = rec?.exit?.touched, unsure = rec?.exit?.unsure;
+      return [{ tag: m[1]!, role: m[2] as StoryRun['role'], at: new Date(statSync(file).mtimeMs).toISOString(), text, verdict: m[2] === 'eval' && p.ok ? parseVerdict(p.text) : null,
+        ...(Array.isArray(touched) ? { files: touched.length } : {}), ...(Array.isArray(unsure) ? { unsure: unsure.map(String) } : {}) }];
     } catch { return []; }
   });
 }
