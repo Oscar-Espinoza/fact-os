@@ -21,6 +21,7 @@ const USAGE = `usage: ${NAME} <command>
   spec-fixes [manual|auto]        how drafted spec fixes are applied: manual = a person applies them; auto = applied without asking
                                   when every guard passes (protected changes stay manual); without an argument: the mode and proposals
   spec-fix apply|dismiss|undo <id>  apply or dismiss a feature's drafted spec fix, or undo its latest applied one
+  spec-notes                      the spec-writing rules learned from corrected specs (the intake skill follows them)
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
   setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
   classify <id...> | --all        shadow-classify features with TypeSafe Jev (tier, needs split); records only, changes nothing
@@ -272,6 +273,8 @@ try {
     case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
     case 'spec-fixes': await specFixesCmd(argv.slice(1)); break;
     case 'spec-fix': await specFixCmd(argv.slice(1)); break;
+    case 'spec-notes': { const { readSpecNotes, specNotesFile } = await import('./specnotes.ts'); const n = readSpecNotes(needRoot());
+      console.log(n.length ? `${n.join('\n')}\n(${specNotesFile(needRoot())})` : 'No spec-writing rules learned yet.'); break; }
     case 'classify': {
       const root = needRoot(), { config, features } = load(root), { classify, report } = await import('./classifier.ts');
       if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "mode": "shadow"}} to config.json');

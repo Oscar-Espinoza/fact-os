@@ -9,6 +9,9 @@ Turn what the user wants built into fact-os's feature list and human inbox.
 
 1. Read what already exists: `.fact-os/config.json`, `.fact-os/features.json`, `.fact-os/human.json`,
    the README and the code layout. Keep existing features (never reset their `status`/`attempts`).
+   Read the spec-writing notes, `spec-notes.md` in the project's state directory (`.fact-os/`, or `.shipyard/` in older
+   projects), when it exists, and follow every rule in it: the factory learned them from specs it had to correct, and it
+   checks new features against them before their first build (`fact-os spec-notes` prints them).
 2. Ask **at most 5** short questions, in one message, only about what you cannot infer: scope of the
    first release, target surfaces, external services and accounts, what "done" looks like, priorities.
 3. Write `.fact-os/features.json` as `{ "features": [Feature] }`:

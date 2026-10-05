@@ -296,16 +296,22 @@ export function candidates(root: string, config: Config, features: Feature[], by
   return features.flatMap((f) => {
     if (f.status !== 'todo' && f.status !== 'stuck') return [];
     const mine = Object.entries(byKey).filter(([, r]) => r.feature === f.id && r.cause === 'spec-error').sort((a, b) => (a[1].passStart ?? a[1].ts).localeCompare(b[1].passStart ?? b[1].ts)), latest = mine.at(-1);
-    if (!latest) return [];
+    if (!latest && !f.planningHold?.review.startsWith('precheck:')) return [];
     const inputs = holdInputs(root, config, f); // only for features a spec-error review blamed: it reads the briefs
     if ((f.specFix && f.specFix.inputs === inputs) || f.specFixDecisions?.[inputs]) return [];
     const launch = [...events].reverse().find((e) => e.feature === f.id && e.event === 'launch');
+    if (f.status === 'todo' && f.planningHold?.review.startsWith('precheck:')) {
+      const h = f.planningHold; // the pre-launch check against the spec-writing notes (lib/specnotes.ts): its quotes are the evidence
+      return h.cause === 'spec-error' && h.inputs === inputs ? [{ f, review: { ts: h.ts, feature: f.id, tag: '', role: 'builder', model: '', effort: '', notes: '', kind: 'evaluator-rejected', next: '',
+        cause: 'spec-error', evidence: h.evidence, confidence: 'high', suggestion: '', target: null, cost: 0 } as PromptReview, key: h.review, inputs, launch: undefined }] : [];
+    }
     if (f.status === 'todo') {
       const h = f.planningHold, held = h && byKey[h.review];
       return h?.cause === 'spec-error' && h.inputs === inputs && held ? [{ f, review: held, key: h.review, inputs, launch: launch?.ts }] : [];
     }
     // A stuck feature: only a review of its latest pass (by the pass it judged, not when the review finished) and only while the
     // spec is still the one that pass was launched with. A review that does not say which pass it judged is never used.
+    if (!latest) return [];
     const [key, review] = latest;
     if (!launch || review.passStart !== launch.ts || (review.confidence !== 'high' && review.confidence !== 'medium') || (launch.inputs && launch.inputs !== inputs)) return [];
     return [{ f, review, key, inputs, launch: launch.ts }];
@@ -339,7 +345,8 @@ export async function specFixPass(root: string, config: Config, drafter: RoleCon
     const tk = `${f.id}:${inputs}`;
     tries[tk] = (tries[tk] ?? 0) + 1; reserve(); // a crash mid-run still counts the attempt and the run
     const sha = branchHead(root, config, f);
-    const input: FixInput = { feature: f, feedback: f.lastFeedback ?? '', reviewEvidence: review.evidence, files: sha ? evidenceFiles(root, sha, f.id) : [] };
+    const pre = key.startsWith('precheck:'), feedback = pre ? `Pre-launch check against the factory's learned spec-writing rules (no build has run):\n${review.evidence.join('\n')}` : f.lastFeedback ?? '';
+    const input: FixInput = { feature: f, feedback, reviewEvidence: review.evidence, files: sha && !pre ? evidenceFiles(root, sha, f.id) : [] };
     const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...drafter, permissionMode: 'plan' }, root), { cwd: root, env: childEnv(), input: draftPrompt(input), children: io.children, timeoutMin: 15 });
     if (io.stopping()) return;
     const c = parseClaudeOutput(r.out), d = c.ok ? parseDraft(c.text) : { error: c.error ?? 'the draft run failed' };

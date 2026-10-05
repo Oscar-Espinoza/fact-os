@@ -298,6 +298,8 @@ function learningOf(dir: string, events: LogEvent[]): ObserverSummary['learning'
     if (e.event === 'observer-notes') return `Updated prompt notes for ${e.detail}`;
     if (e.event === 'spec-fix-applied') return `${e.feature}: spec fixed ${/^\S+ auto:/.test(e.detail || '') ? 'automatically' : 'by a person'}: ${(e.detail || '').replace(/^\S+ \w+: /, '')}`;
     if (e.event === 'spec-fix-undone') return `${e.feature}: a spec fix was undone`;
+    if (e.event === 'spec-note-added') return `Learned a spec-writing rule (from ${e.feature}): ${e.detail}`;
+    if (e.event === 'spec-note-retired') return `Retired a spec-writing rule a person kept overriding: ${e.detail}`;
     if (e.event === 'prompt' && e.run?.rule?.includes('→')) return `${e.feature}: fresh try escalated, ${e.run.rule.replace(/^ladder: /, '')}`;
     return null;
   };

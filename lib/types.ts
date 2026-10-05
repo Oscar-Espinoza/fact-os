@@ -171,6 +171,7 @@ export interface Feature {
   specFix?: SpecFixProposal;          // the latest drafted spec fix (lib/specfix.ts)
   specFixes?: SpecFixRecord[];        // spec fixes applied to it, oldest first (undo restores the latest)
   specFixDecisions?: Record<string, string>; // spec inputs → what was decided for them (declined, none, applied): never drafted again
+  specCheck?: { inputs: string; ts: string; issues: { note: string; quote: string; why: string }[] }; // the pre-launch check against the spec-writing notes (lib/specnotes.ts)
   tier?: Tier;                        // set at intake; picks role models from the active profile's tiers (absent: the risk heuristic)
   risk?: 'high' | 'normal';           // "high": the builder gets its profile's effortHigh; "normal": never; absent: keyword heuristic
   conflict?: { ours: string; theirs: string; files: string[] }; // a conflicted base refresh whose committed resolution is not checked yet

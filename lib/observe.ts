@@ -6,6 +6,7 @@
 // the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). It also reviews
 // each failed pass (promptreview.ts) to learn whether the prompt or the model was at fault, and keeps per-model prompt notes
 // from that. The observer itself never changes code: every code change goes through the factory's own checks.
+import { specNotesPass } from './specnotes.ts';
 import { specFixPass } from './specfix.ts';
 import { loadEpisodes, scorecard, type Scorecard } from './scorecard.ts';
 import { atomStale, readAtoms, refPrints, refsHold, writeAtoms, type Atom, type AtomStatus } from './context.ts';
@@ -297,6 +298,7 @@ export function runCosts(runsDir: string): RunCost[] {
 
 export interface ObserverState extends PromptState {
   specFixRuns?: string[]; specFixTries?: Record<string, number>; // spec-fix drafts in the last day; failed drafts per spec inputs (lib/specfix.ts)
+  specNotesDone?: string[]; specCheckRuns?: string[]; specNoteReleases?: Record<string, string[]>; // lib/specnotes.ts
   scorecard?: Scorecard;             // builder outcomes by model, effort and recorded tier, last 14 days (lib/scorecard.ts)
   offset: number;                               // bytes of log.jsonl already read
   retried: Record<string, string[]>;            // feature → signatures it was sent back for
@@ -473,6 +475,9 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
     if (!stopping()) await step('template tasks', () => fileTemplateTasks(root, state, out, stopping));
     // Spec fixes: a spec-error failure gets one drafted correction (the curator), verified by a fresh Codex session.
     const ev = resolveRole(config, profile, 'evaluator'), verifier = config.diagnoser?.provider === 'codex' ? config.diagnoser : ev.provider === 'codex' ? ev : null;
+    // Spec-writing notes: learn rules from corrected specs, and check never-launched features against them (before spec fixes,
+    // so a pre-launch hold gets its fix drafted in the same pass).
+    if (!stopping()) await step('spec notes', () => specNotesPass(root, config, curator, state, all.events, io, () => writeJsonAtomic(O.state, state)));
     if (!stopping()) await step('spec fixes', () => specFixPass(root, config, curator, verifier, state, all.events, io, () => writeJsonAtomic(O.state, state)));
     writeJsonAtomic(O.state, state);
   }

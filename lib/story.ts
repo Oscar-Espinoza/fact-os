@@ -341,7 +341,8 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
       if (f.planningHold) {
         const h = f.planningHold;
         state = h.cause === 'base-defect' ? { word: 'On hold', tone: 'hold', why: `The same failure happens on ${inp.base}: ${h.evidence[0] ?? ''}`.trim(), next: `Checked again when ${inp.base} changes that code.` }
-          : { word: 'On hold', tone: 'hold', why: `The ${h.cause === 'prompt-conflict' ? 'instructions conflict' : 'spec cannot be met as written'}: ${h.evidence[0] ?? ''}`.trim(),
+          : { word: 'On hold', tone: 'hold', why: h.review.startsWith('precheck:') ? `Before its first build, the spec was found to break a learned spec-writing rule: "${h.evidence[0] ?? ''}" ${h.evidence[1] ?? ''}`.trim()
+              : `The ${h.cause === 'prompt-conflict' ? 'instructions conflict' : 'spec cannot be met as written'}: ${h.evidence[0] ?? ''}`.trim(),
             next: f.specFix?.status === 'proposed' ? 'Review the proposed spec fix below: apply it, or dismiss it and edit the spec yourself.' : 'Edit the spec, or release the hold to launch it as it is.' };
         if (h.cause !== 'base-defect') needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: state.why ?? '' } : { what: 'Clarify the conflicting requirement', why: state.why ?? '' };
         break;
@@ -385,6 +386,7 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
     else if (e.event === 'refresh-skipped' || (e.event === 'recovered' && /back to todo/.test(d)) || e.event === 'interrupted') {
       t(`Sent back to the queue on the same try (no retry used): ${e.event === 'interrupted' ? 'the factory stopped mid-step' : departure(d)}.`, 'Queued', 'queue'); // the try stays open
     }
+    else if (e.event === 'planning-hold' && /pre-launch check/.test(d)) t('Held before its first build: the spec breaks a learned spec-writing rule; a spec fix will be drafted.', 'On hold · spec check', 'hold', true);
     else if (e.event === 'planning-hold' && !/base/.test(d)) t('On hold: the spec cannot be met as written; it needs a clarification.', 'On hold · needs you', 'hold', true);
     else if (e.event === 'spec-fix-proposed') t(`A spec fix was drafted: ${clip(d.replace(/^S\w+: /, ''), 160)}`, 'Spec fix · needs you', 'hold', true);
     else if (e.event === 'spec-fix-none') t(`No spec fix could be drafted (${clip(d, 120)}); the spec still needs you.`, 'On hold · needs you', 'hold', true);

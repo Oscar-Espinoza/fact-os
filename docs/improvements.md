@@ -490,3 +490,17 @@ Designed with Codex, which shaped the guards below.
   state, releases the spec-error hold, keeps a pause, logs `acceptance-changed`; the feature goes through the ordinary build,
   gate and review. Dismiss keeps the hold. Undo restores the latest fix while its text is unchanged and nobody is working on
   the feature; the one automatic fix stays spent.
+
+## I12 — learning to write better specs (2026-10-05)
+
+Spec fixes correct one spec; nothing taught the next specs. Now:
+
+- Spec-writing notes (`<state dir>/spec-notes.md`, 3000 bytes, merged, oldest archived): after an applied spec fix, or a
+  person's requirements change on a feature a review held for a spec error, the curator distills at most one general rule
+  (one sentence, no feature ids; none when the mistake was specific). `fact-os spec-notes` prints them; the intake skill
+  reads and follows them before writing features; Models → What the factory learned lists added and retired rules.
+- Pre-launch check: a never-launched, unheld feature is checked once per spec against the rules (at most 3 a pass, 30 a
+  day). Only a real rule and a word-for-word quote from the spec count; then the feature is held (`spec-error`,
+  `precheck:` hold) before any build is spent, and the spec-fix flow drafts its correction (a pre-launch fix never applies
+  automatically: auto needs a counted failure). Release, edit or apply/dismiss as with any hold.
+- A rule whose pre-launch holds a person releases unchanged twice is retired.
