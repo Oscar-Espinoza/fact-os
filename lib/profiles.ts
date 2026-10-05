@@ -1,7 +1,7 @@
 // Model profiles: which model and effort each role runs with, switched at runtime in control.json (`profile`). "opus", the
 // main mode, is each role's own config; any other profile overrides model/effort for the roles it names (permissionMode
 // always stays the role's). Pure: no I/O, so the foreman, the observer, the CLI and the dashboard resolve roles alike.
-import { PROFILE_ROLES, TIERS, TIER_ROLES, type Config, type Feature, type LogEvent, type Profile, type ProfileEntry, type ProfileRole, type RoleConfig, type Tier, type TierEntry } from './types.ts';
+import { PROFILE_ROLES, TIERS, TIER_ROLES, type Config, type FailureKind, type Feature, type LogEvent, type Profile, type ProfileEntry, type ProfileRole, type RoleConfig, type Rung, type Tier, type TierEntry } from './types.ts';
 
 export const OPUS = 'opus';
 // Fable thinks (evaluation, the observer's improver, lessons curation); Sonnet writes the code (builder, merge resolver).
@@ -110,17 +110,21 @@ export function resolveRole(config: Config, profile: string | null, role: Profil
 
 // ---- retry ladder ----
 
-// Counted failures a fresh try may escalate for: the builder's own code failed its checks or its review, in the current cycle
-// (a person's retry, the observer's, a requirements update or a split starts a new one). Uncounted stops (environment, base
-// defects, interruptions), merge handling and inline repairs never count. Capped by the feature's spent attempts.
-const LADDER_FAILURE = /^(FAILED |CHEATING:|BLOCKING:|test command `)/m; // "Evaluator: …" is the review run failing, not the build
+// Counted failures a fresh try may escalate for: the builder's implementation failed its review, or a gate failure a diagnosis
+// attributed to its own code, in the current cycle (a person's retry, the observer's, a requirements update or a split starts
+// a new one). The failure's recorded provenance decides; an older event without one counts only when its first line is a
+// validated rejection (never a gate failure of unknown cause, never text inside an evaluator's unvalidated output).
+// Uncounted stops, merges, setup, evaluator-run and builder-run failures and inline repairs never count. Capped by attempts.
+const ELIGIBLE = new Set<FailureKind>(['review', 'gate-own']);
+const LEGACY_REJECTION = /^(FAILED |CHEATING:|BLOCKING:)/;
 const CYCLE_RESET = new Set(['retrying', 'observer-retry', 'acceptance-changed', 'superseded']);
-export function ladderFailures(events: Pick<LogEvent, 'feature' | 'event' | 'detail' | 'stop' | 'attemptsReset' | 'cause'>[], id: string, attempts: number): number {
+export function ladderFailures(events: Pick<LogEvent, 'feature' | 'event' | 'detail' | 'stop' | 'attemptsReset' | 'cause' | 'failure'>[], id: string, attempts: number): number {
   let n = 0;
   for (const e of events) {
     if (e.feature !== id) continue;
     if (CYCLE_RESET.has(e.event) || (e.event === 'resumed' && e.attemptsReset)) n = 0;
-    else if (e.event === 'failed' && e.stop?.counted && e.cause !== 'environment' && e.cause !== 'base-defect' && LADDER_FAILURE.test(e.detail || '')) n++;
+    else if ((e.event === 'failed' || e.event === 'stuck') && e.stop?.counted && e.cause !== 'environment' && e.cause !== 'base-defect' &&
+      (e.failure ? ELIGIBLE.has(e.failure) : LEGACY_REJECTION.test(e.detail || ''))) n++;
   }
   return Math.min(n, Math.max(0, attempts));
 }
@@ -150,6 +154,8 @@ export function roleTable(config: Config, profile: string | null, agent: RoleCon
 // Codex runs only the read-only roles: a provider is "claude" or, for the evaluator, "codex".
 const providerProblems = (path: string, role: string, v: unknown): string[] =>
   v === 'claude' || (v === 'codex' && role === 'evaluator') ? [] : [`${path}.provider must be "claude"${role === 'evaluator' ? ' or "codex"' : ' (only the evaluator can use "codex")'}`];
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+const MODEL_ORDER = ['haiku', 'sonnet', 'opus'];
 function ladderProblems(path: string, raw: unknown): string[] {
   if (!Array.isArray(raw) || raw.length < 2) return [`${path} must be an array of at least two {model, effort} rungs, weakest first`];
   const out: string[] = [], seen = new Set<string>();
@@ -158,7 +164,16 @@ function ladderProblems(path: string, raw: unknown): string[] {
       return void out.push(`${path}[${i}] must be {model, effort} with non-empty strings`);
     if (seen.has(`${r.model} ${r.effort}`)) out.push(`${path}[${i}] repeats ${r.model} ${r.effort}`);
     seen.add(`${r.model} ${r.effort}`);
+    if (!(EFFORTS as readonly string[]).includes(r.effort)) out.push(`${path}[${i}].effort must be one of ${EFFORTS.join(', ')}`);
   });
+  // Weakest first: never a lower effort on the same model, never a lower known model (custom aliases are not ordered).
+  for (let i = 1; i < raw.length; i++) {
+    const a = raw[i - 1] as Rung, b = raw[i] as Rung;
+    if (!isObj(a) || !isObj(b)) continue;
+    const ea = EFFORTS.indexOf(a.effort as typeof EFFORTS[number]), eb = EFFORTS.indexOf(b.effort as typeof EFFORTS[number]);
+    const ma = MODEL_ORDER.indexOf(a.model), mb = MODEL_ORDER.indexOf(b.model);
+    if (a.model === b.model ? ea >= 0 && eb >= 0 && eb < ea : ma >= 0 && mb >= 0 && mb < ma) out.push(`${path}[${i}] (${b.model} ${b.effort}) is weaker than the rung before it (${a.model} ${a.effort})`);
+  }
   return out;
 }
 function tierProblems(path: string, raw: unknown): string[] {

@@ -7,7 +7,7 @@
 // each failed pass (promptreview.ts) to learn whether the prompt or the model was at fault, and keeps per-model prompt notes
 // from that. The observer itself never changes code: every code change goes through the factory's own checks.
 import { loadEpisodes, scorecard, type Scorecard } from './scorecard.ts';
-import { ATOM_REVALIDATE_DAYS, readAtoms, refsHold, writeAtoms, type Atom, type AtomStatus } from './context.ts';
+import { atomStale, readAtoms, refPrints, refsHold, writeAtoms, type Atom, type AtomStatus } from './context.ts';
 import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -522,9 +522,9 @@ export function parseGoal(text: string): { goal: string; shortTitle: string } | 
   return { goal, shortTitle };
 }
 const ATOMS_PER_PASS = 3;
-export function atomCheckPrompt(a: Atom, base: string): string {
+export function atomCheckPrompt(a: Atom, base: string): string { // base: the commit the curator reads
   return [`Check one pointer that ${NAME} gives builders working in ${a.scope.join(', ')}. You are read-only: change nothing.`,
-    `Read the referenced code on the ${base} branch (git show ${base}:<path>) before answering.`, '',
+    `Read the referenced code at commit ${base} (git show ${base}:<path>) before answering.`, '',
     `Pointer: ${a.text}`, `References: ${a.refs.map((r) => (r.symbol ? `${r.symbol} in ${r.path}` : r.path)).join('; ')}`, '',
     'Answer with ONLY a JSON object: {"accurate": boolean (the referenced code exists and does what the pointer says), "applies": boolean ' +
     '(a builder changing files under that scope would be better off knowing it; false for one-off facts or advice that is wrong in general), ' +
@@ -541,22 +541,27 @@ async function atomsPass(root: string, config: Config, agent: RoleConfig, out: (
   const dir = paths(root).dir, store = readAtoms(dir);
   if (!store.atoms.length) return;
   const note = (a: Atom, status: AtomStatus, why: string) => { a.status = status; a.why = why; a.checkedAt = now(); log(root, null, 'observer-atom', `${a.id} ${status}: ${why}`); };
+  // A missing or unsafe ref quarantines a verified atom; changed code or an old verification sends it back to the curator.
   for (const a of store.atoms) {
-    const why = a.status === 'verified' || a.status === 'quarantined' ? refsHold(a.refs, config.base, root, git) : null;
-    if (a.status === 'verified' && why) note(a, 'quarantined', why);
-    else if (a.status === 'quarantined' && !why) note(a, 'proposed', 'its references hold again');
-    else if (a.status === 'verified' && a.verifiedAt && Date.now() - Date.parse(a.verifiedAt) > ATOM_REVALIDATE_DAYS * DAY) note(a, 'proposed', `verified over ${ATOM_REVALIDATE_DAYS} days ago`);
+    if (a.status === 'quarantined') { if (!refsHold(a.refs, config.base, root, git)) note(a, 'proposed', 'its references hold again'); continue; }
+    if (a.status !== 'verified') continue;
+    const gone = refsHold(a.refs, config.base, root, git), stale = gone ? null : atomStale(a, config.base, root, git);
+    if (gone) note(a, 'quarantined', gone); else if (stale) note(a, 'proposed', stale);
   }
   writeAtoms(dir, store);
   let checked = 0;
   for (const a of store.atoms.filter((x) => x.status === 'proposed').slice(0, ATOMS_PER_PASS)) {
     if (stopping()) break;
-    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: childEnv(), input: atomCheckPrompt(a, config.base), children, timeoutMin: 10 });
+    const rev = git(['rev-parse', config.base], root).out; // the curator reads this commit; the fingerprints are taken from it
+    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: childEnv(), input: atomCheckPrompt(a, rev), children, timeoutMin: 10 });
     const c = parseClaudeOutput(r.out), v = c.ok ? parseAtomCheck(c.text) : null;
     if (!v) continue; // asked again next pass
     const fresh = readAtoms(dir), x = fresh.atoms.find((y) => y.id === a.id);
     if (!x || x.status !== 'proposed') continue;
-    if (v.ok) { x.verifiedAt = now(); note(x, 'verified', v.reason || 'checked against the code'); } else note(x, 'retired', v.reason || 'the curator rejected it');
+    const gone = refsHold(x.refs, rev, root, git);
+    if (gone) note(x, 'quarantined', gone);
+    else if (v.ok) { Object.assign(x, { verifiedAt: now(), verifiedRev: rev, prints: refPrints(x.refs, rev, root, git) }); note(x, 'verified', v.reason || 'checked against the code'); }
+    else note(x, 'retired', v.reason || 'the curator rejected it');
     writeAtoms(dir, fresh); checked++;
   }
   if (checked) out(`observer: checked ${checked} context pointers`);

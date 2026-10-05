@@ -158,10 +158,15 @@ test('retry ladder: counted build/review failures in the current cycle climb app
     ladder: [{ model: 'sonnet', effort: 'medium' }, { model: 'sonnet', effort: 'high' }, { model: 'opus', effort: 'high' }] } } } as unknown as Config;
   const ev = (event: string, detail = '', o = {}) => ({ feature: 'a', event, detail, ...o });
   const counted = { stop: { attempt: 1, counted: true } };
-  const events = [ev('failed', 'FAILED tenant check: x', counted), ev('failed', 'prepare `x` failed', counted), ev('failed', 'Evaluator: invalid JSON', counted),
-    ev('failed', 'test command `t` failed', { ...counted, cause: 'environment' }), ev('failed', 'BLOCKING: dup', { stop: { attempt: 2, counted: false } })];
-  assert.equal(ladderFailures(events, 'a', 3), 1);
-  assert.equal(ladderFailures([...events, ev('retrying'), ev('failed', 'BLOCKING: y', counted)], 'a', 3), 1);
+  // Recorded provenance decides: a review rejection and an own-code gate count; an evaluator that failed, an unattributed gate,
+  // a setup or merge failure never do, whatever their text says.
+  const events = [ev('failed', 'FAILED tenant check: x', { ...counted, failure: 'review' }), ev('failed', 'Evaluator: not JSON\nFAILED tenant isolation', { ...counted, failure: 'evaluator' }),
+    ev('failed', 'test command `t` exited 1: ECONNREFUSED', { ...counted, failure: 'gate' }), ev('failed', 'test command `t` exited 1', { ...counted, failure: 'gate-own' }),
+    ev('failed', 'prepare `x` failed', counted), ev('failed', 'BLOCKING: dup', { stop: { attempt: 2, counted: false }, failure: 'review' })];
+  assert.equal(ladderFailures(events, 'a', 5), 2);
+  assert.equal(ladderFailures([...events, ev('retrying'), ev('failed', 'BLOCKING: y', { ...counted, failure: 'review' })], 'a', 3), 1);
+  // Older events without provenance: only a validated rejection on the first line; never a gate, never unvalidated output.
+  assert.equal(ladderFailures([ev('failed', 'FAILED a', counted), ev('failed', 'Evaluator: bad\nFAILED b', counted), ev('failed', 'test command `t` exited 1', counted)], 'a', 3), 1);
   assert.equal(ladderFailures([ev('failed', 'FAILED a', counted), ev('failed', 'CHEATING: b', counted)], 'a', 1), 1); // capped by attempts
   const base = resolveRole(config, 'p', 'builder', { feature: { title: 't', description: '' } });
   assert.deepEqual(ladderStep(config, 'p', base, 1), { cfg: { ...base, model: 'sonnet', effort: 'high' }, rule: 'ladder: 1 counted failure this cycle → sonnet high (from sonnet medium)' });
@@ -170,5 +175,9 @@ test('retry ladder: counted build/review failures in the current cycle climb app
   assert.match(ladderStep(config, 'p', risky, 2)!.rule, /already on the top rung/); assert.equal(ladderStep(config, 'p', risky, 2)!.cfg.model, 'opus');
   assert.equal(ladderStep(config, 'p', { model: 'haiku', effort: 'low' }, 2), null); assert.equal(ladderStep(config, 'p', base, 0), null);
   assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'a', effort: 'b' }] } }), ['config.profiles.p.ladder must be an array of at least two {model, effort} rungs, weakest first']);
-  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'a', effort: 'b' }, { model: 'a', effort: 'b', x: 1 }] } }), ['config.profiles.p.ladder[1] must be {model, effort} with non-empty strings']);
+  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'a', effort: 'high' }, { model: 'a', effort: 'high', x: 1 }] } }), ['config.profiles.p.ladder[1] must be {model, effort} with non-empty strings']);
+  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'opus', effort: 'high' }, { model: 'sonnet', effort: 'low' }] } }), ['config.profiles.p.ladder[1] (sonnet low) is weaker than the rung before it (opus high)']);
+  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'sonnet', effort: 'high' }, { model: 'sonnet', effort: 'medium' }] } }), ['config.profiles.p.ladder[1] (sonnet medium) is weaker than the rung before it (sonnet high)']);
+  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'sonnet', effort: 'hgih' }, { model: 'opus', effort: 'high' }] } }), ['config.profiles.p.ladder[0].effort must be one of low, medium, high, xhigh, max']);
+  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'sonnet', effort: 'medium' }, { model: 'sonnet', effort: 'high' }, { model: 'opus', effort: 'high' }] } }), []);
 });

@@ -69,6 +69,7 @@ export interface Config {
   progressFixes: number;              // safe integer >= 0: resumes per pass when a build left the content the evaluator rejected unchanged, before a counted failure with no gate or evaluation (0 = none)
   reviewFixes: number;                // safe integer >= 0: resumes per pass to fix an actionable evaluator rejection, then a fresh gate and evaluation (0 = none)
   contextMaxBytes: number;            // safe integer >= 0: bytes of verified context atoms a builder prompt may carry (lib/context.ts; 0 = none)
+  lessonsMaxBytes: number;            // safe integer >= 0: a lessons file over this reaches a fresh build as its most relevant lessons plus the file (0 = always whole)
   recapMaxBytes: number;              // safe integer >= 0: previous-attempt feedback longer than this reaches a fresh try as a recap plus a file (0 = always whole)
   setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
   classifier: ClassifierConfig | null; // I07: TypeSafe Jev tier/split judgments, shadow mode only (records, never changes a feature)
@@ -222,10 +223,13 @@ export interface Verdict {
 
 // One agent invocation, as the foreman launched it (the run ledger). `model`/`effort` are what was requested; the run artifact
 // holds what the provider reports. `phase` tells a first build from each kind of repair, a review and a diagnosis.
+// A counted failure's provenance. Only 'review' (a valid rejection, or a rebuild that left rejected content unchanged) and
+// 'gate-own' (a gate failure a diagnosis attributed to the feature's code or tests) are the builder's implementation failing.
+export type FailureKind = 'review' | 'gate-own' | 'gate' | 'evaluator' | 'builder' | 'commit' | 'keep' | 'merge' | 'setup' | 'other';
 export type RunPhase = 'build' | 'commit' | 'fix-gate' | 'fix-review' | 'fix-keep' | 'fix-progress' | 'resolve' | 'review' | 'diagnose';
 export interface RunRecord { phase: RunPhase; tag: string; role: string; provider: string; model: string | null; effort: string | null; tier: string | null;
-  resumed: boolean; fallback?: boolean; promptBytes: number; rule?: string;
-  context?: { map: number; atoms: string[]; deferred: { id: string; why: string }[]; atomBytes: number; recap: boolean } } // first build: what the Map section held
+  resumed: boolean; fallback?: boolean; promptBytes: number; rule?: string; routedByTier?: boolean; // tier: the feature's tier at launch; routedByTier: a tier entry chose this config
+  context?: { map: number; atoms: string[]; deferred: { id: string; why: string }[]; atomBytes: number; recap: boolean; lessons?: { included: number; total: number } } } // first build: what the Map section held
 
 // The builder's own account of a run (FINISH_RULE's optional exit block). Self-reported and attributed: it never decides an
 // outcome, places a hold or clears a failure; the foreman stores it beside the declared touches and the actual diff.
@@ -242,6 +246,7 @@ export interface LogEvent {
   inputs?: string;                   // launch event: holdInputs of the launched spec (a planning hold must match it)
   test?: { code: number | null; file: string | null; error: string | null }; // gate-fix / env-rerun / failed: the failed gate's outcome
   run?: RunRecord;                   // prompt event: who ran this invocation, in which phase, with what (the run ledger)
+  failure?: FailureKind;             // failed/stuck event: where the failure came from, set where it happened (the retry ladder reads it)
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
   lessonAppend?: { file: string; before: string; after: string };
 }

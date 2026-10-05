@@ -10,8 +10,8 @@ import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, 
 import { escalates, ladderFailures, ladderStep, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { testFailure } from './story.ts';
-import { candidateMap, pickAtoms, readAtoms, recap, refsHold, renderContext } from './context.ts';
-import { IN_FLIGHT, ISSUE_KINDS, BLOCK_REASONS, type BuilderExit, type IssueKind, type BaseDefect, type RunPhase, type RunRecord, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
+import { atomStale, candidateMap, pickAtoms, readAtoms, recap, renderContext, selectLessons } from './context.ts';
+import { IN_FLIGHT, ISSUE_KINDS, type FailureKind, BLOCK_REASONS, type BuilderExit, type IssueKind, type BaseDefect, type RunPhase, type RunRecord, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
@@ -268,8 +268,8 @@ const mockList = (tasks: MockTask[]): string => tasks.map((t) => `- ${t.id}: ${t
 // `extra.map`: the rendered candidate map and verified pointers (lib/context.ts). `extra.feedbackFile`: where the previous attempt's
 // full feedback was written, so long feedback reaches the builder as a recap plus that file.
 export function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = [], notes = '',
-  extra: { map?: string; feedbackFile?: string | null } = {}): string {
-  const lessons = readIf(resolve(root, config.lessonsFile));
+  extra: { map?: string; feedbackFile?: string | null; lessons?: string } = {}): string {
+  const lessons = extra.lessons ?? readIf(resolve(root, config.lessonsFile)); // extra.lessons: the selection for this build (selectLessons)
   return [`You are the builder for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}, created from ${config.base}.`, '', f.description || '', '',
     'Acceptance checks (an independent evaluator verifies each one):', ...(f.acceptance || []).map((a) => `- ${a}`), '',
@@ -740,8 +740,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (readSetupState(root).failures.length) await updateSetupState(root, (st) => { if (!st.hold) st.failures = []; });
   };
 
-  type Fail = (fb: string) => Promise<void>;
-  const failer = (id: string): Fail => (fb) => edit(id, (x) => { applyFailure(x, fb, config.maxAttempts); log(root, id, x.status === 'stuck' ? 'stuck' : 'failed', fb, undefined, { stop: x.stop }); out(`${x.status === 'stuck' ? 'stuck' : 'retry'} ${id}: ${fb.split('\n')[0]}`); });
+  type Fail = (fb: string, failure?: FailureKind) => Promise<void>;
+  const failer = (id: string): Fail => (fb, failure = 'other') => edit(id, (x) => { applyFailure(x, fb, config.maxAttempts); log(root, id, x.status === 'stuck' ? 'stuck' : 'failed', fb, undefined, { stop: x.stop, failure }); out(`${x.status === 'stuck' ? 'stuck' : 'retry'} ${id}: ${fb.split('\n')[0]}`); });
 
   // `profile`: the model profile applied when this pass launched. Every claude run of the pass (builder, resolver, evaluator)
   // uses it, never the live control.json value, so a switch mid-pass never changes a feature's models halfway.
@@ -756,20 +756,24 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // this pass keep the same builder).
     const ladder = ladderStep(config, profile, resolveRole(config, profile, 'builder', { feature: f }), ladderFailures(readLogEvents(P.log), id, f.attempts || 0));
     const roleCfg = (role: Role) => (role === 'builder' && ladder ? ladder.cfg : resolveRole(config, profile, role, { feature: f }));
-    const claude = async (role: Role, prompt: string, file: string, opts: { extra?: string[]; cfg?: RoleConfig } = {}): Promise<ClaudeResult> => {
-      const r = await exec(envVar('CLAUDE') || 'claude', [...claudeArgs(config, opts.cfg ?? roleCfg(role), root), ...(role === 'builder' ? ['--add-dir', runDir] : []), ...(opts.extra ?? [])],
+    // `diagnose`: the run is a diagnosis made with the builder's permissions; it is not builder work (no exit block, no run dir).
+    const claude = async (role: Role, prompt: string, file: string, opts: { extra?: string[]; cfg?: RoleConfig; diagnose?: boolean } = {}): Promise<ClaudeResult> => {
+      const r = await exec(envVar('CLAUDE') || 'claude', [...claudeArgs(config, opts.cfg ?? roleCfg(role), root), ...(role === 'builder' && !opts.diagnose ? ['--add-dir', runDir] : []), ...(opts.extra ?? [])],
         { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin, onSpawn });
       writeFileSync(join(runDir, file), tryJson(r.out) ? r.out : JSON.stringify({ exitCode: r.code, stdout: r.out, stderr: tail(r.err) }));
       const p = parseClaudeOutput(r.out);
       spent += p.cost;
       if (p.cost) await edit(id, (x) => { x.costUsd = Math.round(((x.costUsd || 0) + p.cost) * 1e6) / 1e6; });
       if (r.timedOut) return { ...p, ok: false, error: `timed out after ${config.timeoutMin} min` };
-      if (role === 'builder' && p.ok) noteExit(p.text, file);
+      if (role === 'builder' && !opts.diagnose && p.ok) noteExit(p.text, file);
       return r.code === 0 || !p.ok ? p : { ...p, ok: false, error: `exit ${r.code}: ${tail(r.err, 500)}` };
     };
     // Beside each builder run: its exit block, the touches the spec declared and the files actually changed since base (merge-base,
     // so main's changes brought in by a refresh are not counted as the builder's). A reported blocker is logged, attributed, and
     // nothing more: it is the builder's claim, not a verified cause.
+    const logDiagnosePrompt = (prompt: string, c: RoleConfig, fallback: boolean) =>
+      log(root, id, 'prompt', `diagnoser model=${c.model || '-'} effort=${c.effort || '-'}`, undefined, { run: { phase: 'diagnose', tag, role: 'diagnoser', provider: c.provider ?? 'claude',
+        model: c.model ?? null, effort: c.effort ?? null, tier: f.tier ?? null, resumed: false, promptBytes: Buffer.byteLength(prompt), ...(fallback ? { fallback: true } : {}) } });
     let predicted: string[] | null = null; // the candidate map's files, for scoring the prediction against the actual diff
     const noteExit = (text: string, file: string) => {
       const x = parseExit(text), mb = git(['merge-base', 'HEAD', config.base], wt).out;
@@ -788,15 +792,16 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const until = c?.until;
       return until && Date.parse(until) > Date.now() ? `cooling down until ${until} after: ${c?.reason ?? 'unavailable'}` : null;
     };
-    const agent = async (role: Role, prompt: string, file: string, opts: { cfg?: RoleConfig } = {}): Promise<ClaudeResult & { cleaned?: boolean }> => {
-      const cfg = opts.cfg ?? roleCfg(role);
-      if (cfg.provider !== 'codex') return claude(role, prompt, file, { cfg });
+    const agent = async (role: Role, prompt: string, file: string, opts: { cfg?: RoleConfig; diagnose?: boolean } = {}): Promise<ClaudeResult & { cleaned?: boolean }> => {
+      const cfg = opts.cfg ?? roleCfg(role), diagnose = !!opts.diagnose;
+      if (cfg.provider !== 'codex') return claude(role, prompt, file, { cfg, diagnose });
       const fallback = async (why: string, cleaned = false) => {
         const fcfg: RoleConfig = { permissionMode: cfg.permissionMode, ...config.codex.fallback, provider: 'claude' };
         log(root, id, 'codex-fallback', `${why}; ${[fcfg.model, fcfg.effort].filter(Boolean).join(' ') || 'claude'} instead`);
         out(`codex ${id}: ${why.split('\n')[0]}; falling back to ${fcfg.model ?? 'claude'}`);
-        recordPrompt(role, prompt, null, fcfg, role === 'evaluator' ? 'review' : 'diagnose');
-        return { ...await claude(role, prompt, file, { cfg: fcfg }), cleaned };
+        if (diagnose) logDiagnosePrompt(prompt, fcfg, true); // the diagnosis prompt file is already saved; never the build's
+        else recordPrompt(role, prompt, null, fcfg, 'review');
+        return { ...await claude(role, prompt, file, { cfg: fcfg, diagnose }), cleaned };
       };
       const cooling = codexCooling();
       if (cooling) return fallback(`codex is ${cooling}`);
@@ -830,7 +835,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
       const used = cfg ?? roleCfg(role), tier = cfg ? null : tierApplies(config, profile, role, f);
       const run: RunRecord = { phase: phase ?? (role === 'evaluator' ? 'review' : role === 'resolver' ? 'resolve' : 'build'), tag, role, provider: used.provider ?? 'claude',
-        model: used.model ?? null, effort: used.effort ?? null, tier: tier ?? null, resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}), ...(context ? { context } : {}), ...(role === 'builder' && !cfg && ladder ? { rule: ladder.rule } : {}) };
+        model: used.model ?? null, effort: used.effort ?? null, tier: f.tier ?? null, ...(tier ? { routedByTier: true } : {}), resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}), ...(context ? { context } : {}), ...(role === 'builder' && !cfg && ladder ? { rule: ladder.rule } : {}) };
       log(root, id, 'prompt', promptFingerprint(role, used, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
         profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes, tier), undefined, { run });
     };
@@ -951,16 +956,21 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (!skipBuild) {
     const bn = notesFor('builder');
     const map = candidateMap(f, wt, git), pick = config.contextMaxBytes
-      ? pickAtoms(readAtoms(P.dir).atoms, [...map.files.map((m) => m.path), ...(f.touches ?? [])], config.contextMaxBytes, (a) => refsHold(a.refs, 'HEAD', wt, git))
+      ? pickAtoms(readAtoms(P.dir).atoms, [...map.files.map((m) => m.path), ...(f.touches ?? [])], config.contextMaxBytes, (a) => atomStale(a, 'HEAD', wt, git))
       : { included: [], deferred: [], bytes: 0 };
     const feedbackFile = f.lastFeedback && config.recapMaxBytes && Buffer.byteLength(f.lastFeedback) > config.recapMaxBytes ? join(runDir, `${tag}-previous-feedback.md`) : null;
     if (feedbackFile) writeFileSync(feedbackFile, f.lastFeedback!);
     predicted = map.files.map((m) => m.path);
-    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn), { map: renderContext(map, pick), feedbackFile });
-    recordPrompt('builder', bp, bn, undefined, 'build', false, { map: map.files.length, atoms: pick.included.map((a) => a.id), deferred: pick.deferred, atomBytes: pick.bytes, recap: !!feedbackFile });
+    // Lessons over budget: the most relevant ones, and the whole file beside the run for the builder to read.
+    const allLessons = readIf(resolve(root, config.lessonsFile)), lessonsFile = join(runDir, `${tag}-lessons.md`);
+    const sel = allLessons && config.lessonsMaxBytes && Buffer.byteLength(allLessons) > config.lessonsMaxBytes
+      ? (writeFileSync(lessonsFile, allLessons), selectLessons(allLessons, [...predicted, ...(f.touches ?? [])], [f.title, f.description, ...(f.acceptance ?? [])].join('\n'), config.lessonsMaxBytes, lessonsFile)) : null;
+    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn), { map: renderContext(map, pick), feedbackFile, ...(sel ? { lessons: sel.text } : {}) });
+    recordPrompt('builder', bp, bn, undefined, 'build', false, { map: map.files.length, atoms: pick.included.map((a) => a.id), deferred: pick.deferred, atomBytes: pick.bytes, recap: !!feedbackFile,
+      ...(sel ? { lessons: { included: sel.included, total: sel.total } } : {}) });
     const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
-    if (!b.ok) return fail(`builder failed: ${b.error}`);
+    if (!b.ok) return fail(`builder failed: ${b.error}`, 'builder');
     builderSession = b.sessionId ?? null; builderNotes = bn;
     }
     // Any commit beyond base counts as the builder's, including the merge commit that completes a base refresh.
@@ -988,7 +998,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       for (;;) {
         const cp = commitProblem();
         if (!cp) return true;
-        if (!cp.resumable || !builderSession || commitsLeft <= 0) { await fail(cp.text); return false; }
+        if (!cp.resumable || !builderSession || commitsLeft <= 0) { await fail(cp.text, 'commit'); return false; }
         commitsLeft--;
         if (await stopped()) return false;
         tag = runTag(readdirSync(runDir), attempt);
@@ -998,7 +1008,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         recordPrompt('builder', cfp, builderNotes, undefined, 'commit', true);
         const r = await claude('builder', cfp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
         if (await stopped()) return false;
-        if (!r.ok) { await fail(`builder failed: ${r.error}`); return false; }
+        if (!r.ok) { await fail(`builder failed: ${r.error}`, 'builder'); return false; }
         if (r.sessionId) builderSession = r.sessionId;
       }
     };
@@ -1012,7 +1022,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     let rc = skipBuild ? { note: '' } as { lost?: string; note: string; parents?: boolean } : await checkResolution(id, branch, wt);
     let keepsLeft = config.keepFixes;
     while (rc.lost) {
-      if (!builderSession || keepsLeft <= 0 || rc.parents) return fail(rc.lost); // lost parents: a counted failure, not a keep repair
+      if (!builderSession || keepsLeft <= 0 || rc.parents) return fail(rc.lost, 'keep'); // lost parents: a counted failure, not a keep repair
       keepsLeft--;
       if (await stopped()) return;
       const rec = loadState(root).features.find((x) => x.id === id)?.conflict;
@@ -1024,12 +1034,12 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       recordPrompt('builder', kp, builderNotes, undefined, 'fix-keep', true);
       const r = await claude('builder', kp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
       if (await stopped()) return;
-      if (!r.ok) return fail(`builder failed: ${r.error}`);
+      if (!r.ok) return fail(`builder failed: ${r.error}`, 'builder');
       if (r.sessionId) builderSession = r.sessionId;
       if (!await ensureCommitted()) return;
       const tip = git(['rev-parse', branch], wt).out;
       if (rec && [rec.ours, rec.theirs].some((c) => git(['merge-base', '--is-ancestor', c, tip], wt).code !== 0))
-        return fail(`the keep-lines fix rewrote the branch: it no longer contains the merge of ${config.base} it had to keep`);
+        return fail(`the keep-lines fix rewrote the branch: it no longer contains the merge of ${config.base} it had to keep`, 'keep');
       rc = await checkResolution(id, branch, wt);
     }
     const inline = !!config.resolver;
@@ -1048,7 +1058,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     while (unchanged()) {
       const rejection = f.lastFeedback || '(the previous evaluator rejection)';
       if (!builderSession || progressLeft <= 0)
-        return fail(`no progress: the branch still has the content of ${f.rejected!.sha.slice(0, 12)}, which the evaluator rejected, so the gate and the evaluator were not run again.\n\n${rejection}`);
+        return fail(`no progress: the branch still has the content of ${f.rejected!.sha.slice(0, 12)}, which the evaluator rejected, so the gate and the evaluator were not run again.\n\n${rejection}`, 'review');
       progressLeft--;
       if (await stopped()) return;
       tag = runTag(readdirSync(runDir), attempt);
@@ -1059,7 +1069,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       recordPrompt('builder', pp, builderNotes, undefined, 'fix-progress', true);
       const r = await claude('builder', pp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
       if (await stopped()) return;
-      if (!r.ok) return fail(`builder failed: ${r.error}`);
+      if (!r.ok) return fail(`builder failed: ${r.error}`, 'builder');
       if (r.sessionId) builderSession = r.sessionId;
       if (!await ensureCommitted()) return;
     }
@@ -1076,7 +1086,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       recordPrompt('builder', fp, builderNotes, undefined, 'fix-gate', true);
       const r = await claude('builder', fp, `${tag}-build.json`, { extra: ['--resume', builderSession!] });
       if (await stopped()) return 'done';
-      if (!r.ok) { await fail(`builder failed: ${r.error}`); return 'done'; }
+      if (!r.ok) { await fail(`builder failed: ${r.error}`, 'builder'); return 'done'; }
       if (r.sessionId) builderSession = r.sessionId;
       if (!await ensureCommitted()) return 'done';
       const edits = testEdits(wt, before, 'HEAD');
@@ -1089,9 +1099,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const mb = git(['merge-base', config.base, head], wt).out;
       const prompt = diagnosisPrompt(config, f, branch, failure, git(['diff', '--stat=160', `${mb}..${head}`], wt).out, testEdits(wt, mb, head), mockTasks);
       writeFileSync(join(runDir, `${tag}-diagnose.prompt.md`), prompt);
-      log(root, id, 'prompt', `diagnoser model=${dcfg.model || '-'} effort=${dcfg.effort || '-'}`, undefined, { run: { phase: 'diagnose', tag, role: 'diagnoser', provider: dcfg.provider ?? 'claude',
-        model: dcfg.model ?? null, effort: dcfg.effort ?? null, tier: null, resumed: false, promptBytes: Buffer.byteLength(prompt) } });
-      const r = await agent('builder', prompt, `${tag}-diagnose.json`, { cfg: dcfg });
+      logDiagnosePrompt(prompt, dcfg, false);
+      const r = await agent('builder', prompt, `${tag}-diagnose.json`, { cfg: dcfg, diagnose: true });
       if (await stopped()) return 'stopped';
       if (r.cleaned || git(['rev-parse', 'HEAD'], wt).out !== head || git(['status', '--porcelain'], wt).out) { // read-only, or nothing
         git(['reset', '-q', '--hard', head], wt); git(['clean', '-q', '-fd'], wt);
@@ -1110,6 +1119,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // a code or test diagnosis stays useful context for the next builder whatever failed after it.
     let diagSha = '', diagId = '', diagEnv = false;
     const diagFor = (sha: string, id: string) => (!diagEnv || (sha === diagSha && id !== '' && id === diagId) ? diagNote : '');
+    // A gate failure is the builder's own only when a diagnosis of this commit and failure said code or test; otherwise unknown.
+    const gateKind = (sha: string, id: string): FailureKind => (diagNote && !diagEnv && sha === diagSha && id !== '' && id === diagId ? 'gate-own' : 'gate');
     const afterGateFailure = async (failure: string, sha: string): Promise<'retry' | 'fail' | 'done' | 'env'> => {
       if (builderSession && fixesLeft > 0) { fixesLeft--; return resumeFix(failure, null); }
       if (!config.diagnoser || diagnosed) return 'fail';
@@ -1162,7 +1173,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
           const same = envRerun.sha === sha && envRerun.id !== '' && envRerun.id === failureId(test.tail);
           envRerun = null;
           if (same) return envStop(failure, sha);
-          return fail(failure + diagFor(sha, failureId(test.tail)));
+          return fail(failure + diagFor(sha, failureId(test.tail)), gateKind(sha, failureId(test.tail)));
         }
         const next = await afterGateFailure(failure, sha);
         if (next === 'env') {
@@ -1173,7 +1184,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         }
         if (next === 'retry') continue;
         if (next === 'done') return;
-        return fail(failure + diagFor(sha, failureId(failure)));
+        return fail(failure + diagFor(sha, failureId(failure)), gateKind(sha, failureId(failure)));
       }
 
       envRerun = null; diagNote = ''; diagSha = ''; diagId = ''; // a passing gate resolves an earlier diagnosis: it never labels a later failure
@@ -1237,7 +1248,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         recordPrompt('builder', rp, builderNotes, undefined, 'fix-review', true);
         const r = await claude('builder', rp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
         if (await stopped()) return;
-        if (!r.ok) return fail(`builder failed: ${r.error}`);
+        if (!r.ok) return fail(`builder failed: ${r.error}`, 'builder');
         if (r.sessionId) builderSession = r.sessionId;
         if (!await ensureCommitted()) return;
         const edits2 = testEdits(wt, sha, 'HEAD');
@@ -1249,7 +1260,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         if (lesson) await serial(() => compound(id, lesson));
         // A valid verdict's rejected content: the next build must change it (the no-progress guard).
         if (e.ok && !v.error && !v.diagnostic) await edit(id, (x) => { x.rejected = { sha, tree: treeOf(sha), inputs: inputsAtEval }; });
-        return fail(feedbackFromVerdict(v));
+        return fail(feedbackFromVerdict(v), e.ok && !v.error && !v.diagnostic ? 'review' : 'evaluator');
       }
       if (config.merge === 'manual') {
         if (lesson) await serial(() => compound(id, lesson));
@@ -1354,11 +1365,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     };
     if (n >= config.maxRefreshes && !beforeTest) return tooMany();
     const st = git(['status', '--porcelain'], wt);
-    if (st.code || st.out) return fail(`merge conflict with ${base}; the foreman could not merge ${base} into your branch because the worktree is not clean`);
+    if (st.code || st.out) return fail(`merge conflict with ${base}; the foreman could not merge ${base} into your branch because the worktree is not clean`, 'merge');
     const both = config.conflictBrief || !!config.resolver, ours = git(['rev-parse', 'HEAD'], wt).out;
     const m = git([...(both ? ['-c', 'merge.conflictStyle=diff3'] : []), 'merge', '--no-edit', '-m', `${NAME}: merge ${base} into ${branch}`, baseSha], wt);
     const conflicted = m.code !== 0 && git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0;
-    if (m.code && !conflicted) return fail(`merge conflict with ${base}; merging ${base} into your branch did not start: ${m.err}`);
+    if (m.code && !conflicted) return fail(`merge conflict with ${base}; merging ${base} into your branch did not start: ${m.err}`, 'merge');
     if (beforeTest && !conflicted) { log(root, id, 'refreshed', `before ${beforeBuild ? 'build' : 'test'}, conflict-free`); out(`refresh ${id}: merged ${base} into ${branch} before ${beforeBuild ? 'build' : 'test'}`); return 'clean'; }
     if (n >= config.maxRefreshes) { git(['merge', '--abort'], wt); return tooMany(); }
     const list = git(['diff', '--name-only', '--diff-filter=U'], wt).out.split('\n').filter(Boolean), files = list.join(', ');
@@ -1409,7 +1420,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       out(`ready ${id}: ${why}`);
       return set(id, { status: 'ready', sha, parked: true });
     }
-    if (git(['rev-parse', branch], root).out !== sha) return fail(`${branch} moved during evaluation; only the evaluated commit is merged`);
+    if (git(['rev-parse', branch], root).out !== sha) return fail(`${branch} moved during evaluation; only the evaluated commit is merged`, 'merge');
     // A parked merge may have landed before a crash (or a verified hand merge).
     // It needs status/lesson recovery, not another gate against its own merge commit.
     if (git(['merge-base', '--is-ancestor', sha, baseSha], root).code === 0) {

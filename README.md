@@ -99,10 +99,11 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   command, base, mock allowance and evaluator instructions — resume the builder's session that many times per pass;
   still unchanged, a counted failure without running the gate or the evaluator again).
   `contextMaxBytes` (1200; verified context pointers a fresh build may carry, chosen by the files its candidate map predicts;
-  0 = none) and `recapMaxBytes` (4000; longer previous-attempt feedback reaches a fresh try as one line per failure plus
+  0 = none), `lessonsMaxBytes` (6000; a longer lessons file reaches a fresh build as its most relevant lessons plus the
+  full file) and `recapMaxBytes` (4000; longer previous-attempt feedback reaches a fresh try as one line per failure plus
   the full text in a file it can read). A profile may set `ladder`, its builder's approved rungs weakest first
-  (`[{"model": "sonnet", "effort": "medium"}, …]`): each counted build or review failure in a cycle moves a fresh try
-  one rung up from where the profile and tier put it, never down. Every builder prompt asks it
+  (`[{"model": "sonnet", "effort": "medium"}, …]`): each counted review rejection or diagnosed own-code gate failure in a cycle
+  moves a fresh try one rung up from where the profile and tier put it, never down. Every builder prompt asks it
   to wait for every command acceptance needs, and commit the evidence, before its final reply.
   A diagnoser `environment` fault reruns the gate once on the same build; if it fails the same way the pass stops
   without spending an attempt and the build is revalidated after `setupRetryDelaysSec` (one more episode after the

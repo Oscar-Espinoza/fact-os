@@ -88,6 +88,7 @@ export interface Atom {
   id: string; text: string; refs: AtomRef[]; scope: string[]; role: 'builder';
   status: AtomStatus; source: { feature: string; review: string; ts: string };
   verifiedAt?: string; checkedAt?: string; why?: string; // why: the last verification's or quarantine's reason
+  prints?: string[]; verifiedRev?: string; // per ref, the fingerprint of the code it was verified against (refPrints), and where
 }
 export interface AtomStore { version: 1; atoms: Atom[] }
 export const ATOM_MAX = 300;          // characters of one atom's text
@@ -116,12 +117,56 @@ export function parsePointer(v: unknown): Pointer | null {
   return text && text.length <= ATOM_MAX && refs.length && scope.length ? { text, refs, scope } : null;
 }
 
-// Every ref exists at `rev`, and each named symbol appears in its file there.
+// Every ref is a regular file tracked at `rev` (never a symlink or submodule, which could lead outside the repository), and
+// each named symbol is defined there (a declaration or a definition, not a mention in a comment).
 export function refsHold(refs: AtomRef[], rev: string, cwd: string, git: Git): string | null {
   for (const r of refs) {
-    if (git(['cat-file', '-e', `${rev}:${r.path}`], cwd).code !== 0) return `${r.path} does not exist at ${rev.slice(0, 12)}`;
-    if (r.symbol && git(['grep', '-q', '-F', '-e', r.symbol, rev, '--', r.path], cwd).code !== 0) return `${r.symbol} is not in ${r.path} at ${rev.slice(0, 12)}`;
+    const e = git(['ls-tree', rev, '--', r.path], cwd).out.split('\n')[0] ?? '';
+    if (!e) return `${r.path} does not exist at ${rev.slice(0, 12)}`;
+    if (!/^100(644|755) blob /.test(e)) return `${r.path} is not a regular file at ${rev.slice(0, 12)}`;
+    if (r.symbol && symbolSection(git(['show', `${rev}:${r.path}`], cwd).out, r.symbol) == null) return `${r.symbol} is not defined in ${r.path} at ${rev.slice(0, 12)}`;
   }
+  return null;
+}
+
+// The lines that define `symbol`: its declaration (or, failing that, a definition like `name(`, `name:` or `name =` outside
+// comments) through the end of its block. Null when the file does not define it.
+export function symbolSection(src: string, symbol: string): string | null {
+  const lines = src.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
+  const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${sym}\\b`);
+  const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly )*${sym}\\s*(\\(|:|=|<)`);
+  let at = lines.findIndex((l) => decl.test(l));
+  if (at < 0) at = lines.findIndex((l) => !/^\s*(\/\/|\*|\/\*)/.test(l) && def.test(l));
+  if (at < 0) return null;
+  const indent = /^\s*/.exec(lines[at]!)![0].length;
+  let end = at;
+  for (let i = at + 1; i < Math.min(lines.length, at + 300); i++) {
+    const l = lines[i]!;
+    if (!l.trim()) continue;
+    const ind = /^\s*/.exec(l)![0].length;
+    if (ind < indent || (ind === indent && !/^\s*[)}\]]/.test(l))) break;
+    end = i;
+  }
+  return lines.slice(at, end + 1).join('\n');
+}
+
+// What each ref's verification covered: the defining section of a symbol, or the whole file. A change there means the advice
+// must be checked again; an unrelated change elsewhere in the file does not.
+export function refPrints(refs: AtomRef[], rev: string, cwd: string, git: Git): string[] {
+  return refs.map((r) => {
+    const src = git(['show', `${rev}:${r.path}`], cwd).out, part = r.symbol ? symbolSection(src, r.symbol) ?? '' : src;
+    return createHash('sha256').update(part).digest('hex').slice(0, 16);
+  });
+}
+
+// Why a verified atom may not be used against `rev` now (null: usable): its refs no longer hold, its code changed since it was
+// verified, or its verification is older than ATOM_REVALIDATE_DAYS.
+export function atomStale(a: Atom, rev: string, cwd: string, git: Git, nowMs = Date.now()): string | null {
+  const why = refsHold(a.refs, rev, cwd, git);
+  if (why) return why;
+  if (!a.prints || a.prints.length !== a.refs.length) return 'it has no verified fingerprint';
+  if (refPrints(a.refs, rev, cwd, git).some((p, i) => p !== a.prints![i])) return 'its code changed since it was verified';
+  if (!a.verifiedAt || nowMs - Date.parse(a.verifiedAt) > ATOM_REVALIDATE_DAYS * 864e5) return `its verification is over ${ATOM_REVALIDATE_DAYS} days old`;
   return null;
 }
 
@@ -157,19 +202,61 @@ export function renderContext(map: CandidateMap, pick: AtomPick): string {
   return lines.length ? `\n## Map\n\n${lines.join('\n')}\n` : '';
 }
 
+// ---- lessons ----
+
+// The lessons file, shortened for one build when it is over `budget` bytes: its bullets ranked by relevance (a path or prefix the
+// bullet names that a candidate file falls under, then words it shares with the spec), then in the file's own order, whole
+// bullets only, under their section headings, with the count left out and where the full file is. Under budget: unchanged.
+export function selectLessons(text: string, candidates: string[], spec: string, budget: number, fullFile: string | null): { text: string; included: number; total: number } {
+  const lines = text.split('\n'), bullets: { head: string; text: string; i: number; score: number }[] = [];
+  let head = '';
+  for (const l of lines) {
+    if (/^#{2,4} /.test(l)) { head = l; continue; }
+    if (/^- /.test(l)) bullets.push({ head, text: l, i: bullets.length, score: 0 });
+    else if (bullets.length && /^\s+\S/.test(l) && bullets.at(-1)!.head === head) bullets.at(-1)!.text += '\n' + l;
+  }
+  if (Buffer.byteLength(text) <= budget || !bullets.length) return { text, included: bullets.length, total: bullets.length };
+  const words = new Set((spec.toLowerCase().match(/[a-z][a-z-]{4,}/g) ?? []).filter((w) => !STOP.has(w)));
+  for (const b of bullets) {
+    const refs = [...b.text.matchAll(/`([\w@.-]+\/[\w@./<>*-]*)`/g)].map((m) => m[1]!.replace(/<.*$|\*.*$/, ''));
+    b.score = 3 * refs.filter((r) => r.length >= 3 && candidates.some((c) => c.startsWith(r))).length + new Set((b.text.toLowerCase().match(/[a-z][a-z-]{4,}/g) ?? []).filter((w) => words.has(w))).size * 0.2;
+  }
+  const footer = (n: number) => `\n(${n} more lesson${n === 1 ? '' : 's'} not shown here${fullFile ? `; all ${bullets.length} are in ${fullFile}` : ''}.)`;
+  const picked = new Set<number>();
+  let used = Buffer.byteLength(footer(bullets.length));
+  for (const b of [...bullets].sort((x, y) => y.score - x.score || x.i - y.i)) {
+    const size = Buffer.byteLength(b.text) + 1 + (picked.size && [...picked].some((i) => bullets[i]!.head === b.head) ? 0 : Buffer.byteLength(b.head) + 2);
+    if (used + size > budget) continue;
+    picked.add(b.i); used += size;
+  }
+  const out: string[] = [];
+  let last: string | null = null;
+  for (const b of bullets) if (picked.has(b.i)) { if (b.head !== last) { if (b.head) out.push('', b.head); last = b.head; } out.push(b.text); }
+  return { text: out.join('\n').trim() + footer(bullets.length - picked.size), included: picked.size, total: bullets.length };
+}
+
 // ---- recap ----
 
-// A counted failure's feedback for the next fresh try. Short feedback passes unchanged. Longer feedback keeps every line that
-// names a failure (FAILED / BLOCKING / CHEATING / BASE DEFECT / Evaluator / test command) as one bounded line, in order, and points
-// to the full text; nothing that caused the rejection is cut, only its detail beyond `lineMax` characters.
-export function recap(feedback: string, fullFile: string | null, maxBytes = 4000, lineMax = 240): string {
+// A counted failure's feedback for the next fresh try. Short feedback passes unchanged. Longer feedback keeps the lines that
+// name a failure (FAILED / BLOCKING / CHEATING / BASE DEFECT / Evaluator / test command …), in order, each shortened to fit, within
+// `maxBytes` (UTF-8, footer included) and `maxLines`; failures that still do not fit are counted, never silently dropped, and
+// the full text is one file away.
+export function recap(feedback: string, fullFile: string | null, maxBytes = 4000, maxLines = 15): string {
   if (Buffer.byteLength(feedback) <= maxBytes) return feedback;
-  const KEY = /^(FAILED |BLOCKING:|CHEATING:|BASE DEFECT|Evaluator:|test command `|The merge resolution|builder failed|Feedback)/;
-  const lines = feedback.split('\n'), keys = lines.filter((l) => KEY.test(l));
-  const kept = (keys.length ? keys : lines.filter((l) => l.trim()).slice(0, 12)).map((l) => (l.length > lineMax ? `${l.slice(0, lineMax)}… [${l.length - lineMax} more characters]` : l));
-  const omitted = Buffer.byteLength(feedback) - Buffer.byteLength(kept.join('\n'));
-  return [...kept, '', fullFile ? `The full feedback (${omitted} more characters of detail) is in ${fullFile}; read it before you change anything.`
-    : `(${omitted} characters of detail omitted.)`].join('\n');
+  const KEY = /^(FAILED |BLOCKING:|CHEATING:|BASE DEFECT|Evaluator:|test command `|The merge resolution|builder failed|no progress|merge conflict)/;
+  const lines = feedback.split('\n'), keys = lines.filter((l) => KEY.test(l)), pick = keys.length ? keys : lines.filter((l) => l.trim()).slice(0, maxLines);
+  const total = Buffer.byteLength(feedback);
+  const footer = (more: number) => [more ? `… and ${more} more failure line${more === 1 ? '' : 's'}, listed in full in the file below.` : '',
+    fullFile ? `The full feedback (${total} bytes) is in ${fullFile}; read it before you change anything.` : `(${total} bytes of feedback, shortened here.)`].filter(Boolean).join('\n');
+  const clipBytes = (l: string, n: number) => { if (Buffer.byteLength(l) <= n) return l; let t = l; while (Buffer.byteLength(t) > Math.max(0, n - 4)) t = t.slice(0, Math.floor(t.length * 0.9)); return t + ' […]'; };
+  // As many failure lines as the line cap allows, each given an equal share of the bytes left after the footer.
+  for (let n = Math.min(pick.length, maxLines - 2); n >= 1; n--) {
+    const more = pick.length - n, foot = footer(more), share = Math.floor((maxBytes - Buffer.byteLength(foot) - n) / n);
+    if (share < 60) continue;
+    const out = [...pick.slice(0, n).map((l) => clipBytes(l, share)), foot].join('\n');
+    if (Buffer.byteLength(out) <= maxBytes) return out;
+  }
+  return clipBytes(footer(pick.length), maxBytes);
 }
 
 export const readIfExists = (p: string): string | null => (existsSync(p) ? readFileSync(p, 'utf8') : null);

@@ -18,15 +18,15 @@ export interface Episode {
   firstReview: Review; finalReview: Review; repairs: number; kinds: IssueKind[]; cost: number | null; merged: boolean;
 }
 
-const tagKey = (t: string) => t.split('.').map(Number) as number[];
-const tagCmp = (a: string, b: string) => { const x = tagKey(a), y = tagKey(b); return (x[0]! - y[0]!) || ((x[1] ?? 1) - (y[1] ?? 1)); };
 const review = (r: RunFile | undefined): Review => (!r ? 'none' : r.invalid || !r.verdict ? 'invalid' : r.verdict.pass ? 'accepted' : 'rejected');
 const FP = /^builder model=(\S+) effort=(\S+)/;
 
 // One feature's episodes. A fresh build is a builder prompt event with run.phase "build", or (older logs) the first builder
-// prompt after a launch; its run files are matched by tag (recorded) or by the prompt file written at that moment.
-export function episodes(feature: string, events: LogEvent[], files: RunFile[], promptMtimes: { tag: string; mtime: number }[]): Episode[] {
-  const out: (Episode & { tag: string | null; at: number })[] = [];
+// prompt after a launch. Its run files are the ones written from its prompt until the next fresh build's prompt, in time order:
+// attempt tags restart after a reset and a held build can be reviewed under a later tag, so tag order is not a timeline. A
+// review of a reused build (no fresh prompt) belongs to the episode that built it, the latest one before it.
+export function episodes(feature: string, events: LogEvent[], files: RunFile[]): Episode[] {
+  const out: (Episode & { at: number })[] = [];
   let afterLaunch = false;
   for (const e of events) {
     if (e.feature !== feature) continue;
@@ -37,16 +37,14 @@ export function episodes(feature: string, events: LogEvent[], files: RunFile[], 
     const fresh = r ? r.role === 'builder' && r.phase === 'build' : !!fp && afterLaunch;
     if (r?.role === 'builder' || fp) afterLaunch = false;
     if (!fresh) continue;
-    const at = Date.parse(e.ts), byTime = promptMtimes.filter((p) => Math.abs(p.mtime - at) < 15000).sort((a, b) => Math.abs(a.mtime - at) - Math.abs(b.mtime - at))[0];
-    out.push({ feature, ts: e.ts, at, tag: r?.tag ?? byTime?.tag ?? null, model: r ? r.model ?? '-' : fp![1]!, effort: r ? r.effort ?? '-' : fp![2]!, tier: r?.tier ?? 'unknown',
+    // The tier recorded at launch: the run record's, or an older fingerprint's `tier=`; never today's feature tier.
+    const tier = r ? r.tier ?? 'unknown' : /\btier=(\w+)/.exec(e.detail || '')?.[1] ?? 'unknown';
+    out.push({ feature, ts: e.ts, at: Date.parse(e.ts), model: r ? r.model ?? '-' : fp![1]!, effort: r ? r.effort ?? '-' : fp![2]!, tier,
       escalated: !!r?.rule?.includes('→'), firstReview: 'none', finalReview: 'none', repairs: 0, kinds: [], cost: null, merged: false });
   }
-  // The run files between one episode's tag and the next episode's are that episode's: its builds (the first and its repairs)
-  // and its reviews, in tag order.
-  const tagged = out.filter((x) => x.tag).sort((a, b) => tagCmp(a.tag!, b.tag!));
-  for (let i = 0; i < tagged.length; i++) {
-    const x = tagged[i]!, next = tagged[i + 1]?.tag;
-    const mine = files.filter((f) => tagCmp(f.tag, x.tag!) >= 0 && (!next || tagCmp(f.tag, next) < 0)).sort((a, b) => tagCmp(a.tag, b.tag));
+  for (let i = 0; i < out.length; i++) {
+    const x = out[i]!, next = out[i + 1]?.at ?? Infinity;
+    const mine = files.filter((f) => f.mtime >= x.at - 2000 && f.mtime < next - 2000).sort((a, b) => a.mtime - b.mtime);
     const evals = mine.filter((f) => f.role === 'eval'), builds = mine.filter((f) => f.role === 'build');
     x.firstReview = review(evals[0]); x.finalReview = review(evals.at(-1)); x.repairs = Math.max(0, builds.length - 1);
     const v = evals[0]?.verdict;
@@ -54,7 +52,7 @@ export function episodes(feature: string, events: LogEvent[], files: RunFile[], 
     const costs = builds.map((b) => b.cost);
     x.cost = costs.length && costs.every((c) => c != null) ? Math.round(costs.reduce((s, c) => s + c!, 0) * 100) / 100 : null;
   }
-  return out.map(({ tag: _t, at: _a, ...e }) => e);
+  return out.map(({ at: _a, ...e }) => e);
 }
 
 export interface Cell {
@@ -79,13 +77,15 @@ export function scorecard(eps: Episode[], at = new Date().toISOString()): Scorec
       merged: es.filter((e) => e.merged).length, repairs: es.reduce((n, e) => n + e.repairs, 0), escalated: es.filter((e) => e.escalated).length,
       kinds: [...kinds].map(([kind, n]) => ({ kind, n })).sort((a, b) => b.n - a.n), medianCost: median(es.flatMap((e) => (e.cost == null ? [] : [e.cost]))), unpriced: es.filter((e) => e.cost == null).length };
   }).sort((a, b) => a.tier.localeCompare(b.tier) || b.episodes - a.episodes);
-  // Comparable: two or more judged cells sharing a recorded tier.
+  // Two or more judged cells sharing a recorded tier.
   const byTier = new Map<string, Cell[]>();
   for (const c of cells) if (c.judged && c.tier !== 'unknown') (byTier.get(c.tier) ?? byTier.set(c.tier, []).get(c.tier)!).push(c);
   const comparable = [...byTier].filter(([, cs]) => cs.length >= 2).map(([t]) => t);
   const most = Math.max(0, ...cells.filter((c) => c.tier !== 'unknown').map((c) => c.features));
-  const verdict = comparable.length ? `Comparable cells exist for ${comparable.join(', ')}; read them within each tier.`
-    : `Insufficient comparable evidence: no recorded tier has two models with ${JUDGE_MIN}+ features each (largest tier-recorded cell: ${most} feature${most === 1 ? '' : 's'}). Routing stays as configured.`;
+  // Same tier and enough features make rows worth reading side by side; they do not make them comparable (reviewer, prompts,
+  // period and attempt position are not controlled), so this never claims a comparison, and routing never changes from it.
+  const verdict = comparable.length ? `Same-tier rows with ${JUDGE_MIN}+ features each: ${comparable.join(', ')}. Read them side by side as description only; reviewers, prompts, period and try number differ, so they are not a fair comparison. Routing stays as configured.`
+    : `Insufficient comparable evidence: no recorded tier has two rows with ${JUDGE_MIN}+ features each (largest tier-recorded row: ${most} feature${most === 1 ? '' : 's'}). Routing stays as configured.`;
   return { at, since: eps.length ? eps.map((e) => e.ts).sort()[0]! : null, episodes: eps.length, features: new Set(eps.map((e) => e.feature)).size,
     tierRecorded: eps.filter((e) => e.tier !== 'unknown').length, cells, verdict };
 }
@@ -96,18 +96,17 @@ export function loadEpisodes(runsDir: string, events: LogEvent[], sinceMs = 0): 
   return ids.flatMap((id) => {
     let names: string[] = [];
     try { names = readdirSync(join(runsDir, id)); } catch { return []; }
-    const files: RunFile[] = [], prompts: { tag: string; mtime: number }[] = [];
+    const files: RunFile[] = [];
     for (const n of names) {
-      const m = /^(\d+(?:\.\d+)?)-(build|eval)\.(json|prompt\.md)$/.exec(n);
+      const m = /^(\d+(?:\.\d+)?)-(build|eval)\.json$/.exec(n);
       if (!m) continue;
       const file = join(runsDir, id, n), mtime = statSync(file).mtimeMs;
-      if (m[3] === 'prompt.md') { if (m[2] === 'build') prompts.push({ tag: m[1]!, mtime }); continue; }
       try {
         const raw = readFileSync(file, 'utf8'), p = parseClaudeOutput(raw), unpriced = /"cost_status":\s*"unpriced"/.test(raw);
         const verdict = m[2] === 'eval' && p.ok ? parseVerdict(p.text) : null;
         files.push({ tag: m[1]!, role: m[2] as 'build' | 'eval', mtime, cost: unpriced || !p.ok && !p.cost ? null : p.cost, verdict, invalid: m[2] === 'eval' && (!verdict || !!verdict.error) });
       } catch {}
     }
-    return episodes(id, events, files, prompts).filter((e) => Date.parse(e.ts) >= sinceMs);
+    return episodes(id, events, files).filter((e) => Date.parse(e.ts) >= sinceMs);
   });
 }

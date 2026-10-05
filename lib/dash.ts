@@ -272,6 +272,20 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[], events: 
   } catch { return null; }
 }
 
+// Who is working on an in-flight feature right now, from its stage and this launch's invocations only: the builder or resolver
+// while building, the reviewer since the latest evaluation started, a diagnoser while its diagnosis is pending. During the
+// checks themselves no agent is working, so nothing is named.
+export function currentWorker(f: Pick<Feature, 'id' | 'status'>, events: LogEvent[]): string | null {
+  const mine = events.filter((e) => e.feature === f.id), launch = mine.map((e) => e.event).lastIndexOf('launch');
+  const since = launch < 0 ? [] : mine.slice(launch + 1);
+  const label = (e: LogEvent | undefined) => { const w = e && whoOf(e); return w ? `${w.role === 'evaluator' ? 'Reviewing' : w.role === 'resolver' ? 'Combining' : w.role === 'diagnoser' ? 'Diagnosing' : 'Building'}: ${w.who}` : null; };
+  const prompts = (xs: LogEvent[], roles: string[]) => xs.filter((e) => e.event === 'prompt' && roles.includes(whoOf(e)?.role ?? ''));
+  if (f.status === 'building') return label(prompts(since, ['builder', 'resolver']).at(-1));
+  if (f.status === 'evaluating') { const ev = since.map((e) => e.event).lastIndexOf('evaluating'); return ev < 0 ? null : label(prompts(since.slice(ev + 1), ['evaluator']).at(-1)); }
+  const last = since.at(-1);
+  return f.status === 'testing' && last?.event === 'prompt' && whoOf(last)?.role === 'diagnoser' ? label(last) : null;
+}
+
 // Learning, as a person reads it: verified pointers added or retired, notes rewritten, a fresh try escalated by the ladder.
 function learningOf(dir: string, events: LogEvent[]): ObserverSummary['learning'] {
   const atoms: Record<string, number> = {};
@@ -298,10 +312,7 @@ function projectState(dir: string): ProjectState {
     return { ...base, merge: config.merge, branchPrefix: config.branchPrefix, features, tasks, ready: a.ready, waiting: a.waiting,
       activity: tailLines(paths(dir).activity, 200).map(tryJson).filter(Boolean) as ActivityEvent[], events: events.slice(-80),
       transitions: transitions(events, Object.fromEntries(features.map((f) => [f.id, f.shortTitle || f.title])), config.maxAttempts, config.base, 12),
-      running: Object.fromEntries(features.filter((f) => IN_FLIGHT.includes(f.status)).flatMap((f) => {
-        const e = [...events].reverse().find((x) => x.feature === f.id && x.event === 'prompt'), w = e && whoOf(e);
-        return w ? [[f.id, `${w.role === 'evaluator' ? 'Reviewed by' : w.role === 'resolver' ? 'Combined by' : w.role === 'diagnoser' ? 'Diagnosed by' : 'Built by'} ${w.who}`]] : [];
-      })),
+      running: Object.fromEntries(features.filter((f) => IN_FLIGHT.includes(f.status)).flatMap((f) => { const w = currentWorker(f, events); return w ? [[f.id, w]] : []; })),
       queueNotes: Object.fromEntries(features.flatMap((f) => {
         const unmet = (f.deps || []).map((d) => features.find((x) => x.id === d)).filter((x): x is Feature => !!x && x.status !== 'merged').map((x) => ({ title: x.shortTitle || x.title }));
         const task = tasks.find((t) => t.status === 'open' && !t.mockable && (t.unblocks || []).includes(f.id));

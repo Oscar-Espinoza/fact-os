@@ -438,15 +438,25 @@ features, risky tiers backfilled from today: no model ranking yet).
 - Candidate map (no model): declared touches, files the spec names, files matching its identifiers or its title's word
   pairs, and what the top files export; at most eight lines, a prediction, never a scope.
 - Context atoms: a prompt review may propose a one-line pointer with refs and a scope; deterministic checks keep it only
-  when its refs exist on base; the curator verifies it against the code; the observer quarantines it when its code changes
-  and revalidates it after 30 days. A fresh build gets only atoms whose scope covers its candidate files, whole, within
-  `contextMaxBytes`; included and deferred ids are recorded.
-- Recap: feedback over `recapMaxBytes` keeps every failure line (bounded) and points to the full text, readable by the
-  builder (`--add-dir` on its run directory; edits there stay denied).
-- Retry ladder (`profiles.<p>.ladder`): counted build/review failures in a cycle move a fresh try up approved rungs;
-  environment, base-defect, evaluator-run and merge stops never do. Automatic changes to routing defaults are deferred
+  when each ref is a regular tracked file (no symlink or submodule) and each symbol is defined there; the curator verifies
+  it against one pinned commit, and the atom stores a fingerprint of each symbol's definition (or the file). At launch and
+  in the observer an atom is unusable when a ref is gone (quarantined), its fingerprinted code changed or its verification
+  is over 30 days old (back to the curator). A fresh build gets only usable atoms whose scope covers its candidate files,
+  whole, within `contextMaxBytes`; included and deferred ids are recorded.
+- Lessons: a lessons file over `lessonsMaxBytes` (6000) reaches a fresh build as its most relevant whole bullets (paths it
+  names under the candidate files, then words shared with the spec, then file order) under their headings, with the count
+  left out and the full file saved beside the run for the builder to read. Per-model notes keep their own cap.
+- Recap: feedback over `recapMaxBytes` becomes at most 15 lines within that many bytes: failure lines in order, each
+  shortened to fit, the ones that do not fit counted, and the full text in a file the builder can read (`--add-dir` on its
+  run directory; edits there stay denied by the state-directory rule).
+- Retry ladder (`profiles.<p>.ladder`, validated: known efforts, never weaker than the rung before on the same model or a
+  lower known model): failures carry their provenance (`failure` on the event); only a valid review rejection or a gate
+  failure a diagnosis attributed to the feature's code moves a fresh try up a rung. Older events count only when their
+  first line is a validated rejection. Automatic changes to routing defaults are deferred
   until a prospective comparison.
 - Scorecard (observer, last 14 days): build episodes by builder model, effort and recorded tier, with first-review and
   final acceptance, merges, repairs, issue kinds and median cost as fractions with feature counts; "too few to judge"
-  below eight features; it says when no comparison is fair. The observer's Models section also lists what the factory
+  below eight features. Run files belong to the episode whose prompt they follow in time (tags restart after resets); the
+  tier is the one recorded at launch (older fingerprints' `tier=`), never backfilled. Same-tier rows are described, never
+  called a fair comparison. Active cards name an agent only while its invocation in the current launch and stage runs. The observer's Models section also lists what the factory
   learned (pointers, notes, escalations).

@@ -175,3 +175,12 @@ test('who ran each step: the run record names the model and effort; older finger
   assert.deepEqual(s.current!.steps.map((x) => x.who ?? null), ['Built by Sonnet · high', null, 'Reviewed by GPT-6.1 Sol · xhigh', 'Built by Opus · high (fallback, same session)', null, null, null]);
   assert.equal(modelName('claude-opus-5-5'), 'Opus 5.5'); assert.equal(modelName(null), 'an unrecorded model');
 });
+
+test('a fallback diagnosis names the model that actually diagnosed', () => {
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const d = (model: string, o = {}) => ({ run: { phase: 'diagnose' as const, tag: '1', role: 'diagnoser', provider: 'claude', model, effort: 'high', tier: null, resumed: false, promptBytes: 1, ...o } });
+  const events = [ev('launch'), ev('testing', 'sha1'), ev('prompt', 'diagnoser model=gpt-6.1-sol effort=high', d('gpt-6.1-sol', { provider: 'codex' })), ev('codex-fallback', 'codex unavailable; opus high instead'),
+    ev('prompt', 'diagnoser model=opus effort=high', d('opus', { fallback: true })), ev('diagnosis', 'code: the test asserts the old shape')];
+  const s = buildStory({ feature: F({ status: 'testing' }), events, runs: [], maxAttempts: 3, base: 'main' });
+  assert.equal(s.current!.steps.find((x) => x.kind === 'diagnose')!.who, 'Diagnosed by Opus · high (fallback)');
+});
