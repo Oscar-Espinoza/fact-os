@@ -363,7 +363,7 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
         if (h.cause !== 'base-defect') needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: state.why ?? '' } : { what: h.cause === 'needs-split' ? 'Split or trim the spec' : 'Clarify the conflicting requirement', why: state.why ?? '' };
         break;
       }
-      if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) { state = { word: 'Waiting to retry', tone: 'hold', why: 'A diagnosed test-environment fault; no retry used.', next: `Retries the same build at ${new Date(f.envRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` }; break; }
+      if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) { state = { word: 'Waiting to retry', tone: 'hold', why: f.evalFailures ? 'The evaluator gave no valid verdict; no retry used.' : 'A diagnosed test-environment fault; no retry used.', next: `Retries the same build at ${new Date(f.envRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` }; break; }
       if (f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now()) { state = { word: 'Waiting to retry', tone: 'hold', why: 'Workspace setup failed; no retry used.', next: `Retries at ${new Date(f.setupRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` }; break; }
       if (blocking.length) { state = { word: 'Needs you', tone: 'hold', why: `Waiting on: ${blocking[0]!.title}`, next: null }; needsYou = { what: blocking[0]!.title, why: 'This feature cannot start until it is done.' }; break; }
       if (inp.unmetDeps?.length) { state = { word: 'Waiting', tone: 'idle', why: `Waiting on ${inp.unmetDeps[0]!.title}${inp.unmetDeps.length > 1 ? ` and ${inp.unmetDeps.length - 1} more` : ''} to merge first.`, next: null }; break; }
@@ -424,7 +424,7 @@ export function queueNote(f: Feature, maxAttempts: number, base: string, unmetDe
   if (f.status !== 'todo') return null;
   if (f.specFix?.status === 'proposed') return 'Waiting for you: a proposed spec fix.';
   if (f.planningHold) return f.planningHold.cause === 'base-defect' ? `On hold: the same failure happens on ${base}.` : f.planningHold.cause === 'needs-split' ? 'On hold: the spec probably needs splitting.' : 'On hold: the spec needs a clarification.';
-  if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) return 'Waiting to retry after a test-environment fault (no retry used).';
+  if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) return f.evalFailures ? 'Waiting to re-check after the evaluator gave no valid verdict (no retry used).' : 'Waiting to retry after a test-environment fault (no retry used).';
   if (f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now()) return 'Waiting to retry after a setup failure (no retry used).';
   if (blockingTask) return `Needs you first: ${blockingTask}.`;
   if (unmetDeps.length) return `Waiting on ${unmetDeps[0]!.title}${unmetDeps.length > 1 ? ` and ${unmetDeps.length - 1} more` : ''} to merge first.`;

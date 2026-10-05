@@ -182,7 +182,7 @@ export function applyProblem(root: string, config: Config, f: Feature, id: strin
   return null;
 }
 
-const OBSOLETE = ['rejected', 'envBuild', 'envBuildInputs', 'envFailures', 'envRetryAt', 'setupFailures', 'setupRetryAt', 'stop', 'sha'] as const;
+const OBSOLETE = ['rejected', 'envBuild', 'envBuildInputs', 'envFailures', 'envRetryAt', 'evalFailures', 'setupFailures', 'setupRetryAt', 'stop', 'sha'] as const;
 const newCycle = (f: Feature) => {
   Object.assign(f, { attempts: 0, refreshes: 0, updatedAt: now() });
   for (const k of OBSOLETE) delete (f as unknown as Record<string, unknown>)[k];

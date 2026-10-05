@@ -77,7 +77,7 @@ function status(): void {
     f.costUsd ? `$${f.costUsd.toFixed(2)}` : '', (f.deps || []).join(','), [f.onMock && 'onMock', a.ready.includes(f.id) && 'next',
       a.waiting.includes(f.id) && 'waiting-on-human', a.bad.has(f.id) && 'INVALID',
       f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now() && `setup-retry ${f.setupRetryAt}`,
-      f.envRetryAt && Date.parse(f.envRetryAt) > Date.now() && `env-retry ${f.envRetryAt}`,
+      f.envRetryAt && Date.parse(f.envRetryAt) > Date.now() && `${f.evalFailures ? 'eval' : 'env'}-retry ${f.envRetryAt}`,
       f.planningHold && `planning-hold ${f.planningHold.cause}`, f.plan?.split && `split-suggested: ${f.plan.split}`].filter(Boolean).join(' ')])];
   const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
   for (const r of rows) console.log(r.map((c, i) => c.padEnd(w[i])).join('  ').trimEnd());

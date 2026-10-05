@@ -349,50 +349,89 @@ for (const kind of ['manual', 'negative'] as const) test(`R14: ${kind} verdict l
   assert.match(readFileSync(join(s.repo, 'CLAUDE.md'), 'utf8'), /Immediate (manual|negative) lesson/);
 });
 
-for (const kind of ['negative', 'positive'] as const) test(`R15: ${kind} malformed verdict context reaches the next builder without emitting a lesson`, (t) => {
+for (const kind of ['negative', 'positive'] as const) test(`R15: a ${kind} malformed verdict is re-run in the same try, never counted and never a lesson`, (t) => {
   const s = setup(t, { features: [F('a')] });
   const malformed = kind === 'negative'
     ? { pass: false, findings: [], blocking: 'cancel.ts:182 bypasses tenant isolation', lesson: 'Invalid advice must not compound' }
     : { pass: true, findings: [{ check: 'works', ok: true, evidence: 'checked' }], notes: 'cancel.ts:182 bypasses tenant isolation', lesson: 'Invalid advice must not compound' };
   writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [malformed, { pass: true, findings: [{ check: 'works', ok: true, evidence: 'checked' }] }] }));
   const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 1]);
-  assert.equal(s.calls('build', 'a').length, 2);
-  const prompt = s.calls('build', 'a')[1]!.prompt;
-  assert.match(prompt, /Evaluator: verdict\.(findings|notes)/);
-  assert.match(prompt, /Unvalidated evaluator output \(diagnostic only\):/);
-  assert.match(prompt, /cancel.ts:182 bypasses tenant isolation/);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').evalFailures], ['merged', 0, undefined]);
+  assert.equal(s.calls('build', 'a').length, 1);
+  assert.equal(s.calls('eval', 'a').length, 2);
+  const retry = events(s, 'a').filter((e) => e.event === 'evaluator-retry');
+  assert.equal(retry.length, 1); assert.match(retry[0]!.detail, /^re-run 1 of 2: verdict\.(findings|notes)/);
+  assert.match(s.calls('eval', 'a')[1]!.prompt, /Your previous reply was not the required JSON verdict\. .*reply with only the JSON object\.$/);
+  assert.doesNotMatch(s.calls('eval', 'a')[0]!.prompt, /previous reply was not/);
+  assert.ok(existsSync(join(s.repo, '.fact-os', 'runs', 'a', '1-eval.invalid1.json')), 'the invalid output is kept');
   assert.equal(existsSync(join(s.repo, 'CLAUDE.md')), false);
-  assert.doesNotMatch(s.log(), /"event":"lesson"/);
+  assert.doesNotMatch(s.log(), /"event":"(lesson|failed)"/);
 });
 
-test('R15: observer does not send a schema-stuck feature back for quoted infrastructure or test failures', async (t) => {
-  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
-  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: false, findings: [], blocking: 'ECONNREFUSED\nFAIL src/quoted.test.ts', lesson: 'Invalid advice' }] }));
+test('evaluator retry: prose instead of a verdict (the F99-47 case) is re-run and the valid verdict decides', (t) => {
+  const s = setup(t, { features: [F('a')], verdicts: { a: ['Still running; waiting for the completion notification.' as unknown as Partial<Verdict>] } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  const retry = events(s, 'a').filter((e) => e.event === 'evaluator-retry');
+  assert.equal(retry.length, 1);
+  assert.match(retry[0]!.detail, /evaluator output is not a JSON object; output: "Still running; waiting for the completion notification\."/);
+});
+
+test('evaluator retry: a Codex evaluator answering prose is re-run through Codex too', (t) => {
+  const s = codexSetup(t, { features: [F('a')], config: { evaluator: SOL }, verdicts: { a: ['Still running.' as unknown as Partial<Verdict>] } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  assert.equal(s.calls('codex', 'a').length, 2);
+  assert.match(s.calls('codex', 'a')[1]!.prompt, /Your previous reply was not the required JSON verdict/);
+});
+
+test('evaluator retry: always invalid is an uncounted evaluator stop that keeps the build; the observer leaves it for a person', async (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, setupRetryDelaysSec: [] } });
+  const bad = { pass: false, findings: [], blocking: 'ECONNREFUSED\nFAIL src/quoted.test.ts', lesson: 'Invalid advice' };
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [bad, 'Still running.', bad] }));
   const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.match(s.feature('a').lastFeedback!, /ECONNREFUSED/);
+  const a = s.feature('a');
+  assert.deepEqual([a.status, a.attempts, a.stop, a.evalFailures], ['stuck', 0, { attempt: 1, counted: false }, 1]);
+  assert.match(a.lastFeedback!, /ECONNREFUSED/); assert.match(a.lastFeedback!, /no valid JSON verdict in 3 runs/);
+  assert.equal(s.calls('eval', 'a').length, 3);
+  assert.equal(events(s, 'a').filter((e) => e.event === 'evaluator-retry').length, 2);
+  const stuck = events(s, 'a').find((e) => e.event === 'stuck')!;
+  assert.deepEqual([stuck.failure, stuck.stop], ['evaluator', { attempt: 1, counted: false }]);
+  assert.match(r.stdout, /ALERT: a stuck: the evaluator keeps giving no valid verdict/);
   const state = await observeOnce(s.repo, { out: () => {} });
-  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
-  const diagnosis = state.diagnoses.find((d) => d.feature === 'a')!;
-  assert.deepEqual([diagnosis.cause, diagnosis.tests, diagnosis.action], ['own', [], 'left for a person']);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 0]);
+  assert.equal(state.diagnoses.find((d) => d.feature === 'a')!.action, 'left for a person');
   assert.doesNotMatch(s.log(), /"event":"observer-retry"|"event":"lesson"/);
+  assert.equal(s.cli('retry', 'a').status, 0);
+  assert.equal(s.feature('a').evalFailures, undefined, 'a person\'s retry clears the count');
+});
+
+test('evaluator retry: an evaluator stop holds the build; after the delay it is re-evaluated without a rebuild', (t) => {
+  const s = setup(t, { features: [F('a')], config: { setupRetryDelaysSec: [0.05] } });
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: ['no', 'no', 'no'] }));
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').evalFailures], ['merged', 0, undefined]);
+  assert.equal(s.calls('build', 'a').length, 1, 'one build; the second pass re-evaluated it');
+  assert.equal(s.calls('eval', 'a').length, 4);
+  assert.ok(events(s, 'a').some((e) => e.event === 'build-skipped' && /held after an evaluator gave no valid verdict/.test(e.detail)));
+  assert.ok(events(s, 'a').some((e) => e.event === 'failed' && e.stop?.counted === false && e.failure === 'evaluator'));
 });
 
 test('malformed evaluator blocking rejects the merge and cannot write a lesson', (t) => {
-  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1 } });
-  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [{ pass: true,
-    findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked' }], cheating: [],
-    blocking: 'tenant isolation broken', lesson: 'Advice from a malformed verdict' }] }));
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, setupRetryDelaysSec: [] } });
+  const bad = { pass: true, findings: [{ check: 'a.txt exists', ok: true, evidence: 'checked' }], cheating: [],
+    blocking: 'tenant isolation broken', lesson: 'Advice from a malformed verdict' };
+  writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [bad, bad, bad] }));
   const r = s.cli('run');
   assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['stuck', 1]);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.feature('a').stop?.counted], ['stuck', 0, false], 'an evaluator stop, not an attempt');
   assert.match(s.feature('a').lastFeedback!, /Evaluator:.*blocking.*array/);
   assert.equal(s.git('log', '--merges', '--oneline'), '');
   assert.equal(existsSync(join(s.repo, 'a.txt')), false);
   assert.equal(existsSync(join(s.repo, 'CLAUDE.md')), false, 'malformed output cannot compound a lesson');
 });
 
-test('malformed evaluator findings feed the retry; a valid legacy verdict can then merge', (t) => {
+test('malformed evaluator findings are re-run in the same try; a valid legacy verdict can then merge', (t) => {
   const s = setup(t, { features: [F('a')] });
   writeFileSync(s.env.FAKE_VERDICTS, JSON.stringify({ a: [
     { pass: true, findings: [{ ok: true }] },
@@ -400,10 +439,10 @@ test('malformed evaluator findings feed the retry; a valid legacy verdict can th
   ] }));
   const r = s.cli('run');
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 1]);
-  assert.equal(s.calls('build', 'a').length, 2);
+  assert.deepEqual([s.feature('a').status, s.feature('a').attempts], ['merged', 0]);
+  assert.equal(s.calls('build', 'a').length, 1);
   assert.equal(s.calls('eval', 'a').length, 2);
-  assert.match(s.calls('build', 'a')[1].prompt, /findings\[0\]\.check.*nonempty string/);
+  assert.ok(events(s, 'a').some((e) => e.event === 'evaluator-retry' && /findings\[0\]\.check.*nonempty string/.test(e.detail)));
 });
 
 test('a builder that leaves no commit, or uncommitted changes, is failed with "commit your work" (exit 2)', (t) => {
@@ -1704,8 +1743,9 @@ test('reviewFixes: an actionable rejection resumes the builder once; the gate an
 });
 
 test('reviewFixes: a second rejection counts once; cheating, an invalid verdict or no builder session never resume', (t) => {
-  const s = setup(t, { features: [F('a'), F('b'), F('c')], config: { maxAttempts: 1, reviewFixes: 1, maxParallel: 1 },
-    verdicts: { a: [REJECT, REJECT], b: [{ ...REJECT, cheating: ['hard-coded result'] }], c: [{ pass: true, findings: [] } as never] } });
+  const bad = { pass: true, findings: [] } as never;
+  const s = setup(t, { features: [F('a'), F('b'), F('c')], config: { maxAttempts: 1, reviewFixes: 1, maxParallel: 1, setupRetryDelaysSec: [] },
+    verdicts: { a: [REJECT, REJECT], b: [{ ...REJECT, cheating: ['hard-coded result'] }], c: [bad, bad, bad] } });
   assert.equal(s.cli('run').status, 2);
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.calls('fix', 'a').length, s.calls('eval', 'a').length], ['stuck', 1, 1, 2]);
   assert.deepEqual([s.feature('b').status, s.calls('fix', 'b').length], ['stuck', 0]);

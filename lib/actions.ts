@@ -26,7 +26,7 @@ export function apply(f: Feature, action: Action, maxAttempts: number): string |
   } else {
     if (f.status !== 'stuck') return `only stuck features can be retried (is ${f.status})`;
     Object.assign(f, { status: 'todo', attempts: 0, refreshes: 0, updatedAt: now() }); // lastFeedback kept: the next build sees it
-    delete f.setupFailures; delete f.setupRetryAt; delete f.envFailures; delete f.envRetryAt; delete f.rejected; // a person's retry revalidates
+    delete f.setupFailures; delete f.setupRetryAt; delete f.envFailures; delete f.envRetryAt; delete f.evalFailures; delete f.rejected; // a person's retry revalidates
     delete f.stop;
   }
   return null;

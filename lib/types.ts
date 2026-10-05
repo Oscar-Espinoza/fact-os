@@ -152,7 +152,8 @@ export interface Feature {
   setupFailures?: number;             // consecutive failed setups (prepare) of this feature; never attempts; cleared by a good setup or retry
   setupRetryAt?: string;              // ISO: no launch before this time (a delayed setup retry)
   envFailures?: number;               // gate failures diagnosed as environmental, after a same-build rerun; never attempts; cleared by a passing gate or a retry
-  envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
+  envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure or an evaluator stop)
+  evalFailures?: number;              // evaluations with no valid verdict after their re-runs (uncounted stops); never attempts; cleared by a valid verdict or a retry
   goal?: string;                      // one plain sentence: what this feature is for (written with the feature; shown first on the dashboard)
   shortTitle?: string;                // a short display title (the title stays the record)
   planningHold?: PlanningHold;

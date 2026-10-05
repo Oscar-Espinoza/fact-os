@@ -1,7 +1,7 @@
 // Foreman: plan → build → test → evaluate → merge → compound, over ready features, in parallel worktrees.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -119,6 +119,15 @@ export function feedbackFromVerdict(v: Partial<Verdict>): string {
   for (const d of v.baseDefects || []) lines.push(`BASE DEFECT (reproduced on ${d.baseSha.slice(0, 12)} too; not this feature's to fix): ${d.check}: ${d.signature} — \`${d.command}\`. ${d.evidence}`);
   if (v.diagnostic) lines.push(`\nUnvalidated evaluator output (diagnostic only):\n${v.diagnostic}`);
   return lines.join('\n') || 'Evaluator did not pass the feature.';
+}
+
+// An evaluator run that answered, but with no usable verdict: not a JSON object, or a verdict that fails the schema (a valid
+// verdict, even a contradicted one, always has findings). Re-run in the same try (EVAL_RETRIES times) with EVAL_RETRY_NOTE
+// appended; still invalid, an uncounted evaluator stop. A run that did not answer (e.ok false) is not covered here.
+export const EVAL_RETRIES = 2;
+export const EVAL_RETRY_NOTE = 'Your previous reply was not the required JSON verdict. Do all required commands in the foreground, wait for them to finish, and reply with only the JSON object.';
+export function invalidVerdict(runOk: boolean, v: Verdict): boolean {
+  return runOk && !!v.error && v.findings.length === 0;
 }
 
 // A rejection a resumed builder can act on (config.reviewFixes): a valid verdict from a run that worked (no parse or provider
@@ -1003,7 +1012,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code !== 0;
     if (skipBuild) log(root, id, 'build-skipped', reevaluate
       ? `revalidating the previously evaluated ${built!.slice(0, 12)} against current base`
-      : built === held ? `revalidating ${built!.slice(0, 12)}, held after an environmental gate failure`
+      : built === held ? `revalidating ${built!.slice(0, 12)}, held after ${f.evalFailures ? 'an evaluator gave no valid verdict' : 'an environmental gate failure'}`
       : `the foreman stopped after it built ${built!.slice(0, 12)}`);
     if (f.envBuild && !skipBuild) await edit(id, (x) => { delete x.envBuild; delete x.envBuildInputs; }); // no longer matches: rebuild
     const builtInputs = skipBuild && built === held ? f.envBuildInputs! : buildInputs(); // what this build is for, captured now
@@ -1295,6 +1304,20 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         undefined, { stop, cause: 'environment', sha });
       out(`${stuck ? 'stuck' : 'env-hold'} ${id}: environment fault diagnosed; ${stuck ? 'no more retries' : `retrying the same build after ${delays[n - 1]}s`}`);
     });
+    // An evaluator that gave no usable verdict in all its runs of one evaluation: an evaluator infrastructure stop, not the build's
+    // failure. No attempt is spent; the build is held (envBuild) and revalidated after config.setupRetryDelaysSec; one more such
+    // episode after the last delay is an uncounted stuck (ALERT). A valid verdict or a person's retry clears the count.
+    const evalStop = (v: Verdict, sha: string, runs: number) => edit(id, (x) => {
+      const delays = config.setupRetryDelaysSec, n = (x.evalFailures || 0) + 1, stuck = n > delays.length;
+      const stop = { attempt: (x.attempts || 0) + 1, counted: false };
+      const fb = `${feedbackFromVerdict(v)}\n\nThe evaluator gave no valid JSON verdict in ${runs} run${runs === 1 ? '' : 's'} of the same evaluation: an evaluator failure, not the build's. No attempt was spent and the build is kept.`;
+      Object.assign(x, { status: stuck ? 'stuck' : 'todo', evalFailures: n, stop, updatedAt: now(), envBuild: sha, envBuildInputs: builtInputs,
+        envRetryAt: stuck ? undefined : new Date(Date.now() + delays[n - 1]! * 1000).toISOString(), lastFeedback: fb, sha: undefined, parked: undefined, pendingLesson: undefined });
+      log(root, id, stuck ? 'stuck' : 'failed', `${fb}\n(evaluator failure ${n} of ${delays.length + 1}; ${stuck ? 'no more retries' : `re-evaluating the same build after ${delays[n - 1]}s`}; no attempt spent)`,
+        undefined, { stop, failure: 'evaluator' });
+      out(stuck ? `ALERT: ${id} stuck: the evaluator keeps giving no valid verdict (no attempt spent); check the evaluator, then \`${NAME} retry ${id}\``
+        : `eval-hold ${id}: the evaluator gave no valid verdict in ${runs} runs; no attempt spent; re-evaluating the same build after ${delays[n - 1]}s`);
+    });
     for (;;) { // fresh validation after an inline resolution or a clean base advance
       if (await stopped()) return;
       // refreshBeforeTest: test "current base + this feature", so features that pass alone can't break base together.
@@ -1352,9 +1375,25 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks, evalPlan);
       const epPinned = `${ep}\nFor "baseDefects": the base commit of this evaluation is ${evalBase} and the feature commit is ${sha}; reproduce on exactly those and report them as "baseSha" and "featureSha".`;
       recordPrompt('evaluator', epPinned, en, undefined, 'review');
-      const e = await agent('evaluator', epPinned, `${tag}-eval.json`);
+      const verdictOf = (r: ClaudeResult): Verdict => r.ok ? parseVerdict(r.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${r.error}` };
+      let e = await agent('evaluator', epPinned, `${tag}-eval.json`);
       if (await stopped()) return;
-      const v0: Verdict = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };
+      let v0 = verdictOf(e), runs = 1;
+      // No usable verdict (prose, or a broken schema): the same evaluation again, a fresh run of the same inputs (evaluators keep
+      // no session to resume), Codex or its fallback alike; the budget still applies. Each invalid output is kept beside the run.
+      while (invalidVerdict(e.ok, v0) && runs <= EVAL_RETRIES) {
+        if (config.budgetUsdTotal != null && spent >= config.budgetUsdTotal) { log(root, id, 'evaluator-retry', `not re-run: the budget is reached ($${spent.toFixed(2)} of $${config.budgetUsdTotal})`); break; }
+        try { renameSync(join(runDir, `${tag}-eval.json`), join(runDir, `${tag}-eval.invalid${runs}.json`)); } catch {}
+        log(root, id, 'evaluator-retry', `re-run ${runs} of ${EVAL_RETRIES}: ${v0.error}; output: ${JSON.stringify(e.text.trim().slice(0, 200))}`);
+        out(`re-eval ${id}: the evaluator gave no valid verdict (${v0.error}); re-run ${runs} of ${EVAL_RETRIES}`);
+        const rp = `${epPinned}\n\n${EVAL_RETRY_NOTE}`;
+        recordPrompt('evaluator', rp, en, undefined, 'review');
+        e = await agent('evaluator', rp, `${tag}-eval.json`);
+        if (await stopped()) return;
+        v0 = verdictOf(e); runs++;
+      }
+      if (invalidVerdict(e.ok, v0)) return evalStop(v0, sha, runs);
+      if (loadState(root).features.find((x) => x.id === id)?.evalFailures) await edit(id, (x) => { delete x.evalFailures; });
       // A base attribution counts only for the pinned commits of this evaluation; any other is treated as this feature's failure.
       // …and only with its reproduction: the setup, and both runs' failing output, each containing the same failure signature.
       const has = (out: string | undefined, sig: string) => !!out && out.replace(/\s+/g, ' ').toLowerCase().includes(sig.replace(/\s+/g, ' ').toLowerCase());

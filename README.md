@@ -196,7 +196,13 @@ verdict. Present `cheating`/`blocking`/`notes` must be arrays of nonempty string
 `lesson` must be a string or null. Legacy omissions of those four optional fields remain
 supported; lists default to empty and lesson to null. Bare, fenced and prose-wrapped JSON
 remain supported; a parsed array/string root cannot be unwrapped into a passing verdict.
-Malformed output fails with field/index feedback and cannot write a lesson. Feedback
+Malformed output (not a JSON object, or a schema error) is re-run in the same try, up to 2
+more times with the same inputs plus an instruction to run commands in the foreground and
+reply with only the JSON (each logged as `evaluator-retry` with the first 200 characters of
+the bad output; Codex and its Opus fallback alike; the total budget still stops re-runs).
+Still invalid, it is an uncounted evaluator stop (failure `evaluator`, `stop.counted: false`):
+the build is held and re-evaluated after `setupRetryDelaysSec`, then an ALERT and uncounted
+stuck. It fails with field/index feedback and cannot write a lesson. Feedback
 also carries a labeled, unvalidated excerpt of the evaluator's original text, capped at
 2,000 characters with both ends retained and a truncation marker when needed. The excerpt
 is diagnostic context for the next builder, never validated findings or lesson advice.

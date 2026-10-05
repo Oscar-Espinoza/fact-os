@@ -168,7 +168,8 @@ if (mode === 'resolve') {
   const pin = /the base commit of this evaluation is ([0-9a-f]+) and the feature commit is ([0-9a-f]+)/.exec(prompt);
   const rawScript = (JSON.parse(readFileSync(process.env.FAKE_VERDICTS as string, 'utf8')) as Record<string, Partial<Verdict>[]>)[id]?.[n];
   const scripted = rawScript && JSON.parse(JSON.stringify(rawScript).replaceAll('$BASE_SHA', pin?.[1] ?? 'none').replaceAll('$FEATURE_SHA', pin?.[2] ?? 'none')) as Partial<Verdict>;
-  result = 'Verdict:\n```json\n' + JSON.stringify(scripted ?? { pass: true,
+  // a scripted string is the evaluator's whole reply, as is (prose instead of a verdict)
+  result = typeof scripted === 'string' ? scripted : 'Verdict:\n```json\n' + JSON.stringify(scripted ?? { pass: true,
     findings: [{ check: 'works', ok: true, evidence: 'fake' }], cheating: [], lesson: null }) + '\n```';
 }
 const args = process.argv.slice(2), arg = (k: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : null); // model/effort: what this launch ran with

@@ -420,7 +420,18 @@ Each tick:
      `pass:true` in the excerpt is never promoted. Valid verdicts, including valid failures
      and contradictions, receive no diagnostic field. Provider-process failures keep their
      existing feedback; they do not use this parser-only path. Raw provider artifacts
-     remain available in full. Unparseable output, no findings, or `pass: true` with a
+     remain available in full. A JSON/root/schema rejection of an evaluator run that answered
+     is never counted at once: the same evaluation is re-run (a fresh run, same inputs, Codex or
+     its fallback; evaluators have no session to resume) up to 2 more times with the instruction
+     "Your previous reply was not the required JSON verdict. Do all required commands in the
+     foreground, wait for them to finish, and reply with only the JSON object." appended, each
+     logged as `evaluator-retry` (re-run n of 2, the error, the first 200 characters of the
+     output; the invalid run file kept as `<tag>-eval.invalid<n>.json`); a reached
+     `budgetUsdTotal` stops re-runs. All invalid: an uncounted stop (`failed`/`stuck` with
+     failure `evaluator`, `stop.counted: false`, `evalFailures` + 1, the build held as
+     `envBuild` and re-evaluated after `setupRetryDelaysSec`; past the delays an uncounted
+     stuck with an ALERT). A valid verdict or a person's retry clears `evalFailures`.
+     Unparseable output, no findings, or `pass: true` with a
      failed finding, cheating or a blocking entry counts as a fail. Valid `notes` never
      block; `lesson` is advice for future builders only. The prompt asks for acceptance
      coverage, but the parser does not enforce correspondence to the acceptance list.
