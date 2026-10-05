@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFile
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observe, observerPaths, lessonSection, parseCurated, bulletsOf, versionKey, runCosts, unpricedRun } from '../lib/observe.ts';
+import { failingTests, resolveTests, classify, signature, recurringTests, readNew, improvementId, parseImprover, agentStats, observeOnce, observe, observerPaths, lessonSection, parseCurated, bulletsOf, versionKey, runCosts, unpricedRun, goalPrompt, parseGoal } from '../lib/observe.ts';
 import type { Diagnosis, Feature } from '../lib/types.ts';
 import { parseVerdict, feedbackFromVerdict } from '../lib/foreman.ts';
 
@@ -400,7 +400,7 @@ test('observe: the active model profile picks the improver\'s and the curator\'s
   try {
     const old = Array.from({ length: 40 }, (_, i) => `- lesson ${i} with enough words to pass the size limit`).join('\n');
     const cfg = (o: object = {}) => writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh', lessonsFile: '.fact-os/lessons.md',
-      observer: { agent: { model: 'x', effort: 'low', permissionMode: 'auto' }, lessonsMaxBytes: 500, curateEveryHours: 0, improveEveryHours: 0 }, ...o }));
+      observer: { agent: { model: 'x', effort: 'low', permissionMode: 'auto' }, lessonsMaxBytes: 500, curateEveryHours: 0, improveEveryHours: 0, goals: false }, ...o }));
     cfg();
     writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: ['F01-01-a', 'F01-02-b'].map((id) => F(id, { status: 'todo' })) }));
     writeFileSync(join(root, '.fact-os/.foreman'), String(process.pid));
@@ -474,7 +474,7 @@ function failedPass(root: string, id: string, k: number, model = 'sonnet', detai
     + e(t + k * 1000, 'failed', detail));
 }
 const reviewConfig = (root: string, observer: object = {}) => writeFileSync(join(root, '.fact-os/config.json'), JSON.stringify({ base: 'main', branchPrefix: 'ship/', test: 'gate.sh',
-  observer: { agent: { model: 'x', effort: 'low', permissionMode: 'auto' }, improve: false, ...observer } }));
+  observer: { agent: { model: 'x', effort: 'low', permissionMode: 'auto' }, improve: false, goals: false, ...observer } }));
 const answer = (o: object | string) => JSON.stringify({ type: 'result', is_error: false, result: typeof o === 'string' ? o : JSON.stringify(o), total_cost_usd: 0.2 }).replace(/'/g, "'\\''");
 
 test('observeOnce reviews each failed pass once (newest first, at most maxPerPass, read-only), keeps an invalid answer, and turns answers into notes and a human task', async () => {
@@ -783,4 +783,12 @@ test('recheck4: an older undelimited diagnosis note (always appended last) is st
   const detail = 'test command `gate` exited 1:\nFAIL src/orders/tenant.test.ts > isolation\nAssertionError: expected 403 to be 200' +
     '\n\nDiagnosis (gpt-6.1-sol): code: wrong port\nSuggested fix: Use port 5433.\nIf ECONNREFUSED persists, restart the relay.';
   assert.equal(classify(detail, ['src/orders/tenant.test.ts'], ['src/orders/tenant.ts']).cause, 'own');
+});
+
+test('goals: the prompt carries the spec without code-speak instructions lost; the answer needs both fields and stays short', () => {
+  assert.match(goalPrompt({ title: 'T', description: 'D', acceptance: ['A'] }), /shortTitle[\s\S]*goal[\s\S]*Title: T/);
+  assert.deepEqual(parseGoal('{"shortTitle": "Restore test", "goal": "Make store restores work with calculated totals."}'), { shortTitle: 'Restore test', goal: 'Make store restores work with calculated totals.' });
+  assert.equal(parseGoal('{"goal": "x"}'), null);
+  assert.equal(parseGoal(`{"shortTitle": "t", "goal": "${'x'.repeat(300)}"}`), null);
+  assert.equal(parseGoal('not json'), null);
 });

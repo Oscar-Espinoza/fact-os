@@ -84,6 +84,7 @@ export interface ObserverConfig {
   infraPatterns: string[];            // extra substrings (case-insensitive) that mark an infrastructure failure
   recurring: number;                  // a test failing in this many features (24h) is recurring
   agent: RoleConfig | null;           // null = observe and send back only; set = also curate lessons and improve
+  goals: boolean;                     // with an agent: write cached dashboard goals for features that have none (a small model, a few per pass)
   improve: boolean;                   // with an agent: turn observations into improvement features and human tasks
   improveEveryHours: number;
   maxOpenImprovements: number;        // improvement features not merged yet
@@ -143,6 +144,8 @@ export interface Feature {
   setupRetryAt?: string;              // ISO: no launch before this time (a delayed setup retry)
   envFailures?: number;               // gate failures diagnosed as environmental, after a same-build rerun; never attempts; cleared by a passing gate or a retry
   envRetryAt?: string;                // ISO: no launch before this time (a delayed retry after an environmental gate failure)
+  goal?: string;                      // one plain sentence: what this feature is for (written with the feature; shown first on the dashboard)
+  shortTitle?: string;                // a short display title (the title stays the record)
   planningHold?: PlanningHold;
   baseRechecks?: Record<string, number>; // automatic base-defect rechecks spent, per failure signature (at most 2 each)
   baseRecheck?: boolean;              // released for a base-defect recheck: the next pass merges current base before validating
@@ -203,6 +206,7 @@ export interface BaseDefect { check: string; command: string; signature: string;
 export interface Verdict {
   pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string;
   baseDefects?: BaseDefect[]; // failures reproduced on base too; each names the failed finding (check) it explains
+  summary?: string;           // optional: one plain sentence on the decisive outcome (display only; never decides pass or fail)
   diagnostic?: string; // bounded unvalidated original output, only on JSON/root/schema rejection
 }
 
@@ -214,6 +218,7 @@ export interface LogEvent {
   cause?: 'environment' | 'base-defect'; // failed/stuck event: a typed cause (a diagnosed environmental gate failure, or a rejection only for defects on base)
   sha?: string;                      // the commit that cause was diagnosed on
   inputs?: string;                   // launch event: holdInputs of the launched spec (a planning hold must match it)
+  test?: { code: number | null; file: string | null; error: string | null }; // gate-fix / env-rerun / failed: the failed gate's outcome
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
   lessonAppend?: { file: string; before: string; after: string };
 }

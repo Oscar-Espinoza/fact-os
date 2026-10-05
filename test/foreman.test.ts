@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { parseVerdict, baseOnly, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
+import { parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
 
@@ -357,4 +357,13 @@ test('baseDefects: parsed and validated; base-only means every failed finding is
   assert.equal(baseOnly({ ...v, findings: [{ check: 'gate passes', ok: true, evidence: 'x' }] }), false, 'no failed finding: not base-only');
   assert.match(parseVerdict(JSON.stringify({ pass: false, findings: [{ check: 'a', ok: false, evidence: 'x' }], baseDefects: [{ ...bd, baseSha: 'main' }] })).error!, /baseSha/);
   assert.match(feedbackFromVerdict(v), /^FAILED gate passes[\s\S]*BASE DEFECT \(reproduced on abcdef1234 too; not this feature's to fix\): gate passes: Queue catalog\.product-changed does not exist/m);
+});
+
+test('verdict summary: kept when a plain string, dropped (never rejected) when malformed; the builder is asked for a Summary line', () => {
+  const base = { pass: false, findings: [{ check: 'a', ok: false, evidence: 'x' }], cheating: [], blocking: [] };
+  assert.equal(parseVerdict(JSON.stringify({ ...base, summary: 'Evidence logs are missing.' })).summary, 'Evidence logs are missing.');
+  const bad = parseVerdict(JSON.stringify({ ...base, summary: 42 }));
+  assert.equal(bad.error, undefined); assert.equal(bad.summary, undefined);
+  assert.deepEqual(testOutcome('test command `g` exited 1:\nFAIL src/a.test.ts > b\nAssertionError: expected 1'), { code: 1, file: 'a.test.ts', error: 'AssertionError: expected 1' });
+  assert.match(FINISH_RULE, /starting "Summary:"/);
 });

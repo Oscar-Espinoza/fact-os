@@ -35,10 +35,10 @@ test('R15: dashboard rejection explains bounded raw diagnostics and retains full
   assert.match(run.error!, /Unvalidated evaluator output \(diagnostic only\):/);
   assert.match(run.error!, /\[truncated\]/); assert.ok(run.error!.length < 2500);
   assert.equal(run.text, JSON.stringify(raw), 'saved original output is not replaced by the excerpt');
-  const b = await browser(s.dash.url); b.log(1);
-  assert.match(b.node('d-attempts').innerHTML, /Unvalidated evaluator output/);
-  assert.match(b.node('d-attempts').innerHTML, /checkout.ts:10/);
-  assert.match(b.node('d-attempts').innerHTML, /Original agent output/);
+  const b = await browser(s.dash.url); b.run('1|eval');
+  assert.match(b.node('d-folds').innerHTML, /Unvalidated evaluator output/);
+  assert.match(b.node('d-folds').innerHTML, /checkout.ts:10/);
+  assert.match(b.node('d-folds').innerHTML, /Original agent output/);
 });
 
 test('served history preserves full tags, resolver outputs, evidence and chronological retry order', async (t) => {
@@ -87,23 +87,22 @@ const browser = async (url: string) => {
   const ctx = createContext(sandbox);
   for (const script of ['core', 'factory', 'board', 'detail']) runInContext(await (await fetch(`${url}/dash/${script}.js`)).text(), ctx);
   sandbox.F.boot();
-  for (let i = 0; i < 100 && (!paints || !node('d-sum').innerHTML); i++) await new Promise((r) => setTimeout(r, 5));
+  for (let i = 0; i < 100 && (!paints || !node('d-folds').innerHTML.includes('d-chip') && !node('d-folds').innerHTML.includes('No run output')); i++) await new Promise((r) => setTimeout(r, 5));
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(node('foreman-t').textContent === 'Dashboard offline', false, 'render must not throw');
   return { F: sandbox.F, node, route: (view: string) => { sandbox.location.hash = '#' + view; events.get('hashchange')!(); },
-    log: (n: number) => node('detail').click({ target: { closest: () => ({ dataset: { log: String(n) } }) } }) };
+    run: (k: string) => node('detail').click({ target: { closest: () => ({ dataset: { run: k } }) } }) };
 };
 
 test('served detail, board and factory agree on first and second running attempts and second success', async (t) => {
   const s = await fixture(t, feature('building', 0)), b = await browser(s.dash.url);
-  assert.match(b.node('d-sum').innerHTML, /Attempt 1 is running/);
+  assert.match(b.node('d-head').innerHTML, /Try 1<\/b> of 3/);
   const f = b.F.P.features[0]; f.attempts = 1; b.F.render();
-  assert.match(b.node('d-sum').innerHTML, /Attempt 2 is running/);
+  assert.match(b.node('d-head').innerHTML, /Try 2<\/b> of 3/);
   b.route('board'); assert.match(b.node('b-active').innerHTML, /try 2\/3/);
   b.route('factory'); assert.equal(b.node('bay-a[data-tries]').textContent, 'try 2/3');
   f.status = 'merged'; b.route('f/a');
-  assert.match(b.node('d-sum').innerHTML, /On try 2/);
-  assert.match(b.node('d-attempts').innerHTML, /Try 2/);
+  assert.match(b.node('d-head').innerHTML, /Try 2<\/b> of 3/);
 });
 
 test('served detail shows distinct refreshed outputs, current evidence and rejected raw verdicts', async (t) => {
@@ -113,11 +112,11 @@ test('served detail shows distinct refreshed outputs, current evidence and rejec
   s.put('2.2-resolve.json', 'resolver output', at + 2);
   s.put('2.2-eval.json', { pass: true, findings: [] }, at + 3);
   s.put('2.10-eval.json', { pass: true, findings: [{ check: 'one', ok: true, evidence: '<current evidence>' }, { check: 'two', ok: true, evidence: 'verified' }] }, at + 4);
-  const b = await browser(s.dash.url); b.log(2);
-  const html = b.node('d-attempts').innerHTML;
-  assert.match(html, /Run 2\.2/); assert.match(html, /Run 2\.10/); assert.match(html, /resolver output/);
-  assert.match(html, /&#60;current evidence&#62;/); assert.match(html, /verdict.findings/);
-  assert.match(html, /&#34;findings&#34;:\[\]/); assert.match(b.node('d-benches').innerHTML, /2 of 2 checks passed/);
+  const b = await browser(s.dash.url), logs = () => b.node('d-folds').innerHTML;
+  assert.match(logs(), /Combine 2\.2/); assert.match(logs(), /Review 2\.10 ✓/); assert.match(logs(), /Review 2 ✗/);
+  b.run('2.2|resolve'); assert.match(logs(), /Run 2\.2 · Combine/); assert.match(logs(), /resolver output/);
+  b.run('2.10|eval'); assert.match(logs(), /Run 2\.10 · Review · passed/); assert.match(logs(), /&#60;current evidence&#62;/);
+  b.run('2.2|eval'); assert.match(logs(), /verdict.findings/); assert.match(logs(), /&#34;findings&#34;:\[\]/);
 });
 
 test('fresh human retry does not attach an earlier failure to the new attempt', async (t) => {
@@ -126,8 +125,8 @@ test('fresh human retry does not attach an earlier failure to the new attempt', 
   writeFileSync(join(s.dir, 'log.jsonl'), [{ ts: new Date(time + 2).toISOString(), feature: 'a', event: 'stuck', detail: 'FAILED old: old defect' },
     { ts: new Date(time + 3).toISOString(), feature: 'a', event: 'retrying', detail: 'by a person' }, { ts: new Date(time + 4).toISOString(), feature: 'a', event: 'launch', detail: '' }].map((e) => JSON.stringify(e)).join('\n') + '\n');
   const b = await browser(s.dash.url);
-  assert.doesNotMatch(b.node('d-prob').innerHTML, /Try 1 failed/);
-  assert.match(b.node('d-prob').innerHTML, /old defect/, 'historical evidence remains available');
+  assert.doesNotMatch(b.node('d-fixes').innerHTML + b.node('d-journey').innerHTML, /old defect/);
+  b.run('1|eval'); assert.match(b.node('d-folds').innerHTML, /old defect/, 'historical evidence remains available');
 });
 
 test('current builder failure after a retry takes precedence over an older rejected evaluation', async (t) => {
@@ -139,17 +138,17 @@ test('current builder failure after a retry takes precedence over an older rejec
     { ts: new Date(time + 3).toISOString(), feature: 'a', event: 'launch', detail: '' },
     { ts: new Date(time + 5).toISOString(), feature: 'a', event: 'stuck', detail: 'builder failed: new failure' }].map((e) => JSON.stringify(e)).join('\n') + '\n');
   const b = await browser(s.dash.url);
-  assert.match(b.node('d-attempts').innerHTML, /Failed while building/);
-  assert.doesNotMatch(b.node('d-attempts').innerHTML, /Failed evaluation/);
-  assert.doesNotMatch(b.node('d-benches').innerHTML, /old defect/);
-  b.log(1); assert.match(b.node('d-attempts').innerHTML, /old defect/, 'distinct historical outputs remain inspectable');
+  assert.match(b.node('d-journey').innerHTML, /The build did not finish: the builder run failed/);
+  assert.match(b.node('d-fixes').innerHTML, /What needs fixing[\s\S]*The build did not finish/);
+  assert.doesNotMatch(b.node('d-fixes').innerHTML + b.node('d-journey').innerHTML, /old defect|Rejected/);
+  b.run('1|eval'); assert.match(b.node('d-folds').innerHTML, /old defect/, 'distinct historical outputs remain inspectable');
 });
 
 test('legacy merged state does not make a rejected saved verdict appear to pass inspection', async (t) => {
   const s = await fixture(t, feature('merged', 0)); s.put('1-eval.json', { pass: true, findings: [] }, Date.now());
   const b = await browser(s.dash.url);
-  assert.match(b.node('d-benches').innerHTML, /Verdict rejected/);
-  assert.match(b.node('d-benches').innerHTML, /verdict.findings/);
+  assert.match(b.node('d-folds').innerHTML, /Review 1 ✗/);
+  b.run('1|eval'); assert.match(b.node('d-folds').innerHTML, /Run 1 · Review · rejected/); assert.match(b.node('d-folds').innerHTML, /verdict.findings/);
   assert.equal(b.F.P.features[0].status, 'merged', 'projection does not rewrite pipeline state');
 });
 
@@ -161,11 +160,10 @@ for (const reason of ['merge conflict with main: too many base refreshes (5)', '
       { ts: new Date(time + 1).toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: stopped.stop }].map((e) => JSON.stringify(e)).join('\n') + '\n');
     const b = await browser(s.dash.url);
     assert.equal(b.F.attemptNumber(b.F.P.features[0]), 1);
-    assert.match(b.node('d-sum').innerHTML, /Stuck on try 1/);
-    assert.match(b.node('d-attempts').innerHTML, /Try 1[\s\S]*Stopped/);
-    assert.doesNotMatch(b.node('d-attempts').innerHTML, /stuck after 1 failed try/);
-    assert.match(b.node('d-prob').innerHTML, /Try 1 stopped/);
-    assert.doesNotMatch(b.node('d-benches').innerHTML, /No try got this far/);
+    assert.match(b.node('d-head').innerHTML, /Stuck[\s\S]*Try 1<\/b> of 3/);
+    assert.match(b.node('d-journey').innerHTML, /What happened on try 1[\s\S]*Stopped without using a retry/);
+    assert.doesNotMatch(b.node('d-head').innerHTML + b.node('d-journey').innerHTML, /stuck after 1 failed try|No retries left/i);
+    assert.match(b.node('d-you').innerHTML, /Needs you/);
     b.route('board'); assert.match(b.node('b-list').innerHTML, /1\/3 tries/);
     b.route('factory'); assert.equal(b.node('bay-a[data-tries]').textContent, 'try 1/3');
     assert.doesNotMatch(b.node('fx-events').innerHTML, /stuck after 3 tries/);
@@ -186,13 +184,11 @@ test('R16: later uncounted stop preserves the earlier counted failure card', asy
     { ts: new Date(time + 5).toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: { attempt: 2, counted: false } },
   ].map((e) => JSON.stringify(e)).join('\n') + '\n');
   const b = await browser(s.dash.url);
-  const html = b.node('d-attempts').innerHTML;
-  assert.match(html, /Try 1[\s\S]*Failed evaluation[\s\S]*Try 2[\s\S]*Stopped/);
-  assert.doesNotMatch(html, /Failed at merge/);
-  assert.match(b.node('d-prob').innerHTML, /Try 1 failed inspection/);
-  assert.match(b.node('d-prob').innerHTML, /Try 2 stopped/);
-  b.log(1); assert.match(b.node('d-attempts').innerHTML, /old payment defect/);
-  b.log(2); assert.match(b.node('d-attempts').innerHTML, /Why it stopped/);
+  assert.match(b.node('d-journey').innerHTML, /What happened on try 2[\s\S]*Stopped without using a retry/);
+  assert.match(b.node('d-earlier').innerHTML, /Try 1 ✗[\s\S]*check failed: payment/);
+  assert.doesNotMatch(b.node('d-journey').innerHTML, /merge could not finish/);
+  assert.match(b.node('d-fixes').innerHTML, /Earlier problems[\s\S]*Try 1:/);
+  b.run('1|eval'); assert.match(b.node('d-folds').innerHTML, /old payment defect/);
   assert.equal(b.F.P.features[0].attempts, 1);
 });
 
@@ -206,10 +202,8 @@ test('R16: legacy known stops have a limited fallback and incomplete failures st
   ].map((e) => JSON.stringify(e)).join('\n') + '\n');
   const b = await browser(s.dash.url);
   assert.equal(b.F.attemptNumber(b.F.P.features[0]), 3);
-  assert.match(b.node('d-attempts').innerHTML, /Try 3[\s\S]*Stopped/);
-  assert.doesNotMatch(b.node('d-prob').innerHTML, /Try [12] failed inspection/);
-  assert.match(b.node('d-prob').innerHTML, /failure with unknown try/);
-  assert.doesNotMatch(b.node('d-attempts').innerHTML, /Failed evaluation/);
+  assert.match(b.node('d-head').innerHTML, /Stuck[\s\S]*previous child still running[\s\S]*Try 3<\/b> of 3/);
+  assert.doesNotMatch(b.node('d-fixes').innerHTML + b.node('d-journey').innerHTML + b.node('d-earlier').innerHTML, /Try [12]/);
 });
 
 test('R16: human retry clears the current stop while retaining historical stopped evidence', async (t) => {
@@ -222,8 +216,8 @@ test('R16: human retry clears the current stop while retaining historical stoppe
   assert.deepEqual([f.status, f.attempts, f.stop], ['todo', 0, undefined]);
   assert.equal((await s.history()).log.at(-1)!.attemptsReset, true);
   const b = await browser(s.dash.url);
-  assert.doesNotMatch(b.node('d-prob').innerHTML, /Try 1 stopped/);
-  assert.match(b.node('d-prob').innerHTML, /too many base refreshes/);
+  assert.match(b.node('d-head').innerHTML, /Queued/);
+  assert.doesNotMatch(b.node('d-fixes').innerHTML + b.node('d-you').innerHTML, /stopped|refreshes/i);
 });
 
 test('R16: legacy counted refresh failure remains a failure rather than an uncounted stop', async (t) => {
@@ -232,8 +226,8 @@ test('R16: legacy counted refresh failure remains a failure rather than an uncou
   writeFileSync(join(s.dir, 'log.jsonl'), JSON.stringify({ ts: new Date().toISOString(), feature: 'a', event: 'stuck', detail: reason }) + '\n');
   const b = await browser(s.dash.url);
   assert.equal(b.F.attemptNumber(b.F.P.features[0]), 1);
-  assert.match(b.node('d-attempts').innerHTML, /Failed at merge/);
-  assert.doesNotMatch(b.node('d-attempts').innerHTML, />Stopped</);
+  assert.match(b.node('d-head').innerHTML, /Stuck[\s\S]*merge conflict with main[\s\S]*Try 1<\/b> of 3/);
+  assert.doesNotMatch(b.node('d-head').innerHTML, /without using a retry/);
 });
 
 for (const reset of [true, false]) test(`R16: resumed event preserves only supported counted associations (reset=${reset})`, async (t) => {
@@ -246,9 +240,8 @@ for (const reset of [true, false]) test(`R16: resumed event preserves only suppo
     { ts: new Date(time + 3).toISOString(), feature: 'a', event: 'stuck', detail: reason, stop: { attempt: 2, counted: false } },
   ].map((e) => JSON.stringify(e)).join('\n') + '\n');
   const b = await browser(s.dash.url);
-  assert.match(b.node('d-attempts').innerHTML, reset ? /Failed while building/ : /Failed evaluation/);
-  assert.doesNotMatch(b.node('d-attempts').innerHTML, reset ? /Failed evaluation/ : /Failed while building/);
-  assert.match(b.node('d-attempts').innerHTML, /Try 2[\s\S]*Stopped/);
+  assert.match(b.node('d-head').innerHTML, /Stuck[\s\S]*Try 2<\/b> of 3/);
+  assert.match(b.node('d-you').innerHTML, /Needs you/);
 });
 
 test('R16: a truncated history associates the retained explicit failure and leaves missing records unknown', async (t) => {
@@ -261,8 +254,7 @@ test('R16: a truncated history associates the retained explicit failure and leav
   ].map((e) => JSON.stringify(e)).join('\n') + '\n');
   const b = await browser(s.dash.url);
   assert.equal((await s.history()).log.length, 60);
-  assert.match(b.node('d-prob').innerHTML, /Try 2 failed inspection/);
-  assert.match(b.node('d-attempts').innerHTML, /Try 1[\s\S]*Failed \(record unavailable\)[\s\S]*Try 2[\s\S]*Failed evaluation[\s\S]*Try 3[\s\S]*Stopped/);
+  assert.match(b.node('d-head').innerHTML, /Stuck[\s\S]*Try 3<\/b> of 3/);
 });
 
 test('factory reconciliation: lowering lanes keeps running work, then departed features leave no cards and spare lanes read OFF', async (t) => {

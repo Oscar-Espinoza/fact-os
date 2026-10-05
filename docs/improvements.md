@@ -19,6 +19,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
 | I07 | v2 shadow done | Jev classifier: 32 narrow questions → review requirements, workload, attention, planning; Sol escalation for unsure cases; shadow only |
 | I08 | done | Seven stuck features: keep-lines declarations, uncounted environment stops, inherited mock allowance, planning holds, review repair, unpriced Codex cost, no-progress guard |
+| I09 | done | Readable dashboard: a story per feature (goal, state, journey, problems), a "Just happened" feed and queue reasons |
 | — | later | Codex as a builder option; a "product intent" review flag |
 
 ## Evidence (ecommerce factory, 2026-10-03, read-only)
@@ -400,3 +401,21 @@ rejections since 10-01, 17 carried a duplicated-helper blocker (5 as the only ca
     production helper blocks; duplicated test setup is a note).
 11. (ecommerce) `F99-46` repairs the producer-queue fixture composition; F99-23 depends on it, and its status-parity check
     tolerates only a demonstrated one-shard flake signature.
+
+## I09 — a dashboard a person can read (2026-10-04)
+
+Oscar: the task view was "a bunch of logs and states" with a giant raw description, and a feature that failed review
+"just disappeared" from the main screen. Designed with the Codex partner, previewed and approved
+(https://claude.ai/artifact/UX5FRa5Ajq7CY51EUBmaJ1).
+
+- `lib/story.ts` rebuilds each feature's retry cycles, tries and steps from its events and run artifacts, with one plain
+  sentence per step. State comes only from recorded events and validated verdicts; agent prose supplies sentences, never a
+  pass or a fail; what is not recorded is not invented.
+- Task view: header (short title, one-line goal, state with why/next), a needs-you banner only when true, the journey
+  (Build → Test → Review → Merge overview plus a row per real step, including same-session fixes and holds), what needs
+  fixing, earlier tries and pre-reset archives collapsed, and Spec / Agent activity / Logs / Details folds.
+- Factory and Board: "Just happened" (`transitions`), recent outcomes that never take a lane, and queue rows with the
+  reason (`queueNotes`).
+- Sentences at the source: builders end their reply with a `Summary:` line; evaluators may add a `summary` (display only);
+  gate failures log their failing test and error. New features carry `goal`/`shortTitle` from intake; older ones get a
+  cached goal from the observer (a small model, a few per pass, `observer.goals`).

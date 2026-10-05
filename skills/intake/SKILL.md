@@ -13,6 +13,9 @@ Turn what the user wants built into fact-os's feature list and human inbox.
    first release, target surfaces, external services and accounts, what "done" looks like, priorities.
 3. Write `.fact-os/features.json` as `{ "features": [Feature] }`:
    - `id` (short slug, unique), `title`, `description` (enough for a builder with no other context),
+   - `shortTitle` (a few plain words for the dashboard) and `goal` (one plain sentence a non-programmer understands:
+     what the feature is for, no paths or code). The dashboard shows them first; the title, description and
+     acceptance stay the record,
    - `acceptance`: at least one check per feature, each concrete and testable by an independent
      evaluator reading the diff and running commands ("POST /api/cart returns 201 and the item
      appears in GET /api/cart", not "cart works"),

@@ -7,11 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, withCheckoutLock, effectiveLimit, validLanes, MAX_LANES, readSetupState, releaseSetupHold, type SetupState } from './state.ts';
 import { git, parseClaudeOutput, parseVerdict, feedbackFromVerdict } from './foreman.ts';
 import { conflictFiles } from './merge.ts';
-import { analyze, taskReach } from './ready.ts';
+import { analyze, taskReach, specHash } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
 import { observerPaths, observerConfig, recurringTests, hotFiles, unpricedRun, type ObserverState, type Era } from './observe.ts';
 import { promptSummary, type PromptSummary } from './promptreview.ts';
 import { readNotes } from './notes.ts';
+import { buildStory, transitions, queueNote, type Story, type StoryRun, type Transition } from './story.ts';
 import { profileNames, profileLabel, roleTable, validProfile, type RoleRow } from './profiles.ts';
 import { IN_FLIGHT, type ActivityEvent, type Config, type Control, type Diagnosis, type Feature, type Finding, type HumanTask, type LogEvent, type MergeMode, type RoleConfig } from './types.ts';
 
@@ -20,6 +21,8 @@ export interface Estimates { build: number | null; test: number | null; eval: nu
 export interface ProjectState {
   path: string; name: string; merge?: MergeMode; branchPrefix?: string; error?: string; features: Feature[]; tasks: HumanTask[];
   ready: string[]; waiting: string[]; activity: ActivityEvent[]; events: LogEvent[];
+  transitions: Transition[];           // the last meaningful changes, one plain line each (story.ts)
+  queueNotes: Record<string, string>;  // todo feature id → why it is queued or waiting, in one line
   config?: Pick<Config, 'base' | 'maxParallel' | 'maxAttempts' | 'groupBy'> & { builder: RoleConfig; evaluator: RoleConfig };
   foreman: { running: boolean; since: string | null };
   stageSince: Record<string, string>;  // in-flight feature id → ISO start of its current stage
@@ -174,7 +177,7 @@ function stageSince(features: Feature[], events: LogEvent[]): Record<string, str
     let since: string | null = null;
     for (const e of events) if (e.feature === f.id) {
       if (e.event === 'launch') since = want === 'launch' ? e.ts : null;
-      else if (want === 'launch' && (e.event === 'gate-fix' || e.event === 'commit-fix')) since = e.ts; // a resumed builder
+      else if (want === 'launch' && ['gate-fix', 'commit-fix', 'review-fix', 'keep-fix', 'progress-fix', 'resolving'].includes(e.event)) since = e.ts; // a resumed builder or resolver
       else if (e.event === want) since = e.ts;
     }
     out[f.id] = since ?? f.updatedAt;
@@ -265,7 +268,7 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[], events: 
 const projectViewFile = (dir: string) => join(paths(dir).dir, 'project-view.html');
 
 function projectState(dir: string): ProjectState {
-  const base = { path: dir, name: basename(dir), features: [], tasks: [], ready: [], waiting: [], activity: [], events: [],
+  const base = { path: dir, name: basename(dir), features: [], tasks: [], ready: [], waiting: [], activity: [], events: [], transitions: [] as Transition[], queueNotes: {} as Record<string, string>,
     foreman: foreman(dir), stageSince: {}, estimates: { build: null, test: null, eval: null }, hasProjectView: existsSync(projectViewFile(dir)),
     stats: { mergedAt: [], costToday: 0, costYesterday: 0 }, observer: null as ObserverSummary | null, ...(repoUrl(dir) ? { repoUrl: repoUrl(dir) } : {}) };
   try {
@@ -273,6 +276,13 @@ function projectState(dir: string): ProjectState {
     const a = analyze(features, tasks, config.merge), all = readLog(dir, 20000), events = all.slice(-2000);
     return { ...base, merge: config.merge, branchPrefix: config.branchPrefix, features, tasks, ready: a.ready, waiting: a.waiting,
       activity: tailLines(paths(dir).activity, 200).map(tryJson).filter(Boolean) as ActivityEvent[], events: events.slice(-80),
+      transitions: transitions(events, Object.fromEntries(features.map((f) => [f.id, f.shortTitle || f.title])), config.maxAttempts, config.base, 12),
+      queueNotes: Object.fromEntries(features.flatMap((f) => {
+        const unmet = (f.deps || []).map((d) => features.find((x) => x.id === d)).filter((x): x is Feature => !!x && x.status !== 'merged').map((x) => ({ title: x.shortTitle || x.title }));
+        const task = tasks.find((t) => t.status === 'open' && !t.mockable && (t.unblocks || []).includes(f.id));
+        const note = queueNote(f, config.maxAttempts, config.base, unmet, task?.title);
+        return note ? [[f.id, note]] : [];
+      })),
       config: { base: config.base, maxParallel: config.maxParallel, maxAttempts: config.maxAttempts, groupBy: config.groupBy,
         builder: config.builder, evaluator: config.evaluator },
       stageSince: stageSince(features, events), estimates: estimates(dir, events), stats: statsOf(dir), observer: observer(dir, features, tasks, all),
@@ -317,9 +327,43 @@ function featureRuns(dir: string, id: string): Run[] {
   return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.n - b.n || passIndex(a) - passIndex(b) || order[a.role] - order[b.role]).slice(-20);
 }
 
+// Every run artifact of a feature, with its parsed verdict, for the story (featureRuns keeps only the last 20 for the logs).
+function storyRuns(dir: string, id: string): StoryRun[] {
+  if (!/^[\w.-]+$/.test(id) || id.startsWith('..')) return [];
+  const rd = join(paths(dir).runs, id);
+  let names: string[] = [];
+  try { names = readdirSync(rd); } catch { return []; }
+  return names.flatMap((name) => {
+    const m = /^(\d+(?:\.\d+)?)-(build|eval|resolve|diagnose)\.json$/.exec(name);
+    if (!m) return [];
+    try {
+      const file = join(rd, name), p = parseClaudeOutput(readFileSync(file, 'utf8'));
+      return [{ tag: m[1]!, role: m[2] as StoryRun['role'], at: new Date(statSync(file).mtimeMs).toISOString(), text: p.text, verdict: m[2] === 'eval' && p.ok ? parseVerdict(p.text) : null }];
+    } catch { return []; }
+  });
+}
+// A feature's goal and short title: its own fields, else the observer's cached summary while the spec it was made from is unchanged.
+function goalOf(dir: string, f: Feature): { goal: string; shortTitle?: string } | null {
+  if (f.goal) return { goal: f.goal, ...(f.shortTitle ? { shortTitle: f.shortTitle } : {}) };
+  try {
+    const o = readJson(observerPaths(dir).state, {}) as { goals?: Record<string, { hash: string; goal: string; shortTitle?: string }> }, g = o.goals?.[f.id];
+    return g && g.hash === specHash(f) ? { goal: g.goal, ...(g.shortTitle ? { shortTitle: g.shortTitle } : {}) } : null;
+  } catch { return null; }
+}
+
 // One feature's history for the detail panel.
-export function featureHistory(dir: string, id: string): { log: LogEvent[]; activity: ActivityEvent[]; runs: Run[] } {
-  return { log: readLog(dir, 2000).filter((e) => e.feature === id).slice(-60),
+export function featureHistory(dir: string, id: string): { log: LogEvent[]; activity: ActivityEvent[]; runs: Run[]; story: Story | null } {
+  const all = readLog(dir, 50000).filter((e) => e.feature === id);
+  let story: Story | null = null;
+  try {
+    const { config, features, tasks } = load(dir), f = features.find((x) => x.id === id);
+    if (f) {
+      const unmet = (f.deps || []).map((d) => features.find((x) => x.id === d)).filter((x): x is Feature => !!x && x.status !== 'merged').map((x) => ({ id: x.id, title: x.shortTitle || x.title }));
+      story = buildStory({ feature: f, events: all, runs: storyRuns(dir, id), maxAttempts: config.maxAttempts, base: config.base, manualMerge: config.merge === 'manual',
+        openTasks: tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id)).map((t) => ({ title: t.title, mockable: t.mockable })), unmetDeps: unmet, goal: goalOf(dir, f) });
+    }
+  } catch { story = null; }
+  return { story, log: all.slice(-60),
     activity: (tailLines(paths(dir).activity, 2000).map(tryJson).filter(Boolean) as ActivityEvent[]).filter((a) => a.feature === id).slice(-40),
     runs: featureRuns(dir, id) };
 }

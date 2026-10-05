@@ -13,14 +13,14 @@ import type { ChildProcess } from 'node:child_process';
 import { childEnv, paths, load, loadConfig, mutate, log, readJson, writeJsonAtomic, pidAlive, withSupervisor, withCheckoutLock, errCode, errMsg, sleep, envVar, featureEnv, readControlFile, NAME } from './state.ts';
 import { resolveRole } from './profiles.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, HEADING, OLD_HEADINGS } from './foreman.ts';
-import { SLUG } from './ready.ts';
+import { SLUG, specHash } from './ready.ts';
 import { passesOf, promptRates, PROMPT_RATES_UNIT, reviewFailures, updateNotes, fileTemplateTasks, promptSummary, renderPromptSection, type PromptState } from './promptreview.ts';
 import { readNotes } from './notes.ts';
 import type { Cause, Config, Diagnosis, Feature, HumanTask, LogEvent, ObserverConfig, RoleConfig } from './types.ts';
 
 export const DEFAULT_OBSERVER: ObserverConfig = { pollSec: 60, retry: true, maxRetries: 1, infraPatterns: [], recurring: 2,
   agent: null, lessonsMaxBytes: 12000, curateEveryHours: 4,
-  improve: true, improveEveryHours: 6, maxOpenImprovements: 2, promptReview: { enabled: true, maxPerPass: 6, notesMaxBytes: 3000, everyMinutes: 30, maxPerDay: 24 } };
+  goals: true, improve: true, improveEveryHours: 6, maxOpenImprovements: 2, promptReview: { enabled: true, maxPerPass: 6, notesMaxBytes: 3000, everyMinutes: 30, maxPerDay: 24 } };
 export const DEFAULT_AGENT: RoleConfig = { model: 'opus', effort: 'high' };
 const INFRA = ['out of shared memory', 'no space left on device', 'enospc', 'too many clients', 'econnrefused',
   'connection terminated unexpectedly', 'terminating connection due to administrator command',
@@ -300,6 +300,7 @@ export interface ObserverState extends PromptState {
   lastEvent: Record<string, string>;            // feature → its previous log event, across passes
   bounces: { ts: string; feature: string; files: string[] }[]; // passed evaluation, then sent back by a merge conflict
   agentNotes?: string;
+  goals?: Record<string, { hash: string; goal: string; shortTitle?: string; ts: string }>; // dashboard display copy per feature (goalsPass)
   lessonsAt?: string;                           // last curation
   improveAt?: string;                           // last improver run
   improvements: string[];                       // feature ids the improver queued
@@ -468,6 +469,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   }
   state.promptRates = promptRates(passes);
   state.promptRatesUnit = PROMPT_RATES_UNIT;
+  if (cfg.agent && cfg.goals && !stopping()) await step('feature goals', () => goalsPass(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), state, out, children, stopping));
   if (cfg.agent && !stopping()) await step('lesson curation', () => curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, children, stopping));
   if (cfg.agent && cfg.improve && !stopping()) await step('improver', () => improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, children, stopping));
 
@@ -494,6 +496,41 @@ function checkpointAgentStart(root: string, state: ObserverState, key: 'lessonsA
 }
 
 // `agent`: the curator's resolved model/effort (the observer agent config, or the active profile's `curator` entry).
+// Display copy for features written before `goal`/`shortTitle` existed: a short title and one plain goal sentence, made once
+// per spec by a small model (cached by specHash; an edit makes a new one), a few per pass, open features first. Display only:
+// it never changes a feature, and the dashboard shows the title until it exists.
+export const GOALS_PER_PASS = 6;
+export function goalPrompt(f: Pick<Feature, 'title' | 'description' | 'acceptance'>): string {
+  return ['Write display copy for one software feature, for a person who is not a programmer, skimming a dashboard.',
+    'Answer with ONLY a JSON object: {"shortTitle": string, "goal": string}.',
+    '- shortTitle: 2 to 6 plain words naming the feature.',
+    '- goal: one sentence (at most 25 words) saying what the feature is for or what it makes possible.',
+    'No file paths, code, table or function names, ticket ids or jargon. Do not invent anything the feature does not say.', '',
+    `Title: ${f.title}`, '', `Description:\n${(f.description || '').slice(0, 4000)}`, '', `Acceptance:\n${(f.acceptance || []).slice(0, 12).map((a) => `- ${a.slice(0, 300)}`).join('\n')}`].join('\n');
+}
+export function parseGoal(text: string): { goal: string; shortTitle: string } | null {
+  const m = /\{[\s\S]*\}/.exec(text || ''); if (!m) return null;
+  let v: unknown; try { v = JSON.parse(m[0]); } catch { return null; }
+  const o = v as { goal?: unknown; shortTitle?: unknown }, clean = (s: unknown, n: number) => (typeof s === 'string' ? s.replace(/[`*]/g, '').replace(/\s+/g, ' ').trim() : '');
+  const goal = clean(o.goal, 0), shortTitle = clean(o.shortTitle, 0);
+  if (!goal || !shortTitle || goal.length > 240 || shortTitle.length > 70) return null;
+  return { goal, shortTitle };
+}
+async function goalsPass(root: string, config: Config, agent: RoleConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>, stopping: () => boolean): Promise<void> {
+  const goals = state.goals ??= {}, { features } = load(root);
+  const todo = features.filter((f) => !f.goal && goals[f.id]?.hash !== specHash(f)).sort((a, b) => Number(a.status === 'merged') - Number(b.status === 'merged')).slice(0, GOALS_PER_PASS);
+  let made = 0;
+  for (const f of todo) {
+    if (stopping()) break;
+    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { permissionMode: 'plan', model: 'haiku' }, root), { cwd: root, env: childEnv(), input: goalPrompt(f), children, timeoutMin: 3 });
+    const c = parseClaudeOutput(r.out), g = c.ok ? parseGoal(c.text) : null;
+    if (!g) continue;
+    goals[f.id] = { hash: specHash(f), ...g, ts: now() };
+    made++;
+  }
+  if (made) out(`observer: wrote dashboard goals for ${made} features`);
+}
+
 async function curateLessons(root: string, config: Config, agent: RoleConfig, cfg: ObserverConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>, stopping: () => boolean): Promise<void> {
   if (stopping()) return;
   const file = resolve(root, config.lessonsFile);

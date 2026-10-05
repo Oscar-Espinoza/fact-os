@@ -24,7 +24,7 @@ function setup(t: TestContext, stage: Stage) {
   const lessons = '## fact-os lessons\n\n' + Array.from({ length: 20 }, (_, i) => `- Rule ${i}: preserve the contract and verify its callers.`).join('\n') + '\n';
   const file = join(root, 'CLAUDE.md'), archive = join(root, 'CLAUDE.archive.md');
   if (stage === 'lessons') writeFileSync(file, lessons);
-  writeFileSync(join(dir, 'config.json'), JSON.stringify({ base: 'main', observer: {
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ base: 'main', observer: { goals: false,
     agent: { model: 'fake' }, retry: false, improve: stage === 'improver', lessonsMaxBytes: 500,
     promptReview: { enabled: false }, curateEveryHours: 4, improveEveryHours: 6 } }));
   writeFileSync(join(dir, 'features.json'), '{"features":[]}');

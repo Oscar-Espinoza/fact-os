@@ -9,6 +9,7 @@ import { analyze, mockTasksFor, validate, type MockTask } from './ready.ts';
 import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, declaredNote, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
+import { testFailure } from './story.ts';
 import { IN_FLIGHT, type BaseDefect, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
@@ -84,12 +85,14 @@ export function parseVerdict(text: unknown): Verdict {
   }
   if (v.lesson !== undefined && v.lesson !== null && typeof v.lesson !== 'string') return fail('verdict.lesson must be a string or null');
   const lesson = typeof v.lesson === 'string' && v.lesson.trim() ? v.lesson.trim() : null;
+  // Display only: a missing or malformed summary is dropped, never a reason to reject the verdict.
+  const summary = typeof v.summary === 'string' && v.summary.trim() && v.summary.length <= 400 ? v.summary.trim().replace(/\s+/g, ' ') : null;
   // A blocking problem fails the feature even when every acceptance check is ok: the evaluator used to find real defects,
   // write them into a note or the lesson, and pass anyway.
   // A defect on base also prevents a merge, but is not a contradiction of pass:true by itself (see baseOnly).
   const pass = v.pass && findings.length > 0 && findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0 && baseDefects.length === 0;
   const contradicted = v.pass && !(findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0 && baseDefects.length === 0);
-  return { pass, findings, cheating, blocking, notes, lesson, ...(baseDefects.length ? { baseDefects } : {}), ...(contradicted ? { error: `pass:true contradicted by findings, cheating${baseDefects.length ? ', blocking or baseDefects' : ' or blocking'}` } : {}) };
+  return { pass, findings, cheating, blocking, notes, lesson, ...(summary ? { summary } : {}), ...(baseDefects.length ? { baseDefects } : {}), ...(contradicted ? { error: `pass:true contradicted by findings, cheating${baseDefects.length ? ', blocking or baseDefects' : ' or blocking'}` } : {}) };
 }
 
 // A rejection whose only failing content is defects reproduced on base: no cheating or blocking entry, and every failed finding
@@ -310,6 +313,10 @@ const TEMPLATE_VERSION_OF = (): string => templateVersion ||= createHash('sha256
 // The evaluator's fixed instructions, by version: a change of them is a change of validation inputs (the no-progress guard).
 const EVALUATOR_VERSION = createHash('sha256').update(String(evaluatorPrompt)).digest('hex').slice(0, 12);
 
+// A failed gate's outcome for the dashboard: exit code, failing test file and error line, when its output names them.
+export const testOutcome = (failure: string): { code: number | null; file: string | null; error: string | null } =>
+  ({ code: Number(/exited (-?\d+)/.exec(failure)?.[1] ?? NaN) || null, ...testFailure(failure) });
+
 // A gate failure's identity, to tell whether a rerun failed the same way: its failure lines (vitest/jest FAIL, ×/✗, TAP
 // "not ok", tables marked fail) and error lines (Error:, AssertionError, expected/received), with only volatile timings
 // normalized. Empty when nothing substantive is recognized: a bare footer (ELIFECYCLE …) never makes two failures the same.
@@ -362,7 +369,8 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     'output, both containing the signature)}, keep that finding failed, and do not repeat it under "blocking". A failure you did not reproduce on base ' +
     'is the feature\'s. ' +
     'Answer with ONLY a JSON object: {"pass": boolean, "findings": [{"check": string, "ok": boolean, "evidence": string}], ' +
-    '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null, "baseDefects"?: [...]}. One finding per acceptance check, plus one ' +
+    '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null, "summary": string, "baseDefects"?: [...]}. "summary" is one plain ' +
+    'sentence on the decisive outcome, for a person skimming (no paths or code). One finding per acceptance check, plus one ' +
     '"production wiring" finding; "pass" only if every finding is ok and cheating and blocking are empty. Evidence names files, ' +
     'lines, the tests you ran and what the mutation check showed.',
     edits.length ? `\nExisting tests this branch changes (tests that already exist on ${config.base}). Justify each change from the acceptance ` +
@@ -425,7 +433,8 @@ export function commitFixPrompt(config: Config, problem: string): string {
 export const FINISH_RULE = 'Before your final reply, wait for every command needed for acceptance to complete, inspect its exit status, and commit all ' +
   'required code and evidence. Prefer foreground commands; if a tool backgrounds a long command, poll or wait within this run until it finishes. ' +
   'Never finish with required work or evidence still pending. Keep any acceptance requirement for a complete gate run: do not replace it with ' +
-  'partial checks; if it cannot complete here, say so plainly with the actual limitation.';
+  'partial checks; if it cannot complete here, say so plainly with the actual limitation. Begin your final reply with one plain sentence, ' +
+  'starting "Summary:", saying what you changed or what stopped you, in words a non-programmer understands (no paths or code).';
 
 // Sent to the builder's own resumed session when its build left the content the evaluator rejected unchanged (config.progressFixes).
 export function progressFixPrompt(config: Config, rejection: string): string {
@@ -1011,7 +1020,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const before = git(['rev-parse', 'HEAD'], wt).out;
       tag = runTag(readdirSync(runDir), attempt);
       await set(id, { status: 'building' });
-      log(root, id, 'gate-fix', d ? `resuming the builder with a ${d.fault} diagnosis` : 'resuming the builder after a test-gate failure');
+      log(root, id, 'gate-fix', d ? `resuming the builder with a ${d.fault} diagnosis` : 'resuming the builder after a test-gate failure', undefined, { test: testOutcome(failure) });
       out(`fix ${id}: the test gate failed; resuming the builder${d ? ' with the diagnosis' : ''}`);
       const fp = gateFixPrompt(config, failure, d, config.diagnoser?.model);
       recordPrompt('builder', fp, builderNotes);
@@ -1106,7 +1115,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         const next = await afterGateFailure(failure, sha);
         if (next === 'env') {
           envRerun = { sha, id: failureId(test.tail) };
-          log(root, id, 'env-rerun', `environment fault diagnosed (${envDiag!.evidence.split('\n')[0]!.slice(0, 200)}); rerunning the gate on the same build`);
+          log(root, id, 'env-rerun', `environment fault diagnosed (${envDiag!.evidence.split('\n')[0]!.slice(0, 200)}); rerunning the gate on the same build`, undefined, { test: testOutcome(failure) });
           out(`rerun ${id}: environment fault diagnosed; rerunning the gate on the same build`);
           continue;
         }

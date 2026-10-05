@@ -90,3 +90,10 @@ export function analyze(features: Feature[], tasks: HumanTask[], _mergeMode: Mer
   ready.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || dep.get(b.id)! - dep.get(a.id)! || (a.id < b.id ? -1 : 1));
   return { ready: ready.map((f) => f.id), waiting, mock, bad, held };
 }
+
+// What a feature's display copy (goal, short title) was written from: its title, description and acceptance.
+export const specHash = (f: Pick<Feature, 'title' | 'description' | 'acceptance'>): string => {
+  let h = 2166136261; // FNV-1a, enough to notice an edit; no crypto in this pure module
+  for (const ch of JSON.stringify([f.title, f.description, f.acceptance])) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; }
+  return h.toString(16);
+};
