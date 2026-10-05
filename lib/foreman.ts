@@ -2,6 +2,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { childEnv, paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
@@ -442,12 +443,34 @@ export function commitFixPrompt(config: Config, problem: string): string {
 // Every builder prompt, first and resumed: a reply ends the run, and work still pending then is not evaluated.
 export const FINISH_RULE = 'Before your final reply, wait for every command needed for acceptance to complete, inspect its exit status, and commit all ' +
   'required code and evidence. Prefer foreground commands; if a tool backgrounds a long command, poll or wait within this run until it finishes. ' +
-  'Never finish with required work or evidence still pending. Keep any acceptance requirement for a complete gate run: do not replace it with ' +
+  'Never finish with required work or evidence still pending, and stop or finish every background command before your final reply (one that ends ' +
+  'after it starts a stray extra turn). Keep any acceptance requirement for a complete gate run: do not replace it with ' +
   'partial checks; if it cannot complete here, say so plainly with the actual limitation. Begin your final reply with one plain sentence, ' +
   'starting "Summary:", saying what you changed or what stopped you, in words a non-programmer understands (no paths or code). ' +
   'End it with a fenced ```exit block holding one JSON object: {"touched": [the repository paths you changed], "unsure": [assumptions you made ' +
   'or questions you could not settle, at most 5, one line each], "blocked": null, or {"reason": "missing-info" | "spec-conflict" | "environment" | ' +
   '"tooling", "what": one line} when something outside your control stopped you}.';
+
+// Where Claude Code keeps a session's transcript: its project directory is the working directory with every character
+// outside [A-Za-z0-9] replaced by '-'.
+export const transcriptPath = (cwd: string, sessionId: string): string =>
+  join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'), `${sessionId}.jsonl`);
+// The latest assistant reply in a transcript that carries an exit block (null: none, or no transcript).
+export function finalReply(file: string): string | null {
+  let last: string | null = null;
+  try {
+    for (const l of readFileSync(file, 'utf8').split('\n')) {
+      if (!l.includes('```exit')) continue;
+      try {
+        const e = JSON.parse(l) as { type?: string; message?: { content?: unknown } };
+        if (e.type !== 'assistant' || !Array.isArray(e.message?.content)) continue;
+        const t = (e.message!.content as { type?: string; text?: string }[]).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('');
+        if (t.includes('```exit')) last = t;
+      } catch {}
+    }
+  } catch { return null; }
+  return last;
+}
 
 // The builder's exit block, bounded and validated; anything malformed is simply absent (it never fails a run).
 export function parseExit(text: string): BuilderExit | null {
@@ -765,7 +788,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       spent += p.cost;
       if (p.cost) await edit(id, (x) => { x.costUsd = Math.round(((x.costUsd || 0) + p.cost) * 1e6) / 1e6; });
       if (r.timedOut) return { ...p, ok: false, error: `timed out after ${config.timeoutMin} min` };
-      if (role === 'builder' && !opts.diagnose && p.ok) noteExit(p.text, file);
+      if (role === 'builder' && !opts.diagnose && p.ok) noteExit(p.text, file, p.sessionId);
       return r.code === 0 || !p.ok ? p : { ...p, ok: false, error: `exit ${r.code}: ${tail(r.err, 500)}` };
     };
     // Beside each builder run: its exit block, the touches the spec declared and the files actually changed since base (merge-base,
@@ -775,10 +798,15 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       log(root, id, 'prompt', `diagnoser model=${c.model || '-'} effort=${c.effort || '-'}`, undefined, { run: { phase: 'diagnose', tag, role: 'diagnoser', provider: c.provider ?? 'claude',
         model: c.model ?? null, effort: c.effort ?? null, tier: f.tier ?? null, resumed: false, promptBytes: Buffer.byteLength(prompt), ...(fallback ? { fallback: true } : {}) } });
     let predicted: string[] | null = null; // the candidate map's files, for scoring the prediction against the actual diff
-    const noteExit = (text: string, file: string) => {
-      const x = parseExit(text), mb = git(['merge-base', 'HEAD', config.base], wt).out;
+    // A background command finishing after the builder's final reply wakes its session again, and that stray turn becomes the
+    // run's result; the real reply (its Summary line and exit block) is then read from the session transcript.
+    const noteExit = (text: string, file: string, sessionId?: string) => {
+      const real = !/```exit/.test(text) && sessionId ? finalReply(transcriptPath(wt, sessionId)) : null;
+      const x = parseExit(real ?? text), mb = git(['merge-base', 'HEAD', config.base], wt).out;
       const actual = mb ? git(['diff', '--name-only', mb, 'HEAD'], wt).out.split('\n').filter(Boolean) : [];
-      writeFileSync(join(runDir, file.replace(/\.json$/, '.exit.json')), JSON.stringify({ exit: x, declared: f.touches ?? null, predicted, actual }));
+      const summary = /^\s*\**summary:?\**\s*(.+)$/im.exec(real ?? '')?.[1]?.trim();
+      writeFileSync(join(runDir, file.replace(/\.json$/, '.exit.json')), JSON.stringify({ exit: x, declared: f.touches ?? null, predicted, actual,
+        ...(real ? { recovered: true, ...(summary ? { summary: summary.slice(0, 400) } : {}) } : {}) }));
       if (x?.blocked) log(root, id, 'builder-blocked', `${x.blocked.reason}: ${x.blocked.what}`);
     };
 

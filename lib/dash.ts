@@ -1,5 +1,5 @@
 // Dashboard: one page across every project under --root, bound to 127.0.0.1.
-import { readAtoms } from './context.ts';
+import { readAtoms, readIfExists } from './context.ts';
 import type { Scorecard } from './scorecard.ts';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -374,7 +374,10 @@ function storyRuns(dir: string, id: string): StoryRun[] {
     if (!m) return [];
     try {
       const file = join(rd, name), p = parseClaudeOutput(readFileSync(file, 'utf8'));
-      return [{ tag: m[1]!, role: m[2] as StoryRun['role'], at: new Date(statSync(file).mtimeMs).toISOString(), text: p.text, verdict: m[2] === 'eval' && p.ok ? parseVerdict(p.text) : null }];
+      // A build whose last turn was a stray reply: its real Summary line, recovered from the transcript (see noteExit).
+      const rec = m[2] === 'build' ? (tryJson(readIfExists(join(rd, `${m[1]}-build.exit.json`)) ?? '') as { recovered?: boolean; summary?: string } | null) : null;
+      const text = rec?.recovered && rec.summary ? `Summary: ${rec.summary}` : p.text;
+      return [{ tag: m[1]!, role: m[2] as StoryRun['role'], at: new Date(statSync(file).mtimeMs).toISOString(), text, verdict: m[2] === 'eval' && p.ok ? parseVerdict(p.text) : null }];
     } catch { return []; }
   });
 }

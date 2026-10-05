@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { parseExit, parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
+import { finalReply, transcriptPath, parseExit, parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
 
@@ -383,4 +383,18 @@ test('parseExit: the last exit block, bounded; malformed or missing is simply ab
   assert.deepEqual(x, { touched: ['a.ts'], unsure: ['u1', 'u2', 'u3', 'u4', 'u5'], blocked: { reason: 'missing-info', what: 'which currency' } });
   assert.equal(parseExit('```exit\n{"touched": [], "blocked": {"reason": "bored", "what": "x"}}\n```')!.blocked, null);
   assert.equal(parseExit('Summary: no block'), null); assert.equal(parseExit('```exit\nnot json\n```'), null);
+});
+
+test('finalReply and transcriptPath: a stray last turn does not hide the real final reply, read from the session transcript', () => {
+  const d = mkdtempSync(join(tmpdir(), 'tr-')), f = join(d, 's.jsonl');
+  const msg = (type: string, text: string) => JSON.stringify({ type, message: { content: [{ type: 'text', text }] } });
+  writeFileSync(f, [msg('user', 'build it ```exit nope'), msg('assistant', 'Summary: Added the list.\n```exit\n{"touched": ["a.ts"], "unsure": [], "blocked": null}\n```'),
+    msg('assistant', 'Another notification from a background wait; nothing changed.'), 'not json'].join('\n'));
+  try {
+    assert.match(finalReply(f)!, /^Summary: Added the list\./); assert.deepEqual(parseExit(finalReply(f)!)!.touched, ['a.ts']);
+    assert.equal(finalReply(join(d, 'missing.jsonl')), null);
+    const prev = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = '/cfg';
+    assert.equal(transcriptPath('/home/o/Projects/x-worktrees/F99-17.a_b', 'sid'), '/cfg/projects/-home-o-Projects-x-worktrees-F99-17-a-b/sid.jsonl');
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
