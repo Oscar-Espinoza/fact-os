@@ -224,7 +224,9 @@ export interface Control {
   by?: 'dashboard' | 'cli';
 }
 
-export interface FeaturesFile { features: Feature[] }
+// An audit event saved in the same write as the change it records, then appended to the log (idempotently, by id).
+export interface PendingAudit { id: string; feature: string; event: string; detail: string; attemptsReset?: boolean }
+export interface FeaturesFile { features: Feature[]; pendingAudit?: PendingAudit[] }
 export interface HumanFile { tasks: HumanTask[] }
 export interface StateFiles { features: FeaturesFile; human: HumanFile }
 export type StateName = keyof StateFiles;
@@ -271,6 +273,7 @@ export interface LogEvent {
   test?: { code: number | null; file: string | null; error: string | null }; // gate-fix / env-rerun / failed: the failed gate's outcome
   run?: RunRecord;                   // prompt event: who ran this invocation, in which phase, with what (the run ledger)
   failure?: FailureKind;             // failed/stuck event: where the failure came from, set where it happened (the retry ladder reads it)
+  audit?: string;                    // an event published from features.json pendingAudit: its id (published once)
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
   lessonAppend?: { file: string; before: string; after: string };
 }

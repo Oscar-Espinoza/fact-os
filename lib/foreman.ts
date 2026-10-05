@@ -584,8 +584,9 @@ export function parseCodexEvents(stdout: string): { threadId?: string; usage?: u
   }
   return out;
 }
-// A Codex failure that will not clear by itself soon: the account is out of credits, rate limited or logged out.
-export const CODEX_UNAVAILABLE = /usage limit|rate.?limit|quota|credits?|insufficient|\b429\b|unauthori[sz]ed|\b401\b|not logged in|log ?in|authenticat/i;
+// A Codex failure that will not clear by itself soon: the account is out of credits, rate limited, logged out, or its plan does
+// not include the configured model.
+export const CODEX_UNAVAILABLE = /usage limit|rate.?limit|quota|credits?|insufficient|\b429\b|unauthori[sz]ed|\b401\b|not logged in|log ?in|authenticat|model is not supported|not supported when using Codex/i;
 
 export function claudeArgs(config: Config, role: Role | RoleConfig, root: string): string[] {
   const r = typeof role === 'string' ? resolveRole(config, null, role) : role;

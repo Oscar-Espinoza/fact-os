@@ -9,7 +9,8 @@ import { loadConfig } from '../lib/state.ts';
 import type { Feature, SpecFixProposal } from '../lib/types.ts';
 
 const OLD = 'Wall time of the step phase on a branch touching only reports is at least 6 minutes lower than with the base selection, measured back to back (both numbers recorded).';
-const NEW = 'Wall time of the step phase on a branch touching only reports is at least 3 minutes lower than with the base selection, measured back to back on one lane (both numbers recorded).';
+const NEW = OLD.replace('6 minutes', '3 minutes');
+const WORDY = 'Wall time of the step phase on a branch touching only reports is at least 3 minutes lower than with the base selection, measured back to back on one lane (both numbers recorded).';
 const F = (o: Partial<Feature> = {}): Feature => ({ id: 'a', title: 'Run cheap suites only when their module changes', description: 'Speed up the gate.', acceptance: ['Risk suites always run.', OLD],
   surface: 'any', deps: [], priority: 1, status: 'todo', attempts: 1, updatedAt: '', ...o });
 const input = (f: Feature): FixInput => ({ feature: f, feedback: 'FAILED timing: narrowed 107 steps in 437.0 s versus 651.7 s; the saving is 214.7 seconds.', reviewEvidence: ['the audit times came from eight parallel gates'],
@@ -38,10 +39,14 @@ test('shapeProblem: the old text must be current, the change real and bounded, e
 
 test('protectedReason and correctionOnly: auto only corrects a quantity on a feature that touches nothing sensitive; everything else waits for a person', () => {
   assert.equal(protectedReason(F(), draft), null);
-  assert.equal(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within 9 seconds on one lane.'), null);
-  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within seconds.')!, /quantity .* no replacement/);
-  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must not complete within 6 seconds.')!, /adds "not"/);
-  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export completes within 9 seconds.')!, /drops or reorders/);
+  assert.match(protectedReason(F(), { target: 2, old: OLD, new: WORDY })!, /adds or removes wording/); // the live F99-32 fix added "on one lane": a person decides
+  assert.equal(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within 9 seconds.'), null);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within 9 seconds on one lane.')!, /adds or removes wording/);
+  assert.match(correctionOnly('The output quality score must be >= 99 points.', 'The output quality score must be <= 90 points.')!, /changes ">=" to "<="/);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within 9 seconds under ideal conditions.')!, /adds or removes wording/);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must complete within seconds.')!, /quantities .* not all kept/);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export must not complete within 6 seconds.')!, /adds or removes wording/);
+  assert.match(correctionOnly('The export must complete within 6 seconds.', 'The export completes within 9 seconds.')!, /adds or removes wording/);
   assert.match(correctionOnly('Exports are named by date.', 'Exports are named by date and time.')!, /only a corrected quantity/);
   assert.match(protectedReason(F(), { target: 1, old: 'Skip parser tests only on Windows.', new: 'Skip parser tests only on Windows and Linux.' })!, /about tests/);
   assert.match(protectedReason(F(), { target: 'description', old: 'a', new: 'b' })!, /description/);
@@ -126,12 +131,15 @@ test('specFixPass: a stopping observer applies nothing', async (t) => {
 test('candidates: a held todo with matching inputs, or a stuck feature reviewed after its last launch; never twice for the same inputs', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'fact-os-fix-')); t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, '.fact-os'));
-  const config = loadConfig(root), rev = (feature: string, ts: string) => ({ ts, feature, tag: '1', role: 'builder', model: 'opus', effort: 'medium', notes: '-', kind: 'evaluator-rejected', next: '',
-    cause: 'spec-error', evidence: ['q'], confidence: 'high', suggestion: '', target: null, cost: 0 }) as never;
+  const config = loadConfig(root), rev = (feature: string, ts: string, passStart?: string, cause = 'spec-error') => ({ ts, feature, tag: '1', role: 'builder', model: 'opus', effort: 'medium', notes: '-',
+    kind: 'evaluator-rejected', next: '', cause, evidence: ['q'], confidence: 'high', suggestion: '', target: null, cost: 0, ...(passStart ? { passStart } : {}) }) as never;
   const a = F({ id: 'a' }), b = F({ id: 'b', status: 'stuck' }), c = F({ id: 'c', status: 'stuck' });
   const ia = holdInputs(root, config, a);
   a.planningHold = { cause: 'spec-error', confidence: 'high', evidence: ['q'], review: 'a/1', passEnd: '', inputs: ia, ts: '' };
-  const byKey = { 'a/1': rev('a', '2026-10-05T10:00:00Z'), 'b/1': rev('b', '2026-10-05T10:00:00Z'), 'c/1': rev('c', '2026-10-05T08:00:00Z') };
+  // b: its review judged its latest pass. c: the only spec-error review judged an older pass, finished after the latest launch
+  // (the latest pass's own review blamed the implementation) — never attached to the latest pass.
+  const byKey = { 'a/1': rev('a', '2026-10-05T10:00:00Z'), 'b/1': rev('b', '2026-10-05T10:00:00Z', '2026-10-05T09:00:00Z'),
+    'c/1': rev('c', '2026-10-05T10:04:00Z', '2026-10-05T07:00:00Z'), 'c/2': rev('c', '2026-10-05T10:03:00Z', '2026-10-05T09:00:00Z', 'model-limitation') };
   const events = [{ feature: 'b', event: 'launch', ts: '2026-10-05T09:00:00Z' }, { feature: 'c', event: 'launch', ts: '2026-10-05T09:00:00Z' }];
   assert.deepEqual(candidates(root, config, [a, b, c], byKey, events).map((x) => x.f.id), ['a', 'b']);
   a.specFix = { id: 'S', ts: '', status: 'declined', inputs: ia, review: 'a/1', sha: null, drafter: { model: null } };
@@ -140,4 +148,40 @@ test('candidates: a held todo with matching inputs, or a stuck feature reviewed 
   a.specFix = { id: 'S9', ts: '', status: 'none', inputs: 'other', review: 'a/1', sha: null, drafter: { model: null } }; a.specFixDecisions = { [ia]: 'declined' };
   const edited = [{ ...events[0]!, inputs: 'what-it-was-launched-with' }, events[1]!];
   assert.deepEqual(candidates(root, config, [a, b, c], byKey, edited).map((x) => x.f.id), []);
+});
+
+test('audited writes: a failed state write logs nothing; events left pending by a failed append are published once, later', async (t) => {
+  const { mutateWithAudit, publishPendingAudit } = await import('../lib/state.ts');
+  const root = mkdtempSync(join(tmpdir(), 'fact-os-audit-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, '.fact-os'));
+  const L = join(root, '.fact-os/log.jsonl'), FJ = join(root, '.fact-os/features.json');
+  writeFileSync(FJ, JSON.stringify({ features: [F()] }));
+  await mutateWithAudit(root, (d, emit) => { d.features[0]!.attempts = 0; emit({ feature: 'a', event: 'x-happened', detail: 'one' }); });
+  assert.equal((readFileSync(L, 'utf8').match(/"x-happened"/g) ?? []).length, 1);
+  assert.equal(JSON.parse(readFileSync(FJ, 'utf8')).pendingAudit, undefined);
+  // The log cannot be appended: the change and its event are saved; the event is published when the log works again.
+  rmSync(L); mkdirSync(L);
+  await assert.rejects(mutateWithAudit(root, (_d, emit) => emit({ feature: 'a', event: 'y-happened', detail: 'two' })));
+  assert.equal(JSON.parse(readFileSync(FJ, 'utf8')).pendingAudit[0].event, 'y-happened');
+  rmSync(L, { recursive: true }); await publishPendingAudit(root); await publishPendingAudit(root);
+  assert.equal((readFileSync(L, 'utf8').match(/"y-happened"/g) ?? []).length, 1);
+  // The state write fails: nothing is logged.
+  rmSync(FJ); mkdirSync(FJ);
+  await assert.rejects(mutateWithAudit(root, (_d, emit) => emit({ feature: 'a', event: 'z-happened', detail: 'three' })));
+  assert.doesNotMatch(readFileSync(L, 'utf8'), /z-happened/);
+});
+
+test("apply: a proposal drafted from one commit of the feature's branch is stale once the branch moves", async (t) => {
+  const { execFileSync } = await import('node:child_process');
+  const root = mkdtempSync(join(tmpdir(), 'fact-os-fix-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const g = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: root }).toString().trim();
+  g('init', '-q', '-b', 'main'); writeFileSync(join(root, 'x'), '1'); g('add', 'x'); g('commit', '-qm', 'one'); g('branch', 'ship/a');
+  mkdirSync(join(root, '.fact-os'));
+  const config = loadConfig(root), f = F(), inputs = holdInputs(root, config, f), sha = g('rev-parse', 'ship/a');
+  writeFileSync(join(root, '.fact-os/log.jsonl'), JSON.stringify({ ts: 't0', feature: 'a', event: 'launch', detail: '' }) + '\n');
+  const write = () => writeFileSync(join(root, '.fact-os/features.json'), JSON.stringify({ features: [{ ...f, planningHold: { cause: 'spec-error', confidence: 'high', evidence: ['x'], review: 'a/1', passEnd: '', inputs, ts: '' },
+    specFix: { id: 'S1', ts: '', status: 'proposed', inputs, review: 'a/1', sha, launch: 't0', target: 2, old: OLD, new: NEW, why: 'w', drafter: { model: 'opus' } } }] }));
+  g('checkout', '-q', 'ship/a'); writeFileSync(join(root, 'x'), '2'); g('commit', '-qam', 'two'); g('checkout', '-q', 'main');
+  write(); assert.match((await applySpecFix(root, 'a', 'S1', 'person'))!, /branch changed/);
+  g('branch', '-f', 'ship/a', sha); write(); assert.equal(await applySpecFix(root, 'a', 'S1', 'person'), null);
 });

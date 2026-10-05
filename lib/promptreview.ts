@@ -198,6 +198,7 @@ export function parseReview(text: string): ParsedReview | { error: string } {
 // What the observer keeps of one review. A failed answer is kept too (`error`), so a pass is asked about once.
 export interface PromptReview { ts: string; feature: string; tag: string; role: Role; model: string; effort: string; notes: string; kind: PassKind; next: string;
   cause: PromptCause | null; evidence: string[]; confidence: Confidence | null; suggestion: string; target: Target | null; cost: number; error?: string;
+  passStart?: string; passEnd?: string; // the reviewed pass's launch and end (a review completes later; this says which pass it judged)
   noted?: boolean;   // its suggestion went into the model's notes
   filed?: boolean }  // its suggestion went into a human task (a change to the role's template)
 export interface PromptRate { model: string; role: Role; notes: string; since: string; ok: number; bad: number }
@@ -270,7 +271,8 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
       if (!stopping()) failed(k.key);
       return;
     }
-    const a = parseReview(c.text), base = { ts: now(), feature: p.feature, tag: k.tag, role: p.role!, model: used.model, effort: used.effort, notes: used.notes, kind: p.kind!, next: input.next, cost: c.cost };
+    const a = parseReview(c.text), base = { ts: now(), feature: p.feature, tag: k.tag, role: p.role!, model: used.model, effort: used.effort, notes: used.notes, kind: p.kind!, next: input.next, cost: c.cost,
+      passStart: p.start, passEnd: p.end };
     reviews[k.key] = 'error' in a ? { ...base, cause: null, evidence: [], confidence: null, suggestion: '', target: null, error: `invalid answer: ${a.error}` } : { ...base, ...a };
     delete tries[k.key];
     log(root, null, 'observer-review', `${k.key} ${p.role} ${used.model}: ${'error' in a ? `invalid answer (${a.error})` : `${a.cause} (${a.confidence})`}; $${c.cost.toFixed(2)}`);

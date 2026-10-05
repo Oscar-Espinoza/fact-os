@@ -314,6 +314,7 @@ test('parseCodexEvents: thread id, usage and real failures; warning items are no
   assert.deepEqual(parseCodexEvents(events), { threadId: 't-1', usage: { input_tokens: 18967, output_tokens: 9 } });
   assert.equal(parseCodexEvents(JSON.stringify({ type: 'turn.failed', error: { message: 'usage limit reached' } })).error, 'usage limit reached');
   assert.ok(CODEX_UNAVAILABLE.test("You've hit your usage limit") && !CODEX_UNAVAILABLE.test('stream disconnected before completion'));
+  assert.ok(CODEX_UNAVAILABLE.test("The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.")); // the plan lost the model: cool down
   assert.deepEqual(codexArgs({ model: 'gpt-6.1-sol', effort: 'xhigh' }, '/tmp/last').slice(0, 5), ['exec', '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="xhigh"']);
 });
 

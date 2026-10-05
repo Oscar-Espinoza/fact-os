@@ -1,8 +1,8 @@
 // State files: JSON, written atomically (temp + rename) under a populated .fact-os/.lock directory.
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, appendFileSync, lstatSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import type { ClassifierConfig, EscalationConfig, Config, Control, Feature, HumanTask, LogEvent, Paths, SpecFixMode, StateFiles, StateName } from './types.ts';
+import type { ClassifierConfig, EscalationConfig, Config, Control, Feature, FeaturesFile, HumanTask, LogEvent, Paths, PendingAudit, SpecFixMode, StateFiles, StateName } from './types.ts';
 import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } from './profiles.ts';
 
 // Shadow classifier operating bounds (I07 v2). The model is pinned: the battery and scorer were evaluated on jev-1.13.0.
@@ -191,6 +191,26 @@ export function mutate<N extends StateName, R>(root: string, name: N, fn: (data:
     writeJsonAtomic(file, data);
     return out;
   });
+}
+
+// Like mutate('features'), for a change that must be logged: `emit` queues its events, which are saved in the same atomic write
+// as the change (features.json pendingAudit) and only then appended to the log, still under the lock, each once by id. A failed
+// state write logs nothing; a failed log append leaves them pending, published by the next call (or publishPendingAudit).
+export function mutateWithAudit<R>(root: string, fn: (data: FeaturesFile, emit: (a: Omit<PendingAudit, 'id'>) => void) => R | Promise<R>): Promise<R> {
+  return withLock(root, async () => {
+    const file = paths(root).features, data = readState(root, 'features'), queued: PendingAudit[] = [];
+    const out = await fn(data, (a) => queued.push({ id: randomBytes(6).toString('hex'), ...a }));
+    if (queued.length) data.pendingAudit = [...(data.pendingAudit ?? []), ...queued];
+    writeJsonAtomic(file, data);
+    if (data.pendingAudit?.length) { publishAudit(root, data); writeJsonAtomic(file, data); }
+    return out;
+  });
+}
+export const publishPendingAudit = (root: string): Promise<void> => mutateWithAudit(root, () => {});
+function publishAudit(root: string, data: FeaturesFile): void {
+  const seen = new Set(tailLines(paths(root).log, 2000).flatMap((l) => { const m = /"audit":"([0-9a-f]+)"/.exec(l); return m ? [m[1]!] : []; }));
+  for (const a of data.pendingAudit ?? []) if (!seen.has(a.id)) log(root, a.feature, a.event, a.detail, undefined, { audit: a.id, ...(a.attemptsReset ? { attemptsReset: true } : {}) });
+  delete data.pendingAudit;
 }
 
 // Validate only supplied known fields. Missing fields keep existing shallow defaults;
@@ -408,7 +428,7 @@ export async function writeControl(root: string, patch: Partial<Pick<Control, 'p
 export const effectiveLimit = (c: Pick<Control, 'paused' | 'maxParallel'>, config: Pick<Config, 'maxParallel'>): number =>
   c.paused ? 0 : c.maxParallel ?? Math.max(1, config.maxParallel);
 
-export function log(root: string, feature: string | null, event: string, detail = '', lessonAppend?: LogEvent['lessonAppend'], metadata?: Pick<LogEvent, 'stop' | 'attemptsReset' | 'cause' | 'sha' | 'inputs' | 'test' | 'run' | 'failure'>): void {
+export function log(root: string, feature: string | null, event: string, detail = '', lessonAppend?: LogEvent['lessonAppend'], metadata?: Pick<LogEvent, 'stop' | 'attemptsReset' | 'cause' | 'sha' | 'inputs' | 'test' | 'run' | 'failure' | 'audit'>): void {
   const e: LogEvent = { ts: new Date().toISOString(), feature, event, detail, ...(lessonAppend ? { lessonAppend } : {}), ...metadata };
   appendFileSync(paths(root).log, JSON.stringify(e) + '\n');
 }

@@ -12,7 +12,7 @@ import type { ChildProcess } from 'node:child_process';
 import { claudeArgs, exec, git, holdInputs, parseClaudeOutput, parseCodexEvents } from './foreman.ts';
 import type { PromptReview } from './promptreview.ts';
 import { riskFamilies } from './profiles.ts';
-import { childEnv, envVar, loadConfig, log, mutate, paths, readControlFile } from './state.ts';
+import { childEnv, envVar, loadConfig, mutate, mutateWithAudit, paths, publishPendingAudit, readControlFile } from './state.ts';
 import type { Config, Feature, LogEvent, RoleConfig, SpecFixMode, SpecFixProposal, SpecFixRecord } from './types.ts';
 
 export const FIX_MAX = 1500;           // characters of a replacement
@@ -101,11 +101,6 @@ const textOf = (f: Feature, target: number | 'description'): string | undefined 
 
 const SENSITIVE = /\b(money|payments?|pay|refunds?|prices?|pricing|tax(es)?|invoices?|billing|charge[ds]?|currency|auth\w*|log ?in|sessions?|permissions?|roles?|tenants?|tenancy|security|secrets?|credentials?|tokens?|privacy|personal|pii|gdpr|delet\w*|purge|retention|erase|migrations?|schema|concurren\w*|race|locks?|idempoten\w*|transactions?|atomic\w*|state machine|exactly once|at least once|duplicat\w*|consisten\w*)\b/i;
 const TESTISH = /\b(tests?|suites?|assert\w*|coverage|skip\w*|xfail|flak\w*)\b/i;
-const LOOSENERS = /^(not|no|never|without|except|excluding|unless|optional|optionally|may|might|should|could|can|skip\w*|ignore\w*|exclude\w*|disable\w*|allow\w*|best|effort|ideally|approximately|about|around|roughly|up|any|or)$/;
-// Why a proposal may only be applied by a person (null: auto may apply it). Auto handles one narrow kind of correction: the
-// same requirement, word for word and in order, with a corrected quantity and at most a few added qualifiers that cannot
-// loosen it, on a feature whose title, description and acceptance touch nothing sensitive (read directly, whatever risk
-// override the feature carries).
 export function protectedReason(f: Feature, d: Pick<Draft, 'target' | 'old' | 'new'>): string | null {
   if (d.target === 'description') return 'it rewrites the description, which can change the whole scope';
   if (f.tier === 'risky' || (f as { risk?: unknown }).risk === 'high' || riskFamilies(`${f.title}\n${f.description ?? ''}`).length) return 'the feature is risky (money, auth, tenancy or similar)';
@@ -114,24 +109,21 @@ export function protectedReason(f: Feature, d: Pick<Draft, 'target' | 'old' | 'n
   if (TESTISH.test(`${d.old}\n${d.new}`)) return 'the requirement is about tests';
   return correctionOnly(d.old, d.new);
 }
-const toks = (s: string) => s.toLowerCase().match(/\d+(?:[.,]\d+)?|[a-z][a-z'-]*/g) ?? [];
+// Words, numbers and the symbols that carry meaning (comparisons, signs, units like %), in order.
+const toks = (s: string) => s.toLowerCase().match(/\d+(?:[.,]\d+)?|[a-z][a-z'-]*|[<>]=?|[=≥≤±%+\-*/]/g) ?? [];
 const isNum = (t: string) => /^\d/.test(t);
-// Null when `next` keeps every word of `old` in order (numbers may change, never disappear) and only adds a few words that cannot
-// loosen it; else why not.
+// Null when `next` is `old` with only its quantities changed: every word, comparison, sign and unit identical and in order, the
+// same number of quantities, nothing added or removed. Anything else (an added condition, a reversed comparison, a dropped number)
+// needs a person; else why not.
 export function correctionOnly(old: string, next: string): string | null {
-  const a = toks(old), b = toks(next), added: string[] = [];
-  let j = 0;
-  for (const t of a) {
-    while (j < b.length && (isNum(t) ? !isNum(b[j]!) : b[j] !== t)) added.push(b[j++]!);
-    if (j >= b.length) return isNum(t) ? 'a quantity of the old requirement has no replacement' : 'the replacement drops or reorders wording of the old requirement';
-    j++;
+  const a = toks(old), b = toks(next);
+  if (!a.some(isNum)) return 'only a corrected quantity can be applied automatically';
+  if (a.length !== b.length) return a.filter(isNum).length !== b.filter(isNum).length ? 'the quantities of the old requirement are not all kept' : 'the replacement adds or removes wording';
+  for (let i = 0; i < a.length; i++) {
+    if (isNum(a[i]!) !== isNum(b[i]!)) return 'a quantity of the old requirement has no replacement';
+    if (!isNum(a[i]!) && a[i] !== b[i]) return `the replacement changes "${a[i]}" to "${b[i]}"`;
   }
-  added.push(...b.slice(j));
-  const words = added.filter((t) => !isNum(t));
-  if (words.some((t) => LOOSENERS.test(t))) return `the replacement adds "${words.find((t) => LOOSENERS.test(t))}", which can loosen the requirement`;
-  if (words.length > 6) return 'the replacement adds more than a few words';
-  if (a.filter(isNum).length === 0) return 'only a corrected quantity can be applied automatically';
-  return null;
+  return a.some((t, i) => isNum(t) && t !== b[i]) ? null : 'no quantity changes';
 }
 
 // ---- apply, dismiss, undo ----
@@ -157,6 +149,10 @@ export function currentFailure(f: Feature, p: Pick<SpecFixProposal, 'review' | '
   return null;
 }
 
+// The feature branch's current commit (null: no branch). A proposal's evidence was read at the commit it records; when the branch
+// moved, that evidence may no longer be the feature's, so the proposal is stale.
+export const branchHead = (root: string, config: Config, f: Feature): string | null =>
+  git(['rev-parse', '--verify', '--quiet', f.branch || config.branchPrefix + f.id], root).out || null;
 export interface ApplyOpts { stopping?: () => boolean }
 // Why `by` may not apply proposal `id` to `f` now (null: it may). Everything is rechecked at apply time, under the lock.
 export function applyProblem(root: string, config: Config, f: Feature, id: string, by: 'person' | 'auto', events: LogEvent[] = readEvents(root, f.id)): string | null {
@@ -170,6 +166,7 @@ export function applyProblem(root: string, config: Config, f: Feature, id: strin
   if (!p.new || p.new.length > FIX_MAX || p.new.length > 2 * (p.old ?? '').length) return 'the replacement is out of bounds';
   const stale = currentFailure(f, p, events);
   if (stale) return stale;
+  if (p.sha !== undefined && branchHead(root, config, f) !== p.sha) return "the feature's branch changed since the fix was drafted";
   if (by === 'auto') {
     if (specFixMode(root, config) !== 'auto') return 'spec fixes are not in auto mode (or the control file is invalid)';
     if (f.status === 'paused') return 'a person paused the feature';
@@ -198,7 +195,7 @@ const decide = (f: Feature, inputs: string, what: string) => {
 // and keeps a person's pause. Returns why not, or null.
 export async function applySpecFix(root: string, featureId: string, id: string, by: 'person' | 'auto', opts: ApplyOpts = {}): Promise<string | null> {
   const config = loadConfig(root);
-  return mutate(root, 'features', (d) => {
+  return mutateWithAudit(root, (d, emit) => {
     if (opts.stopping?.()) return 'stopping';
     const f = d.features.find((x) => x.id === featureId);
     if (!f) return 'unknown feature';
@@ -212,21 +209,22 @@ export async function applySpecFix(root: string, featureId: string, id: string, 
     (f.specFixes ??= []).push({ id, ts: now(), by, target: p.target!, old: p.old!, new: p.new!, why: p.why ?? '', after: holdInputs(root, config, f),
       drafter: p.drafter, ...(p.verifier ? { verifier: p.verifier } : {}), ...(p.evidence ? { evidence: p.evidence } : {}), review: p.review });
     p.status = 'applied'; decide(f, p.inputs, 'applied');
-    // Logged inside the lock: a failed write throws before the feature file is written, and no launch can come between.
-    log(root, featureId, 'acceptance-changed', `spec fix ${id} applied ${by === 'auto' ? 'automatically' : 'by a person'} (${what}; drafted by ${p.drafter.model ?? 'the observer'}, ` +
-      `${p.verifier?.agree === true ? `verified by ${p.verifier.model ?? p.verifier.provider}` : 'not verified'}): ${p.why}`, undefined, { attemptsReset: true });
-    log(root, featureId, 'spec-fix-applied', `${id} ${by}: ${what}: "${p.old}" → "${p.new}"`);
+    // Saved with the change and logged under the same lock (mutateWithAudit): no launch can come between, and a failed state
+    // write logs nothing.
+    emit({ feature: featureId, event: 'acceptance-changed', attemptsReset: true, detail: `spec fix ${id} applied ${by === 'auto' ? 'automatically' : 'by a person'} (${what}; drafted by ` +
+      `${p.drafter.model ?? 'the observer'}, ${p.verifier?.agree === true ? `verified by ${p.verifier.model ?? p.verifier.provider}` : 'not verified'}): ${p.why}` });
+    emit({ feature: featureId, event: 'spec-fix-applied', detail: `${id} ${by}: ${what}: "${p.old}" → "${p.new}"` });
     return null;
   });
 }
 
 export async function dismissSpecFix(root: string, featureId: string, id: string): Promise<string | null> {
-  return mutate(root, 'features', (d) => {
+  return mutateWithAudit(root, (d, emit) => {
     const f = d.features.find((x) => x.id === featureId);
     if (!f?.specFix || f.specFix.id !== id) return 'no such proposal';
     if (f.specFix.status !== 'proposed') return `the proposal is ${f.specFix.status}`;
     f.specFix.status = 'declined'; f.updatedAt = now(); decide(f, f.specFix.inputs, 'declined');
-    log(root, featureId, 'spec-fix-declined', `${id} by a person`);
+    emit({ feature: featureId, event: 'spec-fix-declined', detail: `${id} by a person` });
     return null;
   });
 }
@@ -244,7 +242,7 @@ export function undoProblem(root: string, config: Config, f: Feature, id: string
 // Restores record `id` (the one the person was shown). A new cycle starts; a pause stays; the one automatic fix stays spent.
 export async function undoSpecFix(root: string, featureId: string, id: string): Promise<string | null> {
   const config = loadConfig(root);
-  return mutate(root, 'features', (d) => {
+  return mutateWithAudit(root, (d, emit) => {
     const f = d.features.find((x) => x.id === featureId);
     if (!f) return 'unknown feature';
     const err = undoProblem(root, config, f, id);
@@ -253,8 +251,8 @@ export async function undoSpecFix(root: string, featureId: string, id: string): 
     if (last.target === 'description') f.description = last.old; else f.acceptance[(last.target as number) - 1] = last.old;
     last.undone = now();
     newCycle(f);
-    log(root, featureId, 'acceptance-changed', `spec fix ${id} undone by a person: the earlier text is back`, undefined, { attemptsReset: true });
-    log(root, featureId, 'spec-fix-undone', id);
+    emit({ feature: featureId, event: 'acceptance-changed', attemptsReset: true, detail: `spec fix ${id} undone by a person: the earlier text is back` });
+    emit({ feature: featureId, event: 'spec-fix-undone', detail: id });
     return null;
   });
 }
@@ -297,7 +295,7 @@ export function candidates(root: string, config: Config, features: Feature[], by
   { f: Feature; review: PromptReview; key: string; inputs: string; launch: string | undefined }[] {
   return features.flatMap((f) => {
     if (f.status !== 'todo' && f.status !== 'stuck') return [];
-    const mine = Object.entries(byKey).filter(([, r]) => r.feature === f.id && r.cause === 'spec-error').sort((a, b) => a[1].ts.localeCompare(b[1].ts)), latest = mine.at(-1);
+    const mine = Object.entries(byKey).filter(([, r]) => r.feature === f.id && r.cause === 'spec-error').sort((a, b) => (a[1].passStart ?? a[1].ts).localeCompare(b[1].passStart ?? b[1].ts)), latest = mine.at(-1);
     if (!latest) return [];
     const inputs = holdInputs(root, config, f); // only for features a spec-error review blamed: it reads the briefs
     if ((f.specFix && f.specFix.inputs === inputs) || f.specFixDecisions?.[inputs]) return [];
@@ -306,9 +304,11 @@ export function candidates(root: string, config: Config, features: Feature[], by
       const h = f.planningHold, held = h && byKey[h.review];
       return h?.cause === 'spec-error' && h.inputs === inputs && held ? [{ f, review: held, key: h.review, inputs, launch: launch?.ts }] : [];
     }
+    // A stuck feature: only a review of its latest pass (by the pass it judged, not when the review finished) and only while the
+    // spec is still the one that pass was launched with. A review that does not say which pass it judged is never used.
     const [key, review] = latest;
-    if ((review.confidence !== 'high' && review.confidence !== 'medium') || (launch && review.ts <= launch.ts) || (launch?.inputs && launch.inputs !== inputs)) return [];
-    return [{ f, review, key, inputs, launch: launch?.ts }];
+    if (!launch || review.passStart !== launch.ts || (review.confidence !== 'high' && review.confidence !== 'medium') || (launch.inputs && launch.inputs !== inputs)) return [];
+    return [{ f, review, key, inputs, launch: launch.ts }];
   });
 }
 
@@ -331,13 +331,14 @@ export async function specFixPass(root: string, config: Config, drafter: RoleCon
   state.specFixRuns = (state.specFixRuns ?? []).filter((t) => Date.parse(t) > day);
   const tries = state.specFixTries ??= {};
   const reserve = () => { state.specFixRuns!.push(now()); save(); };
+  await publishPendingAudit(root); // events a failed append left pending
   const features = (JSON.parse(readFileSync(paths(root).features, 'utf8')) as { features: Feature[] }).features;
   const todo = candidates(root, config, features, state.promptReviews ?? {}, events).filter((c) => (tries[`${c.f.id}:${c.inputs}`] ?? 0) < TRIES_PER_SPEC);
   for (const { f, review, key, inputs, launch } of todo.slice(0, DRAFTS_PER_PASS)) {
     if (io.stopping() || state.specFixRuns.length >= DRAFTS_PER_DAY) break;
     const tk = `${f.id}:${inputs}`;
     tries[tk] = (tries[tk] ?? 0) + 1; reserve(); // a crash mid-run still counts the attempt and the run
-    const branch = f.branch || config.branchPrefix + f.id, sha = git(['rev-parse', '--verify', '--quiet', branch], root).out || null;
+    const sha = branchHead(root, config, f);
     const input: FixInput = { feature: f, feedback: f.lastFeedback ?? '', reviewEvidence: review.evidence, files: sha ? evidenceFiles(root, sha, f.id) : [] };
     const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...drafter, permissionMode: 'plan' }, root), { cwd: root, env: childEnv(), input: draftPrompt(input), children: io.children, timeoutMin: 15 });
     if (io.stopping()) return;
@@ -349,7 +350,8 @@ export async function specFixPass(root: string, config: Config, drafter: RoleCon
     if (!d.fix || bad) proposal = { id: `S-none-${inputs.slice(0, 8)}`, status: 'none', reason: d.fix ? `the draft was not usable: ${bad}` : d.reason, ...base };
     else {
       let v: { text: string; model: string | null } | null = null;
-      if (verifier?.provider === 'codex') { reserve(); v = await runCodex(verifier, verifyPrompt(input, d.fix), root, io); }
+      // Verification is a run too: only within the day's budget (without it the proposal stays unverified, for a person).
+      if (verifier?.provider === 'codex' && state.specFixRuns.length < DRAFTS_PER_DAY) { reserve(); v = await runCodex(verifier, verifyPrompt(input, d.fix), root, io); }
       if (io.stopping()) return;
       const pv = v ? parseVerify(v.text) : null;
       const prot = protectedReason(f, d.fix);
@@ -357,16 +359,16 @@ export async function specFixPass(root: string, config: Config, drafter: RoleCon
         verifier: pv ? { provider: 'codex', model: v!.model, agree: pv.agree, reason: pv.reason } : { provider: verifier?.provider ?? 'none', model: verifier?.model ?? null, agree: null, reason: 'verification did not run or gave no usable answer' },
         ...(prot ? { protectedBy: prot } : {}) };
     }
-    const stored = await mutate(root, 'features', (data) => {
+    const stored = await mutateWithAudit(root, (data, emit) => {
       if (io.stopping()) return false;
       const x = data.features.find((y) => y.id === f.id);
       // Published only while it still answers the latest failure with the same spec.
-      if (!x || holdInputs(root, config, x) !== inputs || currentFailure(x, proposal, readEvents(root, f.id)) || (x.specFix && x.specFix.inputs === inputs)) return false;
+      if (!x || holdInputs(root, config, x) !== inputs || currentFailure(x, proposal, readEvents(root, f.id)) || branchHead(root, config, x) !== sha || (x.specFix && x.specFix.inputs === inputs)) return false;
       x.specFix = proposal;
       if (proposal.status === 'none') decide(x, inputs, 'none');
-      log(root, f.id, proposal.status === 'none' ? 'spec-fix-none' : 'spec-fix-proposed', proposal.status === 'none' ? proposal.reason ?? '' :
+      emit({ feature: f.id, event: proposal.status === 'none' ? 'spec-fix-none' : 'spec-fix-proposed', detail: proposal.status === 'none' ? proposal.reason ?? '' :
         `${proposal.id}: ${proposal.target === 'description' ? 'the description' : `acceptance item ${proposal.target}`}: "${proposal.old}" → "${proposal.new}"; ` +
-        `Codex ${proposal.verifier?.agree === true ? 'agrees' : proposal.verifier?.agree === false ? `disagrees (${proposal.verifier.reason})` : 'did not verify'}`);
+        `Codex ${proposal.verifier?.agree === true ? 'agrees' : proposal.verifier?.agree === false ? `disagrees (${proposal.verifier.reason})` : 'did not verify'}` });
       return true;
     });
     save();
