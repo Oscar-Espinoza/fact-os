@@ -451,23 +451,29 @@ export const FINISH_RULE = 'Before your final reply, wait for every command need
   'or questions you could not settle, at most 5, one line each], "blocked": null, or {"reason": "missing-info" | "spec-conflict" | "environment" | ' +
   '"tooling", "what": one line} when something outside your control stopped you}.';
 
-// Where Claude Code keeps a session's transcript: its project directory is the working directory with every character
-// outside [A-Za-z0-9] replaced by '-'.
-export const transcriptPath = (cwd: string, sessionId: string): string =>
-  join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'), `${sessionId}.jsonl`);
-// The latest assistant reply in a transcript that carries an exit block (null: none, or no transcript).
-export function finalReply(file: string): string | null {
-  let last: string | null = null;
+// Where Claude Code keeps a session's transcript: its project directory is the working directory with every character outside
+// [A-Za-z0-9] replaced by '-'; a key over 200 characters is cut to 200 plus '-' and a base-36 hash of the path (Claude Code
+// 2.1.289's rule).
+export function transcriptPath(cwd: string, sessionId: string): string {
+  let key = cwd.replace(/[^A-Za-z0-9]/g, '-');
+  if (key.length > 200) { let h = 0; for (let i = 0; i < cwd.length; i++) h = ((h << 5) - h + cwd.charCodeAt(i)) | 0; key = `${key.slice(0, 200)}-${Math.abs(h).toString(36)}`; }
+  return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects', key, `${sessionId}.jsonl`);
+}
+// Lines in a transcript now (0 when there is none): taken before a resumed run, so recovery reads only that run's records.
+export const transcriptLines = (file: string): number => { try { return readFileSync(file, 'utf8').split('\n').length - 1; } catch { return 0; } };
+// The latest main-conversation assistant reply after line `from` that carries a valid exit block (null: none, or no transcript).
+export function finalReply(file: string, from = 0): { text: string; uuid?: string; ts?: string } | null {
+  let last: { text: string; uuid?: string; ts?: string } | null = null;
   try {
-    for (const l of readFileSync(file, 'utf8').split('\n')) {
-      if (!l.includes('```exit')) continue;
+    readFileSync(file, 'utf8').split('\n').slice(from).forEach((l) => {
+      if (!l.includes('```exit')) return;
       try {
-        const e = JSON.parse(l) as { type?: string; message?: { content?: unknown } };
-        if (e.type !== 'assistant' || !Array.isArray(e.message?.content)) continue;
+        const e = JSON.parse(l) as { type?: string; isSidechain?: boolean; uuid?: string; timestamp?: string; message?: { content?: unknown } };
+        if (e.type !== 'assistant' || e.isSidechain || !Array.isArray(e.message?.content)) return;
         const t = (e.message!.content as { type?: string; text?: string }[]).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('');
-        if (t.includes('```exit')) last = t;
+        if (parseExit(t)) last = { text: t, ...(e.uuid ? { uuid: e.uuid } : {}), ...(e.timestamp ? { ts: e.timestamp } : {}) };
       } catch {}
-    }
+    });
   } catch { return null; }
   return last;
 }
@@ -781,6 +787,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const roleCfg = (role: Role) => (role === 'builder' && ladder ? ladder.cfg : resolveRole(config, profile, role, { feature: f }));
     // `diagnose`: the run is a diagnosis made with the builder's permissions; it is not builder work (no exit block, no run dir).
     const claude = async (role: Role, prompt: string, file: string, opts: { extra?: string[]; cfg?: RoleConfig; diagnose?: boolean } = {}): Promise<ClaudeResult> => {
+      const ri = (opts.extra ?? []).indexOf('--resume'), resumed = ri >= 0 ? opts.extra![ri + 1] : undefined;
+      const before = role === 'builder' && resumed ? transcriptLines(transcriptPath(wt, resumed)) : 0;
       const r = await exec(envVar('CLAUDE') || 'claude', [...claudeArgs(config, opts.cfg ?? roleCfg(role), root), ...(role === 'builder' && !opts.diagnose ? ['--add-dir', runDir] : []), ...(opts.extra ?? [])],
         { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin, onSpawn });
       writeFileSync(join(runDir, file), tryJson(r.out) ? r.out : JSON.stringify({ exitCode: r.code, stdout: r.out, stderr: tail(r.err) }));
@@ -788,7 +796,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       spent += p.cost;
       if (p.cost) await edit(id, (x) => { x.costUsd = Math.round(((x.costUsd || 0) + p.cost) * 1e6) / 1e6; });
       if (r.timedOut) return { ...p, ok: false, error: `timed out after ${config.timeoutMin} min` };
-      if (role === 'builder' && !opts.diagnose && p.ok) noteExit(p.text, file, p.sessionId);
+      if (role === 'builder' && !opts.diagnose && p.ok) noteExit(p.text, file, p.sessionId, resumed ? before : 0);
       return r.code === 0 || !p.ok ? p : { ...p, ok: false, error: `exit ${r.code}: ${tail(r.err, 500)}` };
     };
     // Beside each builder run: its exit block, the touches the spec declared and the files actually changed since base (merge-base,
@@ -800,13 +808,14 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     let predicted: string[] | null = null; // the candidate map's files, for scoring the prediction against the actual diff
     // A background command finishing after the builder's final reply wakes its session again, and that stray turn becomes the
     // run's result; the real reply (its Summary line and exit block) is then read from the session transcript.
-    const noteExit = (text: string, file: string, sessionId?: string) => {
-      const real = !/```exit/.test(text) && sessionId ? finalReply(transcriptPath(wt, sessionId)) : null;
-      const x = parseExit(real ?? text), mb = git(['merge-base', 'HEAD', config.base], wt).out;
+    // `from`: the transcript's length before this run (a resumed session's earlier replies belong to earlier runs).
+    const noteExit = (text: string, file: string, sessionId?: string, from = 0) => {
+      const own = parseExit(text), real = !own && sessionId ? finalReply(transcriptPath(wt, sessionId), from) : null;
+      const x = own ?? (real ? parseExit(real.text) : null), mb = git(['merge-base', 'HEAD', config.base], wt).out;
       const actual = mb ? git(['diff', '--name-only', mb, 'HEAD'], wt).out.split('\n').filter(Boolean) : [];
-      const summary = /^\s*\**summary:?\**\s*(.+)$/im.exec(real ?? '')?.[1]?.trim();
+      const summary = real ? /^\s*\**summary:?\**\s*(.+)$/im.exec(real.text)?.[1]?.trim() : undefined;
       writeFileSync(join(runDir, file.replace(/\.json$/, '.exit.json')), JSON.stringify({ exit: x, declared: f.touches ?? null, predicted, actual,
-        ...(real ? { recovered: true, ...(summary ? { summary: summary.slice(0, 400) } : {}) } : {}) }));
+        ...(real ? { recovered: true, reply: { uuid: real.uuid ?? null, ts: real.ts ?? null }, ...(summary ? { summary: summary.slice(0, 400) } : {}) } : {}) }));
       if (x?.blocked) log(root, id, 'builder-blocked', `${x.blocked.reason}: ${x.blocked.what}`);
     };
 

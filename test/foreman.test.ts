@@ -385,16 +385,24 @@ test('parseExit: the last exit block, bounded; malformed or missing is simply ab
   assert.equal(parseExit('Summary: no block'), null); assert.equal(parseExit('```exit\nnot json\n```'), null);
 });
 
-test('finalReply and transcriptPath: a stray last turn does not hide the real final reply, read from the session transcript', () => {
+test('finalReply and transcriptPath: the real final reply of this run only — a stray last turn, an earlier resumed run, a sidechain or a marker mention never decide it', () => {
   const d = mkdtempSync(join(tmpdir(), 'tr-')), f = join(d, 's.jsonl');
-  const msg = (type: string, text: string) => JSON.stringify({ type, message: { content: [{ type: 'text', text }] } });
-  writeFileSync(f, [msg('user', 'build it ```exit nope'), msg('assistant', 'Summary: Added the list.\n```exit\n{"touched": ["a.ts"], "unsure": [], "blocked": null}\n```'),
-    msg('assistant', 'Another notification from a background wait; nothing changed.'), 'not json'].join('\n'));
+  const msg = (type: string, text: string, o = {}) => JSON.stringify({ type, uuid: `u${text.length}`, timestamp: 't', message: { content: [{ type: 'text', text }] }, ...o });
+  const exit = (t: string) => `\n\`\`\`exit\n{"touched": ["${t}"], "unsure": [], "blocked": null}\n\`\`\``;
+  const earlier = [msg('user', 'build it'), msg('assistant', 'Summary: Added the list; all checks pass.' + exit('list.ts'))];
+  const now = [msg('user', 'repair it'), msg('assistant', 'Summary: Repaired the guard.' + exit('guard.ts')), msg('assistant', 'Side work.' + exit('side.ts'), { isSidechain: true }),
+    msg('assistant', 'Another notification: I already sent the ```exit block; nothing changed.'), msg('assistant', 'Nothing changed.'), 'not json'];
+  writeFileSync(f, [...earlier, ...now].join('\n') + '\n');
   try {
-    assert.match(finalReply(f)!, /^Summary: Added the list\./); assert.deepEqual(parseExit(finalReply(f)!)!.touched, ['a.ts']);
+    const r = finalReply(f, earlier.length)!;
+    assert.match(r.text, /^Summary: Repaired the guard\./); assert.deepEqual(parseExit(r.text)!.touched, ['guard.ts']);
+    writeFileSync(f, [...earlier, msg('user', 'repair it'), msg('assistant', 'Summary: Could not finish the checks.')].join('\n') + '\n');
+    assert.equal(finalReply(f, earlier.length), null); // this run left no exit: nothing from the earlier run is borrowed
     assert.equal(finalReply(join(d, 'missing.jsonl')), null);
     const prev = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = '/cfg';
     assert.equal(transcriptPath('/home/o/Projects/x-worktrees/F99-17.a_b', 'sid'), '/cfg/projects/-home-o-Projects-x-worktrees-F99-17-a-b/sid.jsonl');
+    const long = '/home/oscar/Projects/' + 'a'.repeat(185) + '/worktrees/F99-17', key = transcriptPath(long, 'sid').split('/').at(-2)!;
+    assert.equal(key.length, 207); assert.match(key, /-lnrja3$/); // Claude Code 2.1.289's own key for this path assert.equal(key.slice(0, 200), long.replace(/[^A-Za-z0-9]/g, '-').slice(0, 200));
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
