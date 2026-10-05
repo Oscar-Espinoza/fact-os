@@ -1,0 +1,54 @@
+/* Settings view (#settings): the factory controls from control.json (pause, setup hold, mode, spec fixes, lanes). */
+#settings .set-wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+#settings .set-hd h2{margin:0 0 4px;font-size:20px;font-weight:600}
+#settings .set-hd p{margin:0;font-size:13px}
+#settings .blank{margin:0}
+#settings .blank[hidden]{display:none}
+.set-warn{padding:10px 14px;border:1px solid rgba(245,183,59,.45);background:rgba(245,183,59,.1);color:var(--amber);border-radius:var(--r);font-size:13px}
+.set-warn[hidden]{display:none}
+.set-list[hidden]{display:none}
+.set-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px 24px;align-items:center;padding:16px 18px}
+.set-row+.set-row{border-top:1px solid var(--line)}
+.set-row[hidden]{display:none}
+.set-k h3{margin:0 0 3px;font-size:14px;font-weight:600}
+.set-k p{margin:0;font-size:12.5px;color:var(--muted);overflow-wrap:anywhere}
+.set-v{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.set-v small{font-size:12px;text-align:right}
+.set-roles{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:2px;font-size:11.5px;color:var(--dim)}
+.set-roles:empty{display:none}
+.set-roles b{color:var(--nav);font-weight:500}
+/* lanes stepper */
+.lanes{display:flex;align-items:center;gap:8px}
+.ib{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0;background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);font-size:16px;line-height:1;cursor:pointer}
+.ib:hover:not(:disabled){border-color:#34455c;background:#1a2638}
+.ib:disabled{opacity:.4;cursor:default}
+#settings .ib{width:32px;height:32px}
+.lanes-t{font-size:13px;color:var(--muted);white-space:nowrap}
+.lanes-t b{color:var(--fg);font-family:var(--mono);font-weight:500}
+.lanes-t small{font-size:12px;color:var(--dim)}
+.lanes-t .warn{color:var(--amber);font-weight:600}
+#lanes-def[hidden]{display:none}
+/* mode switch (model profile): neutral in the main mode (Opus), blue-tinted under another profile */
+.mode{padding:0 12px;gap:0}
+.mode[hidden]{display:none}
+.mode .mode-k{color:var(--muted);font-weight:400;white-space:pre}
+.mode.alt{border-color:var(--blue2);box-shadow:inset 0 0 0 1px var(--blue2)}
+/* spec-fix mode (control.json `specFixes`): Manual | Auto */
+.sfx{display:flex;align-items:center}
+.sfx button{height:32px;padding:0 12px;background:var(--raised);color:var(--muted);border:1px solid var(--line2);font-size:13px;font-weight:500;cursor:pointer}
+.sfx button+button{border-left:0}
+.sfx button:first-of-type{border-radius:var(--r) 0 0 var(--r)}
+.sfx button:last-of-type{border-radius:0 var(--r) var(--r) 0}
+.sfx button[aria-pressed=true]{background:#152031;color:var(--fg);box-shadow:inset 0 0 0 1px var(--blue2)}
+.sfx button:hover:not(:disabled){color:var(--fg)}
+.sfx button:disabled{opacity:.5;cursor:default}
+/* pause / resume */
+.pz{padding:0 14px}
+.pz .ic{display:inline-flex}
+#ctl.paused .pz{background:var(--amber);border-color:var(--amber);color:#1d1400}
+#ctl.paused .pz:hover{background:#ffc75a;border-color:#ffc75a}
+@media (max-width:640px){
+  .set-row{grid-template-columns:minmax(0,1fr);padding:14px}
+  .set-v{align-items:flex-start}
+  .set-v small{text-align:left}
+}

@@ -68,6 +68,30 @@ test('serves the page and /api/state for discovered projects, skipping worktrees
   assert.equal(t.reach, 2); // pay directly, cart transitively
 });
 
+test('the page shell: a sidebar with every view and Settings, the controls in the Settings view, scripts that parse and ids that exist', async () => {
+  const html = await (await fetch(dash.url + '/')).text();
+  const side = html.slice(html.indexOf('<aside'), html.indexOf('</aside>'));
+  for (const v of ['factory', 'board', 'observer', 'project', 'you', 'settings']) assert.match(side, new RegExp(`href="#${v}" data-v="${v}"`), v);
+  for (const id of ['side-tog', 'pick', 'menu', 'foreman', 'pz-chip', 'you-n']) assert.match(side, new RegExp(`id="${id}"`), id);
+  assert.match(html, /id="side-open"[^>]*aria-controls="side"/); // the narrow-screen drawer button
+  const settings = html.slice(html.indexOf('id="v-settings"'), html.indexOf('</main>'));
+  for (const id of ['ctl', 'mode', 'sfx', 'lanes-dn', 'lanes-t', 'lanes-up', 'lanes-def', 'setup-resume', 'pz']) {
+    assert.match(settings, new RegExp(`id="${id}"`), id);
+    assert.doesNotMatch(side, new RegExp(`id="${id}"`), id + ' is not in the sidebar');
+  }
+  const { Script } = await import('node:vm');
+  const ids = new Set<string>([...html.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]));
+  for (const f of ['core', 'factory', 'board', 'you', 'observer', 'detail']) {
+    const js = await (await fetch(dash.url + `/dash/${f}.js`)).text();
+    assert.doesNotThrow(() => new Script(js), f);
+    if (f === 'core') for (const [, id] of js.matchAll(/\$\('([\w-]+)'\)/g)) assert.ok(id === 'pv' || ids.has(id!), `core.js uses #${id}, missing from the page`);
+  }
+  assert.equal((await fetch(dash.url + '/dash/settings.css')).status, 200);
+  const core = await (await fetch(dash.url + '/dash/core.js')).text();
+  assert.match(core, /'settings'\]\.includes\(h\)/); // #settings is a route
+  assert.match(core, /store\.set\('sideMin'/); // the rail state is remembered
+});
+
 test('POST with a project that was not discovered is rejected and changes nothing', async () => {
   for (const project of ['/etc', join(root, 'shop-worktrees/pay'), root + '/shop/../shop', root + '/shop/', 42]) {
     const r = await post('/api/human/done', { project, id: 'stripe' });

@@ -79,7 +79,8 @@ const browser = async (url: string) => {
     return nodes.get(id);
   };
   let paints = 0;
-  const sandbox: any = { document: { getElementById: node, body: { dataset: { name: 'fact-os' } }, addEventListener() {}, querySelectorAll: () => [] },
+  const sandbox: any = { document: { getElementById: node, documentElement: node('html'), body: { dataset: { name: 'fact-os' } }, addEventListener() {}, querySelectorAll: () => [], querySelector: () => null },
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
     location: { hash: '#f/a' }, localStorage: { getItem: () => null, setItem() {} }, setInterval() {}, setTimeout, clearTimeout,
     scrollTo() {}, addEventListener: (name: string, fn: Function) => events.set(name, fn),
     fetch: async (path: string) => { const r = await fetch(url + path); if (path.startsWith('/api/feature')) paints++; return r; } };

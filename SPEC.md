@@ -563,15 +563,18 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
 - `fact-os dash [--root DIR] [--port 7420]` — HTTP server on 127.0.0.1 only. Discovers every
   `*/.fact-os/features.json` up to depth 3 under `--root` (default: cwd). The page is `lib/dash.html`
   (inline CSS/JS, no dependencies, light and dark, phone width), polling `GET /api/state` every 2s,
-  one project at a time (picker in the header; next to the foreman status, the **controls**: the mode switch "Mode: Opus" /
+  one project at a time. A left sidebar (logo, project picker, foreman status, a "New work paused" chip while paused,
+  the views with icons and the Only-you count, Settings at the bottom) collapses to an icon rail with a toggle (remembered
+  in localStorage) and becomes a drawer opened from a slim top bar at 900px and below. The **Settings** view (`#settings`)
+  holds the **controls**: the mode switch "Mode: Opus" /
   "Mode: Fable + Sonnet" (other config profiles by name; highlighted when not opus; a click switches to the next profile;
   its tooltip lists role → model, effort, the builder's "high when risky", the observer rows' "(observe --agent)" when no
   observer agent is configured, and says it applies to new launches; while `control.json` is invalid it reads "Mode: ?", is
   disabled, and its tooltip says why and to fix the file or rewrite it with pause, the lanes or the CLI), "− 6 of 8 lanes +" (running of
   allowed, "(default n)" when the lanes differ from config; − disabled at 0, + at 32) and "Pause new work" / "Resume", real
   buttons with labels and visible focus, each confirmed by a toast; lowering below the number running says "N running will
-  finish; no new ones start until fewer than M are running"; the header stays on one line from 901px, two rows below) with
-  these views:
+  finish; no new ones start until fewer than M are running", a "Use default" for the lanes, and Resume setup while a setup hold
+  is on. The views:
   - **Factory**: while paused (or at lanes 0) a banner "Paused: no new features start. N still running will finish." with
     Resume; intake (ready queue, blocked/waiting/paused counts) → build bays (one per allowed lane; pixel-art worker building a house as the build progresses; idle bays as empty lots)
     → test bench → inspection (evaluator) → dock (merged/ready), a stuck list with Retry, and a live

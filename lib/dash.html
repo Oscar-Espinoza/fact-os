@@ -12,35 +12,54 @@
 <link rel="stylesheet" href="/dash/you.css">
 <link rel="stylesheet" href="/dash/observer.css">
 <link rel="stylesheet" href="/dash/detail.css">
+<link rel="stylesheet" href="/dash/settings.css">
+<script>try { if (JSON.parse(localStorage.getItem('factos.sideMin'))) document.documentElement.classList.add('side-min'); } catch {}</script>
 </head>
 <body data-name="{{NAME}}">
-<header class="top">
-  <div class="brand"><img src="/assets/logo.png" alt="" width="42" height="40"><span><b>{{NAME}}</b><small>SOFTWARE FACTORY</small></span></div>
-  <nav class="tabs" aria-label="Views">
-    <a href="#factory" data-v="factory">Factory</a>
-    <a href="#board" data-v="board">Board</a>
-    <a href="#observer" data-v="observer">Observer</a>
-    <a href="#project" data-v="project">Project</a>
-    <a href="#you" data-v="you">Only you <span class="badge" id="you-n"></span></a>
-  </nav>
-  <div class="spacer"></div>
-  <div class="picker">
-    <button class="btn" id="pick" aria-haspopup="listbox" aria-expanded="false"><span class="ell" id="pick-name">—</span><span aria-hidden="true">▾</span></button>
-    <div class="menu" id="menu" role="listbox"></div>
-  </div>
-  <div class="status" id="foreman"><span class="dot"></span><span><b id="foreman-t">Foreman stopped</b><small id="foreman-s"></small></span></div>
-  <div class="ctl" id="ctl" hidden>
-    <button class="btn mode" id="mode" type="button"><span class="mode-k">Mode: </span><span id="mode-t">Opus</span></button>
-    <div class="sfx" id="sfx" role="group" aria-label="Spec fixes"><span class="sfx-k" aria-hidden="true">Spec fixes</span><button type="button" data-sfx="manual" aria-pressed="true">Manual</button><button type="button" data-sfx="auto" aria-pressed="false">Auto</button></div>
-    <div class="lanes" id="lanes-g" role="group" aria-label="Lanes: how many features may be in flight">
-      <button class="ib" id="lanes-dn" type="button" aria-label="Fewer lanes" title="Fewer lanes"><span aria-hidden="true">−</span></button>
-      <span class="lanes-t" id="lanes-t"></span>
-      <button class="ib" id="lanes-up" type="button" aria-label="More lanes" title="More lanes"><span aria-hidden="true">+</span></button>
-    </div>
-    <button class="btn" id="setup-resume" type="button" hidden title="Setup kept failing, so no new work starts. Fix the environment, then release the hold.">Resume setup</button>
-    <button class="btn pz" id="pz" type="button"><span class="ic" id="pz-ic" aria-hidden="true"></span><span class="lbl" id="pz-t">Pause new work</span></button>
-  </div>
+<!-- Narrow screens: a slim bar with the menu button; the sidebar opens over the page as a drawer. -->
+<header class="mbar" id="mbar">
+  <button class="ib side-btn" id="side-open" type="button" aria-label="Open navigation" aria-controls="side" aria-expanded="false">
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12"/></svg>
+  </button>
+  <a class="brand" href="#factory"><img src="/assets/logo.png" alt="" width="32" height="30"><b>{{NAME}}</b></a>
+  <span class="spacer"></span>
+  <a class="pzchip" href="#settings" title="New work is paused: running features finish, no new ones start. Open settings to resume."><span class="pzchip-ic" aria-hidden="true"></span>Paused</a>
+  <span class="status mini" id="m-status" role="img" aria-label="Foreman status"><span class="dot"></span></span>
 </header>
+<div class="scrim" id="scrim" hidden></div>
+
+<div class="app">
+<aside class="side" id="side" aria-label="Sidebar">
+  <div class="side-head">
+    <a class="brand" href="#factory" title="{{NAME}}"><img src="/assets/logo.png" alt="" width="36" height="34"><span class="side-lbl"><b>{{NAME}}</b><small>SOFTWARE FACTORY</small></span></a>
+    <button class="ib side-btn" id="side-tog" type="button" aria-controls="side" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6 2.5v11"/><path class="tog-arrow" d="M10.5 6.5 9 8l1.5 1.5"/></svg>
+    </button>
+  </div>
+
+  <div class="picker">
+    <button class="btn" id="pick" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Project">
+      <svg class="side-ic" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5c0-.8.7-1.5 1.5-1.5h3l1.5 1.5h4.5c.8 0 1.5.7 1.5 1.5v5.5c0 .8-.7 1.5-1.5 1.5h-9c-.8 0-1.5-.7-1.5-1.5z"/></svg>
+      <span class="ell side-lbl" id="pick-name">—</span><span class="side-lbl caret" aria-hidden="true">▾</span>
+    </button>
+    <div class="menu" id="menu" role="listbox" aria-label="Projects"></div>
+  </div>
+
+  <div class="status" id="foreman"><span class="dot"></span><span class="side-lbl"><b id="foreman-t">Foreman stopped</b><small id="foreman-s"></small></span></div>
+  <a class="pzchip" id="pz-chip" href="#settings" title="New work is paused: running features finish, no new ones start. Open settings to resume."><span class="pzchip-ic" aria-hidden="true"></span><span class="side-lbl">New work paused</span></a>
+
+  <nav class="tabs" aria-label="Views">
+    <a href="#factory" data-v="factory" title="Factory"><svg class="side-ic" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M2 15.5V8l4 2.5V8l4 2.5V8l4 2.5V3h2v12.5z"/><path d="M5 13h1.5M9 13h1.5"/></svg><span class="side-lbl">Factory</span></a>
+    <a href="#board" data-v="board" title="Board"><svg class="side-ic" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="14" height="13" rx="2"/><path d="M6.7 2.5v13M11.3 2.5v13"/></svg><span class="side-lbl">Board</span></a>
+    <a href="#observer" data-v="observer" title="Observer"><svg class="side-ic" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 9S4.2 3.8 9 3.8 16.5 9 16.5 9 13.8 14.2 9 14.2 1.5 9 1.5 9z"/><circle cx="9" cy="9" r="2.4"/></svg><span class="side-lbl">Observer</span></a>
+    <a href="#project" data-v="project" title="Project"><svg class="side-ic" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M9 2 16 5.8 9 9.6 2 5.8z"/><path d="m2 9.2 7 3.8 7-3.8M2 12.4l7 3.8 7-3.8"/></svg><span class="side-lbl">Project</span></a>
+    <a href="#you" data-v="you" title="Only you"><svg class="side-ic" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="9" cy="6" r="3.2"/><path d="M2.8 16c.6-3.3 3.1-5 6.2-5s5.6 1.7 6.2 5"/></svg><span class="side-lbl">Only you</span> <span class="badge" id="you-n"></span></a>
+  </nav>
+
+  <div class="side-foot">
+    <a href="#settings" data-v="settings" class="side-set" title="Settings"><svg class="side-ic" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="9" r="2.4"/><path d="M7.6 1.8h2.8l.4 2 1.6.9 1.9-.7 1.4 2.4-1.5 1.4v1.8l1.5 1.4-1.4 2.4-1.9-.7-1.6.9-.4 2H7.6l-.4-2-1.6-.9-1.9.7-1.4-2.4 1.5-1.4V8.2L2.3 6.8l1.4-2.4 1.9.7 1.6-.9z"/></svg><span class="side-lbl">Settings</span></a>
+  </div>
+</aside>
 
 <main>
   <section class="view" id="v-factory"><div id="factory"></div></section>
@@ -49,7 +68,44 @@
   <section class="view" id="v-project"><div id="project"></div></section>
   <section class="view" id="v-you"><div id="you"></div></section>
   <section class="view" id="v-detail"><div id="detail"></div></section>
+  <section class="view" id="v-settings"><div id="settings">
+    <div class="set-wrap">
+      <div class="set-hd"><h2>Settings</h2><p class="muted">Factory controls for <b id="set-proj">—</b>. They are saved in the project's control file and apply to new launches; running features keep theirs.</p></div>
+      <div class="blank" id="ctl-none" hidden><h3>No controls for this project</h3><span>The control file could not be read for this project.</span></div>
+      <div class="set-warn" id="ctl-invalid" role="alert" hidden></div>
+      <div class="set-list panel" id="ctl" hidden>
+        <div class="set-row">
+          <div class="set-k"><h3>New work</h3><p id="pz-d">Pause new work: running features finish, no new ones start.</p></div>
+          <div class="set-v"><button class="btn pz" id="pz" type="button"><span class="ic" id="pz-ic" aria-hidden="true"></span><span class="lbl" id="pz-t">Pause new work</span></button></div>
+        </div>
+        <div class="set-row" id="set-setup" hidden>
+          <div class="set-k"><h3>Setup hold</h3><p id="setup-d">Setup kept failing, so no new work starts. Fix the environment, then release the hold.</p></div>
+          <div class="set-v"><button class="btn" id="setup-resume" type="button" hidden title="Setup kept failing, so no new work starts. Fix the environment, then release the hold.">Resume setup</button></div>
+        </div>
+        <div class="set-row" id="set-mode">
+          <div class="set-k"><h3>Mode</h3><p>The model profile each role runs with. Applies to new launches; running features keep theirs.</p><ul class="set-roles mono" id="mode-roles"></ul></div>
+          <div class="set-v"><button class="btn mode" id="mode" type="button"><span class="mode-k vh">Mode: </span><span id="mode-t">Opus</span></button><small class="muted" id="mode-next"></small></div>
+        </div>
+        <div class="set-row">
+          <div class="set-k"><h3>Spec fixes</h3><p id="sfx-d">How proposed spec fixes are applied.</p></div>
+          <div class="set-v"><div class="sfx" id="sfx" role="group" aria-label="Spec fixes"><button type="button" data-sfx="manual" aria-pressed="true">Manual</button><button type="button" data-sfx="auto" aria-pressed="false">Auto</button></div></div>
+        </div>
+        <div class="set-row">
+          <div class="set-k"><h3>Lanes</h3><p>How many features may be in flight at once (0 to 32).</p></div>
+          <div class="set-v">
+            <div class="lanes" id="lanes-g" role="group" aria-label="Lanes: how many features may be in flight">
+              <button class="ib" id="lanes-dn" type="button" aria-label="Fewer lanes" title="Fewer lanes"><span aria-hidden="true">−</span></button>
+              <span class="lanes-t" id="lanes-t"></span>
+              <button class="ib" id="lanes-up" type="button" aria-label="More lanes" title="More lanes"><span aria-hidden="true">+</span></button>
+            </div>
+            <button class="btn" id="lanes-def" type="button" hidden>Use default</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></section>
 </main>
+</div>
 <div class="toast" id="toast" role="status"></div>
 
 <script src="/dash/core.js"></script>

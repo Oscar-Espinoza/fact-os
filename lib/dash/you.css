@@ -1,6 +1,6 @@
 /* Only-you view (kanban). Everything is scoped to #you; colors follow the approved design. */
 #you{--y-fg:#e7edf5;--y-mut:#93a1b5;--y-dim:#7d8ba0;--y-line:#1f2b3b;--y-panel:#111925;--y-deep:#0e1520;
-  display:flex;flex-direction:column;gap:16px;height:calc(100vh - 101px);min-height:560px;color:var(--y-fg);font-family:'Geist',system-ui,sans-serif}
+  display:flex;flex-direction:column;gap:16px;height:calc(100vh - 41px);min-height:560px;color:var(--y-fg);font-family:'Geist',system-ui,sans-serif}
 #you button{font-family:inherit;cursor:pointer;color:inherit}
 #you .mono{font-family:'Geist Mono',ui-monospace,monospace}
 #you h1,#you h2,#you h3,#you p{margin:0}

@@ -17,24 +17,30 @@ b{font-weight:600}
 .ell{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 :focus-visible{outline:2px solid var(--blue2);outline-offset:2px}
 
-/* ---------- header ---------- */
-.top{height:60px;display:flex;align-items:center;gap:36px;padding:0 22px;background:var(--head);border-bottom:1px solid var(--head-line);position:relative;z-index:20}
-.brand{grid-area:brand;display:flex;align-items:center;gap:10px;min-width:0}
-.brand img{width:42px;height:40px;flex-shrink:0;image-rendering:pixelated}
-.brand span{display:flex;flex-direction:column;gap:1px;min-width:0}
-.brand b{font-size:19px;font-weight:700;letter-spacing:-.2px;line-height:1.2}
-.brand small{font-family:var(--mono);font-size:9.5px;color:var(--muted);letter-spacing:2.4px;line-height:1.2}
-.tabs{grid-area:nav;display:flex;height:100%}
-.tabs a{display:flex;align-items:center;gap:8px;padding:0 20px;font-size:14px;color:var(--nav);white-space:nowrap;border-bottom:2px solid transparent}
-.tabs a:hover{color:#fff}
-.tabs a[aria-current=page]{background:#152031;border-bottom-color:#5b9cf5;color:var(--fg);font-weight:600}
-.badge{font-family:var(--mono);font-size:11px;padding:1px 6px;background:var(--amber);color:#1d1400;border-radius:4px;font-weight:500}
-.badge:empty{display:none}
-.spacer{flex:1 1 0}
-.picker{grid-area:picker;position:relative}
-#pick{width:232px;height:38px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 12px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);cursor:pointer;font-size:14px;text-align:left}
+/* ---------- shell: sidebar (collapsible to an icon rail; a drawer on narrow screens) ---------- */
+:root{--side-w:236px;--rail-w:64px}
+.app{display:flex;min-height:100vh}
+main{flex:1 1 auto;min-width:0}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.side{position:sticky;top:0;height:100vh;width:var(--side-w);flex-shrink:0;display:flex;flex-direction:column;gap:12px;padding:14px 12px;background:var(--head);border-right:1px solid var(--head-line);z-index:30}
+.side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:40px}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand img{flex-shrink:0;image-rendering:pixelated}
+.side .brand img{width:36px;height:34px}
+.brand .side-lbl{display:flex;flex-direction:column;gap:1px;min-width:0}
+.brand b{font-size:17px;font-weight:700;letter-spacing:-.2px;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brand small{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:2.2px;line-height:1.2;white-space:nowrap}
+.side-btn{flex-shrink:0;color:var(--muted);background:transparent;border-color:transparent}
+.side-btn:hover{color:var(--fg)}
+.side-btn svg{transition:transform .18s}
+.side-ic{flex-shrink:0}
+/* project picker */
+.picker{position:relative}
+#pick{width:100%;height:38px;display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:0 10px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);cursor:pointer;font-size:13.5px;text-align:left}
 #pick:hover{border-color:#34455c}
-.menu{display:none;position:absolute;right:0;top:calc(100% + 6px);width:340px;max-width:calc(100vw - 32px);max-height:60vh;overflow:auto;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);padding:4px;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+#pick .side-ic{color:var(--muted)}
+#pick .caret{margin-left:auto;color:var(--muted)}
+.menu{display:none;position:absolute;left:0;top:calc(100% + 6px);width:320px;max-width:calc(100vw - 32px);max-height:60vh;overflow:auto;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);padding:4px;box-shadow:0 12px 32px rgba(0,0,0,.5);z-index:40}
 .menu.open{display:block}
 .menu button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:8px 10px;background:none;border:0;border-radius:4px;text-align:left;cursor:pointer}
 .menu button:hover{background:var(--raised)}
@@ -43,81 +49,63 @@ b{font-weight:600}
 .menu b{display:block;font-size:14px}
 .menu small{display:block;font-family:var(--mono);font-size:11px;color:var(--dim)}
 .menu .empty{color:var(--dim);font-size:12.5px;padding:8px 10px}
-.status{grid-area:status;display:flex;align-items:center;gap:10px;padding-left:20px;border-left:1px solid var(--head-line);height:36px;white-space:nowrap}
-.status .dot{width:10px;height:10px;border-radius:50%;background:#6b7a8f;flex-shrink:0}
-.status>span:last-child{display:flex;flex-direction:column}
-.status b{font-size:14px;font-weight:600;color:var(--muted)}
-.status small{font-size:12px;color:var(--muted)}
+/* foreman status */
+.status{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--panel);min-width:0}
+.status .dot{width:10px;height:10px;margin-top:4px;border-radius:50%;background:#6b7a8f;flex-shrink:0}
+.status>span:last-child{display:flex;flex-direction:column;min-width:0}
+.status b{font-size:13.5px;font-weight:600;color:var(--muted)}
+.status small{font-size:12px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .status small:empty{display:none}
 .status.on .dot{background:var(--green);box-shadow:0 0 8px var(--green)}
 .status.on b{color:var(--green)}
-/* factory controls (control.json): lanes stepper and pause, next to the foreman status */
-.ctl{grid-area:ctl;display:flex;align-items:center;gap:10px;white-space:nowrap}
-.ctl[hidden]{display:none}
-.lanes{display:flex;align-items:center;gap:6px}
-.ib{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0;background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);font-size:16px;line-height:1;cursor:pointer}
-.ib:hover:not(:disabled){border-color:#34455c;background:#1a2638}
-.ib:disabled{opacity:.4;cursor:default}
-.lanes-t{font-size:13px;color:var(--muted)}
-.lanes-t b{color:var(--fg);font-family:var(--mono);font-weight:500}
-.lanes-t small{font-size:12px;color:var(--dim)}
-.lanes-t .warn{color:var(--amber);font-weight:600}
-/* mode switch (model profile): neutral in the main mode (Opus), blue-tinted under another profile */
-.mode{padding:0 12px;gap:0}
-.mode[hidden]{display:none}
-.mode .mode-k{color:var(--muted);font-weight:400;white-space:pre}
-.mode.alt{border-color:var(--blue2);box-shadow:inset 0 0 0 1px var(--blue2)}
-/* spec-fix mode (control.json `specFixes`): Manual | Auto; the explanation is in the tooltip and the toast after a switch */
-.sfx{display:flex;align-items:center;gap:8px}
-.sfx[hidden]{display:none}
-.sfx-k{font-size:13px;color:var(--muted)}
-.sfx button{height:32px;padding:0 10px;background:var(--raised);color:var(--muted);border:1px solid var(--line2);font-size:13px;font-weight:500;cursor:pointer}
-.sfx button+button{margin-left:-8px;border-left:0}
-.sfx button:first-of-type{border-radius:var(--r) 0 0 var(--r)}
-.sfx button:last-of-type{border-radius:0 var(--r) var(--r) 0}
-.sfx button[aria-pressed=true]{background:#152031;color:var(--fg);box-shadow:inset 0 0 0 1px var(--blue2)}
-.sfx button:hover:not(:disabled){color:var(--fg)}
-.sfx button:disabled{opacity:.5;cursor:default}
-.pz{padding:0 12px}
-.pz .ic{display:inline-flex}
-.ctl.paused .pz{background:var(--amber);border-color:var(--amber);color:#1d1400}
-.ctl.paused .pz:hover{background:#ffc75a;border-color:#ffc75a}
 .status.on.paused .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
 .status.on.paused b{color:var(--amber)}
-/* Up to 1720px the header tightens in steps so brand, five tabs, picker, status and the controls (mode switch, lanes, pause)
-   stay on one line, checked with the longest content ("Mode: Fable + Sonnet", "12 of 12 lanes (default 3)", "Pause new work"):
-   from 1720 the tagline goes and the picker narrows; from 1460 the wordmark goes (the logo stays), the pause button shows only
-   its icon (aria-label and tooltip carry the words), and "(default n)" is hidden from view only (screen readers still read
-   it; the tooltip and the group's aria-label carry it too); at 900–1210 (a 1024 screen) the lanes read "2 of 3" (the word
-   "lanes" hidden the same way) and the gaps, tabs and picker narrow. "Mode:" stays visible down to 901. */
-@media (max-width:1720px) and (min-width:901px){.top{gap:16px;padding:0 14px}.tabs a{padding:0 12px}.brand small{display:none}.status{padding-left:12px}#pick{width:200px}.ctl{gap:8px}}
-@media (max-width:1460px) and (min-width:901px){.brand span{display:none}#pick{width:180px}.pz .lbl{display:none}.pz{width:32px;padding:0}
-  .sfx-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-  .lanes-t small{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
-@media (max-width:1210px) and (min-width:901px){.top{gap:8px}.tabs a{padding:0 8px}#pick{width:105px}.mode{padding:0 10px}
-  .lanes-w{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
-@media (max-width:1023px) and (min-width:901px){.status>span:last-child{display:none}} /* just the dot; its tooltip has the text */
+.status.mini{padding:6px;border:0;background:none}
+.status.mini .dot{margin:0}
+/* paused chip: shown while new work is paused, links to the settings */
+.pzchip{display:none;align-items:center;gap:8px;padding:5px 10px;border:1px solid rgba(245,183,59,.45);background:rgba(245,183,59,.12);color:var(--amber);border-radius:var(--r);font-size:12.5px;font-weight:600;white-space:nowrap}
+.pzchip:hover{color:#ffc75a;border-color:var(--amber)}
+.is-paused .pzchip{display:flex}
+.pzchip-ic{width:8px;height:10px;border-left:3px solid currentColor;border-right:3px solid currentColor;flex-shrink:0}
+/* nav */
+.tabs{display:flex;flex-direction:column;gap:2px}
+.tabs a,.side-set{position:relative;display:flex;align-items:center;gap:10px;height:38px;padding:0 10px;border-radius:var(--r);font-size:14px;color:var(--nav);white-space:nowrap}
+.tabs a:hover,.side-set:hover{color:#fff;background:var(--panel)}
+.tabs a[aria-current=page],.side-set[aria-current=page]{background:#152031;color:var(--fg);font-weight:600;box-shadow:inset 2px 0 0 var(--blue2)}
+.tabs .badge{margin-left:auto}
+.badge{font-family:var(--mono);font-size:11px;padding:1px 6px;background:var(--amber);color:#1d1400;border-radius:4px;font-weight:500}
+.badge:empty{display:none}
+.side-foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--head-line)}
+.spacer{flex:1 1 0}
+.mbar,.scrim{display:none}
 
-/* Up to 900px the header takes two rows (brand, status, picker; the controls) with the tabs scrolling below. */
-@media (max-width:900px){
-  .top{height:auto;display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:"brand status picker" "ctl ctl ctl" "nav nav nav";gap:6px 12px;padding:8px 12px 0}
-  .spacer{display:none}
-  .status{padding-left:0;border-left:0;height:auto}
-  .status > span:last-child{display:none} /* just the dot on phones; its tooltip has the text */
-  .ctl{justify-content:space-between;padding:4px 0 2px}
-  .sfx-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-  .mode .mode-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-  .ib{width:32px;height:32px}
-  .tabs{height:44px;overflow-x:auto;min-width:0;scrollbar-width:none;margin:0 -12px;padding:0 4px}
-  .tabs::-webkit-scrollbar{display:none}
-  .tabs a{padding:0 14px;flex-shrink:0}
-  .picker{align-self:center}
-  #pick{width:140px;height:34px}
-  .menu{right:0}
+/* collapsed: an icon rail; labels stay for screen readers, titles give tooltips */
+@media (min-width:901px){
+  .side{transition:width .18s,padding .18s}
+  .side-min .side{width:var(--rail-w);padding:14px 10px;align-items:center}
+  .side-min .side-lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+  .side-min .side-head{flex-direction:column;gap:6px}
+  .side-min .side-btn svg{transform:scaleX(-1)}
+  .side-min .picker,.side-min .tabs,.side-min .side-foot,.side-min .status,.side-min .pzchip{width:100%}
+  .side-min #pick{justify-content:center;padding:0}
+  .side-min .menu{left:calc(100% + 8px);top:0}
+  .side-min .status{justify-content:center;padding:9px 0}
+  .side-min .status .dot{margin-top:0}
+  .side-min .pzchip{justify-content:center;padding:6px 0}
+  .side-min .tabs a,.side-min .side-set{justify-content:center;padding:0}
+  .side-min .tabs .badge{position:absolute;top:2px;right:0;font-size:10px;padding:0 4px;line-height:1.5}
 }
-
-@media (max-width:600px){.pz .lbl{display:none}.pz{width:32px;padding:0}} /* phones: the mode switch needs the room */
-@media (max-width:380px){.lanes-w{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
+/* narrow: a top bar with a menu button; the sidebar slides in over the page */
+@media (max-width:900px){
+  .mbar{display:flex;align-items:center;gap:10px;height:52px;padding:0 12px;background:var(--head);border-bottom:1px solid var(--head-line)}
+  .mbar .brand b{font-size:16px}
+  .mbar .pzchip{padding:4px 8px}
+  .side{position:fixed;left:0;top:0;bottom:0;height:auto;width:min(280px,86vw);overflow-y:auto;transform:translateX(-100%);visibility:hidden;transition:transform .2s,visibility .2s;z-index:60;box-shadow:none}
+  .side-open .side{transform:none;visibility:visible;box-shadow:0 0 40px rgba(0,0,0,.6)}
+  .scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:55}
+  .scrim[hidden]{display:none}
+  .menu{position:static;width:auto;max-width:none;margin-top:6px;box-shadow:none}
+}
 
 /* ---------- views & components ---------- */
 .view{display:none;padding:20px 22px}.view.on{display:block}
@@ -134,9 +122,9 @@ b{font-weight:600}
 .blank h3{margin:0;color:var(--fg);font-size:16px}
 .blank code{font-family:var(--mono);background:var(--raised);border:1px solid var(--line);border-radius:5px;padding:2px 6px;font-size:12.5px}
 .blank pre{text-align:left;background:var(--raised);border:1px solid var(--line);border-radius:var(--r);padding:12px;margin:6px 0 0;max-width:640px;width:100%;overflow:auto;font-size:12.5px}
-.pv{display:block;width:100%;height:calc(100vh - 60px);min-height:420px;border:0;background:var(--bg)}
+.pv{display:block;width:100%;height:100vh;min-height:420px;border:0;background:var(--bg)}
 .toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);opacity:0;visibility:hidden;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:8px;font-size:13px;transition:opacity .2s,transform .2s,visibility .2s;z-index:90;max-width:min(560px,calc(100vw - 32px));pointer-events:none}
 .toast.show{opacity:1;visibility:visible;transform:translate(-50%,0)}
-@media (max-width:900px){.pv{height:calc(100vh - 144px)}}
+@media (max-width:900px){.pv{height:calc(100vh - 53px)}}
 @media (max-width:700px){.blank{margin:12px;padding:32px 16px}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
