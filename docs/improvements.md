@@ -17,7 +17,7 @@ The R01–R16 correctness repairs are recorded in [review-backlog.md](review-bac
 | I04 | done | Resume the builder once to commit work it left uncommitted (`commitFixes`) |
 | I05 | done | Setup failures spend no attempts: delayed retries, then a sticky launch hold until setup-resume |
 | I06 | done | The evaluator sees the on-mock tasks the builder was allowed to mock |
-| I07 | v2 shadow done | Jev classifier: 32 narrow questions → review requirements, workload, attention, planning; Sol escalation for unsure cases; shadow only |
+| I07 | removed 2026-10-05 | Jev classifier (removed 2026-10-05, unused; history below): 32 narrow questions → review requirements, workload, attention, planning; Sol escalation for unsure cases; shadow only |
 | I08 | done | Seven stuck features: keep-lines declarations, uncounted environment stops, inherited mock allowance, planning holds, review repair, unpriced Codex cost, no-progress guard |
 | I09 | done | Readable dashboard: a story per feature (goal, state, journey, problems), a "Just happened" feed and queue reasons |
 | — | later | Codex as a builder option; a "product intent" review flag |
@@ -163,11 +163,16 @@ at least two features open a sticky launch hold, persisted across restarts and s
 explicitly once the environment is fixed. The foreman is the only owner of these retries; the observer's retry policy is
 unchanged (it never retries setup). Known limit: a deferred prepare that fails after a build loses that build.
 
-## I07 — feature classification with TypeSafe Jev (v2: shadow)
+## I07 — feature classification with TypeSafe Jev (v2: shadow; removed 2026-10-05)
+
+**Removed on 2026-10-05** (Oscar: "remove jev, we're not using it"). The classifier, its escalation, the `classify` command,
+the observer's automatic classification and the `config.classifier` setting are gone; a leftover `classifier` key in
+config.json is ignored (doctor notes it). The history below is kept as a record; docs/jev-lessons.md and the code are in git
+history before the removal commit.
 
 Goal (Oscar, 2026-10-04): a good automatic classification of each feature (how much review it needs, what kind of work it
-is, whether it should be split) using Jev, a fast typed-judgment model; throw it away if it is not good. Reusable lessons:
-[docs/jev-lessons.md](jev-lessons.md).
+is, whether it should be split) using Jev, a fast typed-judgment model; throw it away if it is not good. Reusable lessons were in
+docs/jev-lessons.md (removed with the classifier; see git history).
 
 **v1 failed.** One six-way "which tier?" Choice with thin context labelled 165 of 226 ecommerce features risky (73%), never
 answered hard or investigate, and scored F15-09 (the feature that obviously needed a split) 0.59 for needs-split, beside a

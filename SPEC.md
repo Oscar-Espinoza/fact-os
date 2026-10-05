@@ -64,11 +64,8 @@ and one dashboard across projects.
   "profiles": {},               // extra model profiles (see Model profiles); optional; a profile may add "tiers" (below)
   "gateFixes": 0,               // resumed builder fixes after a test-gate failure, per pass (see Pass, Test)
   "diagnoser": null,            // null, or a role config (provider "claude" or "codex") diagnosing a repeated gate failure
-  "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30}, // when a Codex run cannot answer
-  "classifier": null            // I07 v2 shadow classifier: {provider: "typesafe", model: "jev-1.13.0", mode: "shadow", timeoutMs (whole decision),
-                                // maxRetries (0-2), maxRequestsPerDay, glossary, scorer (paths from the project root), escalation,
-                                // auto (default true: the observer classifies new/edited open features)};
-                                // records assessments, never changes features
+  "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30} // when a Codex run cannot answer
+                                // (a leftover "classifier" key, from the Jev classifier removed on 2026-10-05, is ignored; doctor notes it)
 }
 ```
 Configuration is validated by `loadConfig()` before it becomes a `Config`, including in

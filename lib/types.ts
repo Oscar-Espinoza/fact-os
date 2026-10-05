@@ -10,16 +10,6 @@ export type Role = 'builder' | 'evaluator' | 'resolver';
 
 // provider: 'claude' (default) or 'codex' (`codex exec`; only the evaluator and the diagnoser, which change no code).
 export type Provider = 'claude' | 'codex';
-// I07 v2 shadow classifier. `timeoutMs` bounds a whole decision (every attempt and backoff); `glossary` and `scorer` are paths
-// relative to the project root (a codebase glossary sent as context; a frozen rework scorer for the attention priority).
-// `auto`: the running observer classifies every open feature that has no current assessment (new or edited), then escalates its
-// unsure answers when escalation is enabled. Shadow only either way.
-export interface ClassifierConfig { provider: 'typesafe'; model: string; mode: 'shadow'; timeoutMs: number; maxRetries: number; maxRequestsPerDay: number;
-  glossary: string | null; scorer: string | null; escalation: EscalationConfig | null; auto: boolean }
-// Unsure assessments go to a reasoning agent that reads the code read-only (Codex; config.codex.fallback when Codex is
-// unavailable); shadow only, explicit classify runs only. maxPerRun/maxPerDay count actual agent starts, fallback included.
-export interface EscalationConfig { enabled: boolean; model: string; effort: string; maxPerDay: number; maxPerRun: number; timeoutMin: number;
-  maxQuestions: number; fallbackMaxBudgetUsd: number; reviewPlanning: boolean }
 export interface RoleConfig { model?: string; effort?: string; permissionMode?: string; provider?: Provider }
 
 // Model profiles (profiles.ts): a named set of model/effort per role, chosen at runtime in control.json. "opus" is the
@@ -72,7 +62,6 @@ export interface Config {
   lessonsMaxBytes: number;            // safe integer >= 0: a lessons file over this reaches a fresh build as its most relevant lessons plus the file (0 = always whole)
   recapMaxBytes: number;              // safe integer >= 0: previous-attempt feedback longer than this reaches a fresh try as a recap plus a file (0 = always whole)
   setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
-  classifier: ClassifierConfig | null; // I07: TypeSafe Jev tier/split judgments, shadow mode only (records, never changes a feature)
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
   codex: { fallback: RoleConfig; cooldownMin: number }; // a Codex run that cannot answer falls back to this Claude role config
   observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`

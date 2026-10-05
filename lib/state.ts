@@ -2,15 +2,8 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, appendFileSync, lstatSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import type { ClassifierConfig, EscalationConfig, Config, Control, Feature, FeaturesFile, HumanTask, LogEvent, Paths, PendingAudit, SpecFixMode, StateFiles, StateName } from './types.ts';
+import type { Config, Control, Feature, FeaturesFile, HumanTask, LogEvent, Paths, PendingAudit, SpecFixMode, StateFiles, StateName } from './types.ts';
 import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } from './profiles.ts';
-
-// Shadow classifier operating bounds (I07 v2). The model is pinned: the battery and scorer were evaluated on jev-1.13.0.
-export const CLASSIFIER_DEFAULTS: ClassifierConfig = { provider: 'typesafe', model: 'jev-1.13.0', mode: 'shadow', timeoutMs: 20000, maxRetries: 1,
-  maxRequestsPerDay: 500, glossary: null, scorer: null, escalation: null, auto: true };
-// Small pilot limits (agreed with the Codex partner), not learned thresholds.
-export const ESCALATION_DEFAULTS: EscalationConfig = { enabled: false, model: 'gpt-6.1-sol', effort: 'high', maxPerDay: 6, maxPerRun: 2, timeoutMin: 5,
-  maxQuestions: 6, fallbackMaxBudgetUsd: 2, reviewPlanning: false };
 
 export const DEFAULT_CONFIG: Config = {
   base: 'main', worktreesDir: '../<repo>-worktrees', branchPrefix: 'ship/', maxParallel: 3, maxAttempts: 2,
@@ -19,7 +12,7 @@ export const DEFAULT_CONFIG: Config = {
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
-  gateFixes: 0, commitFixes: 0, keepFixes: 1, progressFixes: 1, reviewFixes: 0, contextMaxBytes: 1200, lessonsMaxBytes: 6000, recapMaxBytes: 4000, setupRetryDelaysSec: [30, 120], diagnoser: null, classifier: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
+  gateFixes: 0, commitFixes: 0, keepFixes: 1, progressFixes: 1, reviewFixes: 0, contextMaxBytes: 1200, lessonsMaxBytes: 6000, recapMaxBytes: 4000, setupRetryDelaysSec: [30, 120], diagnoser: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
@@ -30,14 +23,8 @@ export const stateDirName = (root: string): string => STATE_DIRS.find((d) => exi
 
 // FACTOS_<NAME>, falling back to the pre-rename SHIPYARD_<NAME>.
 export const envVar = (name: string): string | undefined => process.env[`FACTOS_${name}`] ?? process.env[`SHIPYARD_${name}`];
-// Secrets only the factory itself uses: never handed to agents, hooks or scripts, so they cannot read or echo them into
-// saved run output.
-export const FACTORY_SECRETS = ['TYPESAFE_API_KEY'] as const;
-export function childEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const k of FACTORY_SECRETS) delete env[k];
-  return env;
-}
+// The environment for agents, hooks and scripts.
+export const childEnv = (): NodeJS.ProcessEnv => ({ ...process.env });
 // Child env for a feature: both spellings, so hooks and scripts written for either keep working.
 export const featureEnv = (vars: Record<string, string>): Record<string, string> =>
   Object.fromEntries(Object.entries(vars).flatMap(([k, v]) => [[`FACTOS_${k}`, v], [`SHIPYARD_${k}`, v]]));
@@ -255,32 +242,6 @@ function configProblems(raw: unknown): string[] {
   for (const key of ['builder', 'evaluator', 'resolver'])
     if (Object.hasOwn(c, key) && !(key === 'resolver' && c[key] === null)) role(c[key], `config.${key}`, key === 'evaluator');
   if (Object.hasOwn(c, 'diagnoser') && c.diagnoser !== null) role(c.diagnoser, 'config.diagnoser', true);
-  if (Object.hasOwn(c, 'classifier') && c.classifier !== null) {
-    const k = obj(c.classifier, 'config.classifier');
-    if (k) {
-      field(k, 'config.classifier', 'provider', (x) => x === 'typesafe', '"typesafe"');
-      field(k, 'config.classifier', 'model', (x) => typeof x === 'string' && /^jev-\d+\.\d+\.\d+$/.test(x), 'a pinned Jev version such as "jev-1.13.0" (the scorer is calibrated on one version)');
-      field(k, 'config.classifier', 'mode', (x) => x === 'shadow', '"shadow" (apply mode comes after the benchmark)');
-      for (const key of ['minConfidence', 'minRiskConfidence'])
-        if (Object.hasOwn(k, key)) problems.push(`config.classifier.${key} is a v1 setting (one six-way choice); v2 thresholds live in the projection policy: remove it`);
-      field(k, 'config.classifier', 'timeoutMs', (x) => uint(x) && (x as number) >= 100 && (x as number) <= 120000, 'milliseconds from 100 to 120000');
-      field(k, 'config.classifier', 'maxRetries', (x) => uint(x) && (x as number) <= 2, 'a safe integer from 0 to 2');
-      field(k, 'config.classifier', 'maxRequestsPerDay', uint, 'a safe integer >= 0');
-      for (const key of ['glossary', 'scorer']) field(k, 'config.classifier', key, (x) => x === null || str(x), 'a path relative to the project root, or null');
-      field(k, 'config.classifier', 'auto', (x) => typeof x === 'boolean', 'a boolean');
-      if (Object.hasOwn(k, 'escalation') && k.escalation !== null) {
-        const e = obj(k.escalation, 'config.classifier.escalation');
-        if (e) {
-          for (const key of ['model', 'effort']) field(e, 'config.classifier.escalation', key, str, 'a non-empty string');
-          for (const key of ['enabled', 'reviewPlanning']) field(e, 'config.classifier.escalation', key, (x) => typeof x === 'boolean', 'a boolean');
-          for (const key of ['maxPerDay', 'maxPerRun']) field(e, 'config.classifier.escalation', key, uint, 'a safe integer >= 0');
-          field(e, 'config.classifier.escalation', 'maxQuestions', (x) => uint(x) && (x as number) >= 1 && (x as number) <= 11, 'an integer from 1 to 11');
-          field(e, 'config.classifier.escalation', 'timeoutMin', (x) => nonnegative(x) && (x as number) > 0 && (x as number) <= 60, 'minutes above 0, at most 60');
-          field(e, 'config.classifier.escalation', 'fallbackMaxBudgetUsd', (x) => nonnegative(x) && (x as number) > 0, 'a positive number of dollars');
-        }
-      }
-    }
-  }
   if (Object.hasOwn(c, 'codex')) {
     const cx = obj(c.codex, 'config.codex');
     if (cx) {
@@ -328,10 +289,7 @@ export function loadConfig(root: string): Config {
   const c: Config = { ...DEFAULT_CONFIG, ...(raw as Partial<Config>) };
   c.worktreesDir = c.worktreesDir.replace('<repo>', basename(root));
   c.codex = { ...DEFAULT_CONFIG.codex, ...c.codex }; // a partial codex block keeps the default fallback or cooldown
-  if (c.classifier) {
-    const k = { ...CLASSIFIER_DEFAULTS, ...(c.classifier as Partial<ClassifierConfig>) };
-    c.classifier = { ...k, escalation: k.escalation ? { ...ESCALATION_DEFAULTS, ...k.escalation } : null };
-  }
+  delete (c as Partial<Config> & { classifier?: unknown }).classifier; // removed setting (Jev classifier, 2026-10-05): ignored; doctor notes it
   return c;
 }
 

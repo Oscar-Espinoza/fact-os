@@ -251,3 +251,9 @@ test('context budgets: 0 or at least 1000 bytes, so the file reference always fi
   for (const key of ['lessonsMaxBytes', 'recapMaxBytes']) for (const value of [200, -1, '4000']) { s.set({ [key]: value }); assert.throws(() => loadConfig(s.root), new RegExp(`config\\.${key} must be 0 or a safe integer >= 1000`)); }
   s.set({ lessonsMaxBytes: 0, recapMaxBytes: 1000, contextMaxBytes: 0 }); assert.equal(loadConfig(s.root).recapMaxBytes, 1000);
 });
+
+test('config: a leftover classifier key (removed 2026-10-05) is ignored, even malformed', (t) => {
+  const s = setup(t);
+  s.set({ classifier: { provider: 'typesafe', model: 'not-a-version', escalation: 'x' } });
+  assert.equal(Object.hasOwn(loadConfig(s.root), 'classifier'), false);
+});

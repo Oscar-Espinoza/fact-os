@@ -4,7 +4,7 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { childEnv, paths, DEFAULT_CONFIG, ESCALATION_DEFAULTS, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold, readSetupState } from './state.ts';
+import { childEnv, paths, DEFAULT_CONFIG, writeJsonAtomic, readJson, load, mutate, withLock, log, loadConfig, envVar, errMsg, writeControl, readControlFile, effectiveLimit, pidAlive, MAX_LANES, NAME, releaseSetupHold, readSetupState } from './state.ts';
 import { analyze, validate, SLUG } from './ready.ts';
 import { STATUSES, IN_FLIGHT, TIERS, type ActivityEvent, type Config, type Control, type Feature, type HumanTask } from './types.ts';
 import { act, PAST, type Action } from './actions.ts';
@@ -24,9 +24,6 @@ const USAGE = `usage: ${NAME} <command>
   spec-notes                      the spec-writing rules learned from corrected specs (the intake skill follows them)
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
   setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
-  classify <id...> | --all        shadow-classify features with TypeSafe Jev (tier, needs split); records only, changes nothing
-  classify --report               shadow tiers beside what the features actually took (tries, stuck, cost)
-  classify ... --escalate         also send unsure review questions to a read-only agent (Sol, Opus fallback), capped
   lanes <n|default>               how many features may be in flight (0-${MAX_LANES}); default = config.maxParallel
   profile [<name|default>]        model profile for new launches (opus = each role's config; fable-sonnet; config.profiles);
                                   without a name: the active profile and its role → model/effort table
@@ -67,7 +64,7 @@ function init(test: string | undefined): void {
   const exclude = join(root, '.git/info/exclude');
   mkdirSync(dirname(exclude), { recursive: true });
   const have = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
-  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json', 'setup-hold.json', 'classifier.jsonl', 'classifier-usage.json'].map((f) => `${paths(root).name}/${f}`)
+  const add = ['runs/', '*.jsonl', '.lock', '.lock.*', '.checkout-lock', '.checkout-lock.*', '.foreman', '.foreman.*.tmp', '.observer', '.observer.*.tmp', 'observer.json', 'observer-report.md', 'control.json', 'prompt-notes/', 'codex.json', 'setup-hold.json'].map((f) => `${paths(root).name}/${f}`)
     .filter((l) => !have.split('\n').includes(l));
   if (add.length) appendFileSync(exclude, (have && !have.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n');
   console.log(made.length ? made.map((f) => `created ${f}`).join('\n') : 'already initialized');
@@ -149,6 +146,8 @@ function doctor(): number {
   const claude = envVar('CLAUDE') || 'claude';
   for (const [what, cmd] of [['claude', claude], ['git', 'git'], ['test command', String(config.test || '').trim().split(/\s+/)[0]]])
     if (!resolves(cmd)) problems.push(`${what}: "${cmd}" not found on PATH`);
+  let rawConfig: unknown = null; try { rawConfig = readJson(P.config, null); } catch {} // a broken config.json is reported above
+  if (rawConfig && typeof rawConfig === 'object' && Object.hasOwn(rawConfig, 'classifier')) console.log('note: config.classifier is ignored (the Jev classifier was removed on 2026-10-05); delete the key');
   for (const p of problems) console.log(`✗ ${p}`);
   console.log(problems.length ? `${problems.length} problem(s)` : `ok: ${features.length} features, ${tasks.length} human tasks`);
   if (cr.ok) console.log(`model profile: ${profileLine(cr.control.profile ?? null)}`);
@@ -255,9 +254,9 @@ async function hook(): Promise<void> {
 const argv = process.argv.slice(2);
 const { values, positionals } = parseArgs({ args: argv.slice(1), allowPositionals: true, options: {
   test: { type: 'string' }, watch: { type: 'boolean' }, once: { type: 'boolean' }, 'max-features': { type: 'string' },
-  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' }, all: { type: 'boolean' }, report: { type: 'boolean' }, escalate: { type: 'boolean' } }, strict: !['hook', 'lanes'].includes(argv[0]!) });
+  root: { type: 'string' }, port: { type: 'string' }, agent: { type: 'boolean' }}, strict: !['hook', 'lanes'].includes(argv[0]!) });
 // strict parsing (every command but hook, which ignores o) guarantees these types.
-const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean; all?: boolean; report?: boolean; escalate?: boolean };
+const o = values as { test?: string; watch?: boolean; once?: boolean; 'max-features'?: string; root?: string; port?: string; agent?: boolean };
 try {
   switch (argv[0]) {
     case 'init': init(o.test); break;
@@ -275,28 +274,6 @@ try {
     case 'spec-fix': await specFixCmd(argv.slice(1)); break;
     case 'spec-notes': { const { readSpecNotes, specNotesFile } = await import('./specnotes.ts'); const n = readSpecNotes(needRoot());
       console.log(n.length ? `${n.join('\n')}\n(${specNotesFile(needRoot())})` : 'No spec-writing rules learned yet.'); break; }
-    case 'classify': {
-      const root = needRoot(), { config, features } = load(root), { classify, report } = await import('./classifier.ts');
-      if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "mode": "shadow"}} to config.json');
-      if (o.report) {
-        console.log(report(root, features, config.classifier));
-        const summary = (await import('./escalation.ts')).escalationSummary(root);
-        if (summary) console.log(`\n${summary}`);
-        break;
-      }
-      const targets = o.all ? features : positionals.map((id) => features.find((f) => f.id === id) ?? (() => { throw new Error(`unknown feature: ${id}`); })());
-      if (!targets.length) throw new Error(`usage: ${NAME} classify <feature-id>... | --all | --report`);
-      // The roles each feature would get today, recorded beside the shadow candidate for comparison.
-      const ctl = readControlFile(root, config), { rolesFor } = await import('./classifier.ts');
-      await classify(root, config.classifier, targets, (s) => console.log(s), 'manual', undefined, rolesFor(config, ctl.ok ? ctl.control.profile ?? null : null));
-      // Escalation is opt-in: config.classifier.escalation.enabled, or --escalate for this run (defaults when unconfigured).
-      const esc = config.classifier.escalation;
-      if (o.escalate || esc?.enabled) {
-        const { escalate } = await import('./escalation.ts');
-        await escalate(root, config, config.classifier, { ...(esc ?? ESCALATION_DEFAULTS), enabled: true }, targets.map((f) => f.id), (s) => console.log(s));
-      }
-      break;
-    }
     case 'setup-resume': {
       const was = await releaseSetupHold(needRoot(), 'a person (cli)');
       console.log(was ? `setup hold released (open since ${was.since}: ${was.reason})` : 'no setup hold was open');
