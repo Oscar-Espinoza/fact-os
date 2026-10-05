@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { finalReply, transcriptPath, parseExit, parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
+import { finalReply, transcriptLines, transcriptPath, parseExit, parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
 
@@ -399,6 +399,10 @@ test('finalReply and transcriptPath: the real final reply of this run only — a
     writeFileSync(f, [...earlier, msg('user', 'repair it'), msg('assistant', 'Summary: Could not finish the checks.')].join('\n') + '\n');
     assert.equal(finalReply(f, earlier.length), null); // this run left no exit: nothing from the earlier run is borrowed
     assert.equal(finalReply(join(d, 'missing.jsonl')), null);
+    // The boundary counts every existing record, the last one too when it has no trailing newline.
+    writeFileSync(f, earlier.join('\n')); const at = transcriptLines(f); assert.equal(at, 2);
+    writeFileSync(f, earlier.join('\n') + '\n' + [msg('user', 'repair it'), msg('assistant', 'Summary: Could not finish.')].join('\n'));
+    assert.equal(finalReply(f, at), null); assert.equal(transcriptLines(join(d, 'missing.jsonl')), 0);
     const prev = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = '/cfg';
     assert.equal(transcriptPath('/home/o/Projects/x-worktrees/F99-17.a_b', 'sid'), '/cfg/projects/-home-o-Projects-x-worktrees-F99-17-a-b/sid.jsonl');
     const long = '/home/oscar/Projects/' + 'a'.repeat(185) + '/worktrees/F99-17', key = transcriptPath(long, 'sid').split('/').at(-2)!;

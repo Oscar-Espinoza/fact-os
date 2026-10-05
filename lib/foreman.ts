@@ -460,7 +460,7 @@ export function transcriptPath(cwd: string, sessionId: string): string {
   return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects', key, `${sessionId}.jsonl`);
 }
 // Lines in a transcript now (0 when there is none): taken before a resumed run, so recovery reads only that run's records.
-export const transcriptLines = (file: string): number => { try { return readFileSync(file, 'utf8').split('\n').length - 1; } catch { return 0; } };
+export const transcriptLines = (file: string): number => { try { const s = readFileSync(file, 'utf8'); return s ? s.split('\n').length - Number(s.endsWith('\n')) : 0; } catch { return 0; } };
 // The latest main-conversation assistant reply after line `from` that carries a valid exit block (null: none, or no transcript).
 export function finalReply(file: string, from = 0): { text: string; uuid?: string; ts?: string } | null {
   let last: { text: string; uuid?: string; ts?: string } | null = null;
