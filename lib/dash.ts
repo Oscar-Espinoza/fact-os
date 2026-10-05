@@ -280,9 +280,9 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[], events: 
 export function currentWorker(f: Pick<Feature, 'id' | 'status'>, events: LogEvent[]): string | null {
   const mine = events.filter((e) => e.feature === f.id), launch = mine.map((e) => e.event).lastIndexOf('launch');
   const since = launch < 0 ? [] : mine.slice(launch + 1);
-  const label = (e: LogEvent | undefined) => { const w = e && whoOf(e); return w ? `${w.role === 'evaluator' ? 'Reviewing' : w.role === 'resolver' ? 'Combining' : w.role === 'diagnoser' ? 'Diagnosing' : 'Building'}: ${w.who}` : null; };
+  const label = (e: LogEvent | undefined) => { const w = e && whoOf(e); return w ? `${w.role === 'evaluator' ? 'Reviewing' : w.role === 'resolver' ? 'Combining' : w.role === 'diagnoser' ? 'Diagnosing' : w.role === 'planner' ? 'Planning' : 'Building'}: ${w.who}` : null; };
   const prompts = (xs: LogEvent[], roles: string[]) => xs.filter((e) => e.event === 'prompt' && roles.includes(whoOf(e)?.role ?? ''));
-  if (f.status === 'building') return label(prompts(since, ['builder', 'resolver']).at(-1));
+  if (f.status === 'building') return label(prompts(since, ['builder', 'resolver', 'planner']).at(-1));
   if (f.status === 'evaluating') { const ev = since.map((e) => e.event).lastIndexOf('evaluating'); return ev < 0 ? null : label(prompts(since.slice(ev + 1), ['evaluator']).at(-1)); }
   const last = since.at(-1);
   return f.status === 'testing' && last?.event === 'prompt' && whoOf(last)?.role === 'diagnoser' ? label(last) : null;

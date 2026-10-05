@@ -140,11 +140,13 @@ const readEvents = (root: string, id: string): LogEvent[] => {
   return text.split('\n').flatMap((l) => { if (!l.includes(`"${id}"`)) return []; try { const e = JSON.parse(l) as LogEvent; return e.feature === id ? [e] : []; } catch { return []; } });
 };
 // The failure a proposal answers is still the feature's latest: no launch since, and (for a held feature) the same hold.
+// A hold a spec fix answers: a spec error found by a review or the pre-launch check, or a conflict the planner found before any build.
+const specHold = (h: Feature['planningHold']): boolean => h?.cause === 'spec-error' || h?.cause === 'spec-conflict';
 export function currentFailure(f: Feature, p: Pick<SpecFixProposal, 'review' | 'launch' | 'inputs'>, events: Pick<LogEvent, 'event' | 'ts'>[]): string | null {
   const last = [...events].reverse().find((e) => e.event === 'launch');
   if (p.launch && last && last.ts !== p.launch) return 'the feature was launched again since';
   if (f.status === 'todo' || (f.status === 'paused' && f.planningHold)) {
-    if (f.planningHold?.cause !== 'spec-error' || f.planningHold.review !== p.review || f.planningHold.inputs !== p.inputs) return 'the spec-error hold it answers is gone';
+    if (!specHold(f.planningHold) || f.planningHold!.review !== p.review || f.planningHold!.inputs !== p.inputs) return 'the spec-error hold it answers is gone';
   } else if (f.status !== 'stuck' && f.status !== 'paused') return `the feature is ${f.status}`;
   return null;
 }
@@ -203,7 +205,7 @@ export async function applySpecFix(root: string, featureId: string, id: string, 
     if (err) return err;
     const p = f.specFix!, what = p.target === 'description' ? 'the description' : `acceptance item ${p.target}`;
     if (p.target === 'description') f.description = p.new!; else f.acceptance[(p.target as number) - 1] = p.new!;
-    if (f.planningHold?.cause === 'spec-error' && f.planningHold.review === p.review) delete f.planningHold;
+    if (specHold(f.planningHold) && f.planningHold!.review === p.review) delete f.planningHold;
     if (f.lastFeedback) f.lastFeedback = `[This feedback was about the earlier requirements: ${what} has since been corrected from "${p.old}" to "${p.new}".]\n${f.lastFeedback}`;
     newCycle(f);
     (f.specFixes ??= []).push({ id, ts: now(), by, target: p.target!, old: p.old!, new: p.new!, why: p.why ?? '', after: holdInputs(root, config, f),
@@ -296,13 +298,16 @@ export function candidates(root: string, config: Config, features: Feature[], by
   return features.flatMap((f) => {
     if (f.status !== 'todo' && f.status !== 'stuck') return [];
     const mine = Object.entries(byKey).filter(([, r]) => r.feature === f.id && r.cause === 'spec-error').sort((a, b) => (a[1].passStart ?? a[1].ts).localeCompare(b[1].passStart ?? b[1].ts)), latest = mine.at(-1);
-    if (!latest && !f.planningHold?.review.startsWith('precheck:')) return [];
+    const before = !!f.planningHold && (f.planningHold.review.startsWith('precheck:') || f.planningHold.cause === 'spec-conflict'); // held before any build
+    if (!latest && !before) return [];
     const inputs = holdInputs(root, config, f); // only for features a spec-error review blamed: it reads the briefs
     if ((f.specFix && f.specFix.inputs === inputs) || f.specFixDecisions?.[inputs]) return [];
     const launch = [...events].reverse().find((e) => e.feature === f.id && e.event === 'launch');
-    if (f.status === 'todo' && f.planningHold?.review.startsWith('precheck:')) {
-      const h = f.planningHold; // the pre-launch check against the spec-writing notes (lib/specnotes.ts): its quotes are the evidence
-      return h.cause === 'spec-error' && h.inputs === inputs ? [{ f, review: { ts: h.ts, feature: f.id, tag: '', role: 'builder', model: '', effort: '', notes: '', kind: 'evaluator-rejected', next: '',
+    if (f.status === 'todo' && before) {
+      // The pre-launch check against the spec-writing notes (lib/specnotes.ts), or the planner's conflicts (lib/plan.ts, with their
+      // file:line quotes): the hold's evidence is the review.
+      const h = f.planningHold!;
+      return specHold(h) && h.inputs === inputs ? [{ f, review: { ts: h.ts, feature: f.id, tag: '', role: 'builder', model: '', effort: '', notes: '', kind: 'evaluator-rejected', next: '',
         cause: 'spec-error', evidence: h.evidence, confidence: 'high', suggestion: '', target: null, cost: 0 } as PromptReview, key: h.review, inputs, launch: undefined }] : [];
     }
     if (f.status === 'todo') {

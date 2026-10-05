@@ -93,9 +93,10 @@ test('roleTable lists every role as resolved, with the builder\'s effortHigh', (
     { role: 'resolver', model: 'sonnet', effort: 'high', fromProfile: true },
     { role: 'evaluator', model: 'fable', effort: 'high', fromProfile: true },
     { role: 'observer', model: 'fable', effort: 'high', fromProfile: true },
-    { role: 'curator', model: 'fable', effort: 'medium', fromProfile: true }]);
+    { role: 'curator', model: 'fable', effort: 'medium', fromProfile: true },
+    { role: 'planner', model: 'opus', effort: 'medium', fromProfile: false }]);
   assert.deepEqual(roleTable(C(), null, agent).map((r) => [r.role, r.model, r.effort, r.fromProfile]), [['builder', 'opus', 'medium', false], ['resolver', 'opus', 'medium', false],
-    ['evaluator', 'opus', 'high', false], ['observer', 'opus', 'high', false], ['curator', 'opus', 'high', false]]);
+    ['evaluator', 'opus', 'high', false], ['observer', 'opus', 'high', false], ['curator', 'opus', 'high', false], ['planner', 'opus', 'medium', false]]);
 });
 
 test('profileProblems (doctor): object of objects, known roles, string fields, opus reserved', () => {

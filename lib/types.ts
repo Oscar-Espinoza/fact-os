@@ -14,9 +14,9 @@ export interface RoleConfig { model?: string; effort?: string; permissionMode?: 
 
 // Model profiles (profiles.ts): a named set of model/effort per role, chosen at runtime in control.json. "opus" is the
 // reserved name of the main mode, each role's own config. permissionMode never comes from a profile: always the role's.
-export type ProfileRole = 'builder' | 'resolver' | 'evaluator' | 'observer' | 'curator';
-export const PROFILE_ROLES: ProfileRole[] = ['builder', 'resolver', 'evaluator', 'observer', 'curator'];
-export interface ProfileEntry { model?: string; effort?: string; effortHigh?: string; provider?: Provider } // effortHigh: the builder's effort on a risky feature
+export type ProfileRole = 'builder' | 'resolver' | 'evaluator' | 'observer' | 'curator' | 'planner';
+export const PROFILE_ROLES: ProfileRole[] = ['builder', 'resolver', 'evaluator', 'observer', 'curator', 'planner'];
+export interface ProfileEntry { model?: string; effort?: string; effortHigh?: string; provider?: Provider } // effortHigh: the builder's effort on a risky feature, the planner's on a sensitive spec or after a failure
 // Feature tiers, set at intake: what a feature needs from its builder and reviewer (see README "Feature tiers").
 export type Tier = 'normal' | 'multi' | 'hard' | 'risky' | 'investigate';
 export const TIERS: Tier[] = ['normal', 'multi', 'hard', 'risky', 'investigate'];
@@ -64,8 +64,20 @@ export interface Config {
   setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
   codex: { fallback: RoleConfig; cooldownMin: number }; // a Codex run that cannot answer falls back to this Claude role config
+  planner: PlannerConfig;              // the read-only planning run before a feature's first build (lib/plan.ts)
   observer?: Partial<Omit<ObserverConfig, 'promptReview'>> & { promptReview?: Partial<PromptReviewConfig> }; // read only by `fact-os observe`
   profiles?: Record<string, Profile>; // added to (or replacing, by name) the built-in profiles; "opus" is reserved
+}
+
+// The planner (lib/plan.ts): a read-only run before a feature's first build that checks the spec against the code and writes a
+// plan for the builder. Always plan mode (read-only); model/effort here are the opus mode's, a profile's `planner` entry overrides.
+export interface PlannerConfig {
+  enabled: boolean;                   // default true
+  model: string;                      // default opus
+  effort: string;                     // default medium
+  effortHigh: string;                 // default high: a spec with sensitive words, or a feature that already failed an attempt
+  maxPerDay: number;                  // planner runs started in any 24 hours (0 = none); over it, builds go on without a plan
+  skipBelow: Tier | null;             // null = plan every feature; a tier: features of a lower tier (TIERS order) skip planning
 }
 
 // File claims (docs/merge-process.md): a file is hot when listed in `hot` (a path, or a dir prefix ending in "/") or
@@ -109,7 +121,7 @@ export interface AttemptStop { attempt: number; counted: boolean }
 // saved prompt and outcome, that the spec or the prompt cannot be met as written. Not a person's pause: no attempt is spent, and
 // it is released by an edit of the feature's inputs (its fingerprint changes) or by a person (`release`), never by time.
 export interface PlanningHold {
-  cause: 'spec-error' | 'prompt-conflict' | 'base-defect';
+  cause: 'spec-error' | 'prompt-conflict' | 'base-defect' | 'spec-conflict'; // spec-conflict: the planner found the spec cannot be met (before any build)
   confidence: 'medium' | 'high';
   base?: string;                      // base-defect: the base commit at the hold; a later base that changes `paths` rechecks it (at most twice per signature)
   paths?: string[];                   // base-defect: the paths implicated in the defects
@@ -161,6 +173,7 @@ export interface Feature {
   specFixes?: SpecFixRecord[];        // spec fixes applied to it, oldest first (undo restores the latest)
   specFixDecisions?: Record<string, string>; // spec inputs → what was decided for them (declined, none, applied): never drafted again
   specCheck?: { inputs: string; ts: string; issues: { note: string; quote: string; why: string }[] }; // the pre-launch check against the spec-writing notes (lib/specnotes.ts)
+  plan?: PlanSummary;                 // the planner's latest answer for this spec (the plan text is in runs/<id>/plan.md, never committed)
   tier?: Tier;                        // set at intake; picks role models from the active profile's tiers (absent: the risk heuristic)
   risk?: 'high' | 'normal';           // "high": the builder gets its profile's effortHigh; "normal": never; absent: keyword heuristic
   conflict?: { ours: string; theirs: string; files: string[] }; // a conflicted base refresh whose committed resolution is not checked yet
@@ -168,6 +181,8 @@ export interface Feature {
   pidStart?: string;                  // /proc/<pid>/stat field 22
   foremanPid?: number;
 }
+
+export interface PlanSummary { inputs: string; ts: string; verdict: 'FEASIBLE' | 'INFEASIBLE' | 'none'; effort?: 'medium' | 'high'; split?: string | null; error?: string }
 
 export interface HumanTask {
   id: string;
@@ -242,7 +257,7 @@ export interface Verdict {
 // A counted failure's provenance. Only 'review' (a valid rejection, or a rebuild that left rejected content unchanged) and
 // 'gate-own' (a gate failure a diagnosis attributed to the feature's code or tests) are the builder's implementation failing.
 export type FailureKind = 'review' | 'gate-own' | 'gate' | 'evaluator' | 'builder' | 'commit' | 'keep' | 'merge' | 'setup' | 'other';
-export type RunPhase = 'build' | 'commit' | 'fix-gate' | 'fix-review' | 'fix-keep' | 'fix-progress' | 'resolve' | 'review' | 'diagnose';
+export type RunPhase = 'plan' | 'build' | 'commit' | 'fix-gate' | 'fix-review' | 'fix-keep' | 'fix-progress' | 'resolve' | 'review' | 'diagnose';
 export interface RunRecord { phase: RunPhase; tag: string; role: string; provider: string; model: string | null; effort: string | null; tier: string | null;
   resumed: boolean; fallback?: boolean; promptBytes: number; rule?: string; routedByTier?: boolean; // tier: the feature's tier at launch; routedByTier: a tier entry chose this config
   context?: { map: number; atoms: string[]; deferred: { id: string; why: string }[]; atomBytes: number; recap: boolean; lessons?: { included: number; total: number } } } // first build: what the Map section held

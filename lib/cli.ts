@@ -78,7 +78,7 @@ function status(): void {
       a.waiting.includes(f.id) && 'waiting-on-human', a.bad.has(f.id) && 'INVALID',
       f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now() && `setup-retry ${f.setupRetryAt}`,
       f.envRetryAt && Date.parse(f.envRetryAt) > Date.now() && `env-retry ${f.envRetryAt}`,
-      f.planningHold && `planning-hold ${f.planningHold.cause}`].filter(Boolean).join(' ')])];
+      f.planningHold && `planning-hold ${f.planningHold.cause}`, f.plan?.split && `split-suggested: ${f.plan.split}`].filter(Boolean).join(' ')])];
   const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
   for (const r of rows) console.log(r.map((c, i) => c.padEnd(w[i])).join('  ').trimEnd());
   console.log('\n(cost: reported USD; Codex runs record tokens only, so their USD is not included)');

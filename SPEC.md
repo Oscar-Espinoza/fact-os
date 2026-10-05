@@ -64,6 +64,7 @@ and one dashboard across projects.
   "profiles": {},               // extra model profiles (see Model profiles); optional; a profile may add "tiers" (below)
   "gateFixes": 0,               // resumed builder fixes after a test-gate failure, per pass (see Pass, Test)
   "diagnoser": null,            // null, or a role config (provider "claude" or "codex") diagnosing a repeated gate failure
+  "planner": {"enabled": true, "model": "opus", "effort": "medium", "effortHigh": "high", "maxPerDay": 50, "skipBelow": null}, // see Plan
   "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30} // when a Codex run cannot answer
                                 // (a leftover "classifier" key, from the Jev classifier removed on 2026-10-05, is ignored; doctor notes it)
 }
@@ -174,7 +175,8 @@ during a run never trips the tamper halt.
 ## Model profiles (`lib/profiles.ts`, pure)
 
 A profile names the model and effort per role: `builder`, `resolver`, `evaluator`, `observer` (the observer's improver) and
-`curator` (its lessons curation). Two ways to run the factory are built in:
+`curator` (its lessons curation), plus `planner` (the read-only Plan step: its own `config.planner` under opus; `effortHigh`
+allowed, as for the builder). Two ways to run the factory are built in:
 - **`opus`** (the main mode, reserved): each role's own config (`builder`, `evaluator`, `resolver ?? builder`, the observer's
   `agent`). `null` in `control.json` means opus; `"opus"` (file, CLI, API) is read and stored as `null`. `default` is only a
   CLI alias (`fact-os profile default`): the API answers 400 to it, and in the file it is an unknown name (invalid).
@@ -319,6 +321,30 @@ Each tick:
      require dependency ancestry again before testing/evaluation, so aborting the
      merge cannot bypass this check. `refreshed` details starting `before build, ` continue the same pass
      in observer statistics and prompt review. This ancestry contract cannot prove unchanged semantics.
+   - **Plan** (`lib/plan.ts`, `config.planner`). Before the first build of a spec, one read-only `claude -p` (always
+     `--permission-mode plan`; the profile's `planner` entry over `config.planner`, default opus medium; `effortHigh` when the
+     title, description or acceptance say "must not change", "all paths" or "every", or name money/payment/refund/price/
+     invoice/tax/permission/auth/token/tenant/RLS, or the feature already failed an attempt) reads the root and named nested
+     AGENTS.md, `tasks/<ID>.md`, the briefs and the code the spec names, marks each acceptance line OK|CONFLICT|UNVERIFIABLE
+     and answers, strictly: `VERDICT: FEASIBLE|INFEASIBLE`, `EFFORT: medium|high`, `SPLIT: no|yes: <the cut>`, then a
+     numbered CONFLICTS list (each item quoting file:line, with 1-2 resolutions) or a plan under 600 words (files with the
+     helper to reuse, composition points and how each check is proven, the mutation per guard, what not to touch, risks,
+     order; over 750 words is rejected). The answer is saved as `runs/<id>/plan.json` and `plan.md` (never committed),
+     summarized as the feature's `plan`, and reused while `holdInputs` (spec, deps, briefs, role instructions) is
+     unchanged, failures included. **INFEASIBLE**: the feature goes back to `todo` with a `spec-conflict` planning hold
+     (the conflicts as evidence, uncounted stop, event `planning-hold`): no builder starts and no attempt is spent; it is
+     released by an edit of its inputs (which plans again), an applied spec fix (the spec-fix flow drafts from a
+     spec-conflict hold as from a pre-launch check hold) or `fact-os release`, after which the unchanged spec builds
+     without a plan and the builder gets the conflicts as "Planner concerns" (`plan-overridden`). **FEASIBLE**: the plan
+     follows the acceptance checks in the builder prompt as "Plan (from the planner; deviate only if the code proves it
+     wrong, and say so in your final message)" and is shown to the evaluator as context only (it judges the acceptance
+     checks, never the plan); `EFFORT: high` moves the builder to its profile's `effortHigh` (never under opus, a tier or
+     a ladder step; logged as the run's `rule`); `SPLIT` is recorded (`planned` event, `status`, dashboard story) and
+     changes nothing. Skipped (`plan-skipped`) when `enabled` is false, the feature's tier is below `skipBelow` (TIERS
+     order; untiered features are planned), `maxPerDay` planner runs started in the last 24 hours (from the log), or the
+     worktree is not clean. A crash, timeout, contract violation or a run that changed the worktree (undone) is logged
+     `plan` and the build goes on without a plan. Every builder prompt also says: if the spec cannot be met as written,
+     finish with `blocked: spec-conflict` instead of working around it.
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
      previous evaluator feedback, lessons file, briefFiles, and the rule "commit your work; do not

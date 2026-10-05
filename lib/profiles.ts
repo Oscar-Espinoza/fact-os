@@ -77,7 +77,8 @@ export const riskyOpen = (features: (Parameters<typeof isRisky>[0] & Pick<Featur
 // ---- resolution ----
 
 const baseOf = (config: Config, role: ProfileRole, agent?: RoleConfig | null): RoleConfig =>
-  (role === 'observer' || role === 'curator' ? agent : role === 'resolver' ? config.resolver ?? config.builder : config[role]) || {};
+  (role === 'observer' || role === 'curator' ? agent : role === 'resolver' ? config.resolver ?? config.builder
+    : role === 'planner' ? { model: config.planner?.model, effort: config.planner?.effort } : config[role]) || {};
 const entryOf = (config: Config, profile: string | null, role: ProfileRole): ProfileEntry | undefined =>
   profile == null || profile === OPUS ? undefined : profiles(config)[profile]?.[role];
 
@@ -106,6 +107,33 @@ export function resolveRole(config: Config, profile: string | null, role: Profil
   const effort = role === 'builder' && e?.effortHigh && feature && !feature.tier && isRisky(feature) ? e.effortHigh : e?.effort ?? base.effort;
   const r: RoleConfig = { ...base, ...(e?.model ? { model: e.model } : {}), ...(effort ? { effort } : {}), ...(e?.provider ? { provider: e.provider } : {}) };
   return { ...r, ...(t?.model ? { model: t.model } : {}), ...(t?.effort ? { effort: t.effort } : {}), ...(t?.provider ? { provider: t.provider } : {}) };
+}
+
+// ---- planner ----
+
+// A spec the planner reads at its high effort: one that says what must not change or must hold everywhere, or touches money,
+// permissions, tokens or tenants (the RISK_KEYWORDS families of those). Whole words, case-insensitive.
+const PLAN_HIGH = /\b(must not change|all paths|every)\b/i;
+const PLAN_FAMILIES = ['money', 'payment', 'refund', 'price', 'invoice', 'tax', 'permission', 'auth', 'token', 'tenant', 'rls'];
+export const sensitiveSpec = (f: Pick<Feature, 'title' | 'description'> & { acceptance?: string[] }): boolean => {
+  const text = [f.title, f.description, ...(f.acceptance ?? [])].join('\n');
+  return PLAN_HIGH.test(text) || riskFamilies(text).some((x) => PLAN_FAMILIES.includes(x));
+};
+// The planner's RoleConfig: the profile's `planner` entry over config.planner; its effortHigh on a sensitive spec or once the feature
+// has failed an attempt. Always plan mode (read-only) and Claude: it never takes the profile's or a role's permissionMode.
+export function plannerRole(config: Config, profile: string | null, f: Pick<Feature, 'title' | 'description' | 'attempts'> & { acceptance?: string[] }): RoleConfig & { high: boolean } {
+  const e = entryOf(config, profile, 'planner'), high = (f.attempts || 0) > 0 || sensitiveSpec(f);
+  const effort = high ? e?.effortHigh ?? config.planner?.effortHigh ?? e?.effort ?? config.planner?.effort : e?.effort ?? config.planner?.effort;
+  const model = e?.model ?? config.planner?.model;
+  return { ...(model ? { model } : {}), ...(effort ? { effort } : {}), permissionMode: 'plan', provider: 'claude', high };
+}
+// The builder config after the planner's EFFORT: "high" may move the builder only to its profile's own effortHigh (an existing
+// profile rung), never beyond it and never down; nothing under opus, for a tiered feature (the tier decides), or when the
+// builder is already there or a ladder step chose its config. Null: no change.
+export function plannedEffort(config: Config, profile: string | null, f: Tiered, base: RoleConfig, effort: 'medium' | 'high' | undefined): { cfg: RoleConfig; rule: string } | null {
+  const high = entryOf(config, profile, 'builder')?.effortHigh;
+  if (effort !== 'high' || !high || f.tier || base.effort === high) return null;
+  return { cfg: { ...base, effort: high }, rule: `planner: EFFORT high → the profile's effortHigh ${high} (from ${base.effort ?? '-'})` };
 }
 
 // ---- retry ladder ----
@@ -212,7 +240,7 @@ export function profileProblems(raw: unknown): string[] {
         if (!['model', 'effort', 'effortHigh'].includes(k)) out.push(`config.profiles.${name}.${role}.${k}: unknown field (model, effort, effortHigh${k === 'permissionMode' ? '; permissionMode always comes from the role config' : ''})`);
         else if (typeof v !== 'string' || !v.trim()) out.push(`config.profiles.${name}.${role}.${k} must be a non-empty string`);
       }
-      if ('effortHigh' in e && role !== 'builder') out.push(`config.profiles.${name}.${role}.effortHigh: only the builder escalates on risky features`);
+      if ('effortHigh' in e && role !== 'builder' && role !== 'planner') out.push(`config.profiles.${name}.${role}.effortHigh: only the builder and the planner escalate`);
     }
   }
   return out;

@@ -430,7 +430,7 @@ test('profile route: sets the model profile (known name, "opus" or null), refuse
     assert.equal(c.observerAgent, false, 'no observer agent configured: the page labels the observer rows "observe --agent"');
     assert.deepEqual(c.profiles.map((p) => [p.name, p.label]), [['opus', 'Opus'], ['fable-sonnet', 'Fable + Sonnet']]);
     assert.deepEqual(c.roles.map((r) => [r.role, r.model, r.effort]), [['builder', 'opus', 'medium'], ['resolver', 'opus', 'medium'], ['evaluator', 'opus', 'high'],
-      ['observer', 'opus', 'high'], ['curator', 'opus', 'high']]);
+      ['observer', 'opus', 'high'], ['curator', 'opus', 'high'], ['planner', 'opus', 'medium']]);
     assert.deepEqual(c.profiles[1]!.roles[0], { role: 'builder', model: 'sonnet', effort: 'medium', effortHigh: 'high', fromProfile: true });
     let r = await ask({ profile: 'fable-sonnet' });
     assert.equal(r.status, 200);
@@ -438,7 +438,7 @@ test('profile route: sets the model profile (known name, "opus" or null), refuse
     assert.deepEqual([JSON.parse(readFileSync(file, 'utf8')).profile, JSON.parse(readFileSync(file, 'utf8')).by], ['fable-sonnet', 'dashboard']);
     c = (await get()).control!;
     assert.equal(c.profile, 'fable-sonnet');
-    assert.deepEqual(c.roles.map((x) => x.model), ['sonnet', 'sonnet', 'fable', 'fable', 'fable']);
+    assert.deepEqual(c.roles.map((x) => x.model), ['sonnet', 'sonnet', 'fable', 'fable', 'fable', 'opus']);
     const before = readFileSync(file, 'utf8');
     for (const body of [{ profile: 'nope' }, { profile: 'default' }, { profile: 3 }, { profile: '' }, {}]) {
       r = await ask(body);

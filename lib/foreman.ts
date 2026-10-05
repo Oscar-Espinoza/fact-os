@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { childEnv, paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
 import { analyze, mockTasksFor, validate, type MockTask } from './ready.ts';
 import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, declaredNote, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
-import { escalates, ladderFailures, ladderStep, resolveRole, tierApplies } from './profiles.ts';
+import { escalates, ladderFailures, ladderStep, plannedEffort, plannerRole, resolveRole, tierApplies } from './profiles.ts';
+import { cachedPlan, parsePlan, planSkip, plannerPrompt, plannerRunsSince, savePlan, summaryOf, type SavedPlan } from './plan.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { testFailure } from './story.ts';
 import { atomStale, candidateMap, pickAtoms, readAtoms, recap, renderContext, selectLessons } from './context.ts';
@@ -267,13 +268,15 @@ const mockList = (tasks: MockTask[]): string => tasks.map((t) => `- ${t.id}: ${t
   `${(t.steps || []).length ? `\n${t.steps.map((x) => `  - ${x}`).join('\n')}` : ''}`).join('\n');
 
 // `extra.map`: the rendered candidate map and verified pointers (lib/context.ts). `extra.feedbackFile`: where the previous attempt's
-// full feedback was written, so long feedback reaches the builder as a recap plus that file.
+// full feedback was written, so long feedback reaches the builder as a recap plus that file. `extra.plan`: the planner's section
+// (planSection), placed right after the acceptance checks.
 export function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = [], notes = '',
-  extra: { map?: string; feedbackFile?: string | null; lessons?: string } = {}): string {
+  extra: { map?: string; feedbackFile?: string | null; lessons?: string; plan?: string } = {}): string {
   const lessons = extra.lessons ?? readIf(resolve(root, config.lessonsFile)); // extra.lessons: the selection for this build (selectLessons)
   return [`You are the builder for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}, created from ${config.base}.`, '', f.description || '', '',
     'Acceptance checks (an independent evaluator verifies each one):', ...(f.acceptance || []).map((a) => `- ${a}`), '',
+    extra.plan ? `${extra.plan}\n` : '',
     mockTasks.length ? 'ON MOCK: these human tasks were open at launch, so build against a clearly isolated mock/fake of the external ' +
       'capability they provide, behind a boundary that is easy to swap for the real thing later. Wire everything else for production: the ' +
       'real routes, jobs and state transitions must reach that boundary, and production must fail explicitly while no real integration ' +
@@ -283,6 +286,8 @@ export function builderPrompt(root: string, config: Config, f: Feature, branch: 
       hotHeld.map((h) => `- ${h}`).join('\n')}\nKeep your edits there small and additive (never reorder or reformat them); do not skip a change the feature needs.\n` : '',
     'Rules:', '- Commit your work on this branch (git add + git commit). Uncommitted changes are not evaluated.',
     '- Do not weaken or delete tests to make them pass.', '- Do not stub behavior the acceptance checks require.',
+    '- If the spec cannot be met as written (two requirements contradict each other, or the code contradicts what the spec says), do not',
+    '  work around it: finish with "blocked": {"reason": "spec-conflict", "what": the conflict, with file:line} in your exit block.',
     '- Before writing a helper, search the codebase with rg for an existing implementation and reuse or extend it. A multi-line copy of an',
     '  existing production helper blocks evaluation. Duplicated test setup/helpers are reported as notes suggesting reuse; duplication alone',
     '  does not block those tests.',
@@ -293,6 +298,15 @@ export function builderPrompt(root: string, config: Config, f: Feature, branch: 
     `- The test command \`${config.test}\` must pass.`,
     `- ${FINISH_RULE}`,
     extra.map ?? '', lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config), notes].join('\n');
+}
+
+// The planner's part of a builder prompt: its plan (FEASIBLE), or, when a person released a spec-conflict hold to launch the spec
+// unchanged, the conflicts it found. The evaluator gets only the plan, as context (evaluatorPrompt).
+export function planSection(plan: { verdict: 'FEASIBLE'; text: string } | { verdict: 'INFEASIBLE'; conflicts: string[] }): string {
+  return plan.verdict === 'FEASIBLE' ? `Plan (from the planner; deviate only if the code proves it wrong, and say so in your final message):\n${plan.text}`
+    : 'Planner concerns: before this build a read-only planner judged the spec infeasible as written, and a person released it to be built ' +
+      'unchanged. Check each concern against the code; if one holds, finish blocked with "spec-conflict" instead of working around it:\n' +
+      plan.conflicts.map((c, i) => `${i + 1}. ${c}`).join('\n');
 }
 
 // The evaluator's view of the diff: a file list first, then whole files' diffs while they fit in `budget` characters
@@ -340,7 +354,7 @@ export function failureId(output: string): string {
   return [...keep].some((l) => /\b\w*Error\b:|AssertionError|\bExpected\b|\bReceived\b/i.test(l)) ? [...keep].sort().join('\n') : '';
 }
 
-export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = []): string {
+export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = [], plan = ''): string {
   const onMock = mockTasks.length > 0;
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
     'You did not write this code. Judge it skeptically. You may read files and run commands; do not modify or commit anything in this',
@@ -386,6 +400,8 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     'lines, the tests you ran and what the mutation check showed.',
     edits.length ? `\nExisting tests this branch changes (tests that already exist on ${config.base}). Justify each change from the acceptance ` +
       `checks or the diff, or reject the feature and list it under "cheating":\n${edits.map((e) => `- ${e}`).join('\n')}\n` : '',
+    plan ? `\nContext only: the plan a read-only planner wrote before the build. Judge the work against the acceptance checks above, never ` +
+      `against this plan; a deviation from it is not a finding by itself.\n${plan}\n` : '',
     briefs(root, config), notes].join('\n');
 }
 
@@ -785,7 +801,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // A fresh try after counted implementation/review failures climbs the profile's ladder (resolved once, at launch; repairs in
     // this pass keep the same builder).
     const ladder = ladderStep(config, profile, resolveRole(config, profile, 'builder', { feature: f }), ladderFailures(readLogEvents(P.log), id, f.attempts || 0));
-    const roleCfg = (role: Role) => (role === 'builder' && ladder ? ladder.cfg : resolveRole(config, profile, role, { feature: f }));
+    // The planner's EFFORT, when its plan is used and the profile has a higher builder rung (plannedEffort); a ladder step wins.
+    let planStep: { cfg: RoleConfig; rule: string } | null = null;
+    const builderStep = () => ladder ?? planStep;
+    const roleCfg = (role: Role) => (role === 'builder' && builderStep() ? builderStep()!.cfg : resolveRole(config, profile, role, { feature: f }));
     // `diagnose`: the run is a diagnosis made with the builder's permissions; it is not builder work (no exit block, no run dir).
     const claude = async (role: Role, prompt: string, file: string, opts: { extra?: string[]; cfg?: RoleConfig; diagnose?: boolean } = {}): Promise<ClaudeResult> => {
       const ri = (opts.extra ?? []).indexOf('--resume'), resumed = ri >= 0 ? opts.extra![ri + 1] : undefined;
@@ -873,7 +892,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
       const used = cfg ?? roleCfg(role), tier = cfg ? null : tierApplies(config, profile, role, f);
       const run: RunRecord = { phase: phase ?? (role === 'evaluator' ? 'review' : role === 'resolver' ? 'resolve' : 'build'), tag, role, provider: used.provider ?? 'claude',
-        model: used.model ?? null, effort: used.effort ?? null, tier: f.tier ?? null, ...(tier ? { routedByTier: true } : {}), resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}), ...(context ? { context } : {}), ...(role === 'builder' && !cfg && ladder ? { rule: ladder.rule } : {}) };
+        model: used.model ?? null, effort: used.effort ?? null, tier: f.tier ?? null, ...(tier ? { routedByTier: true } : {}), resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}), ...(context ? { context } : {}), ...(role === 'builder' && !cfg && builderStep() ? { rule: builderStep()!.rule } : {}) };
       log(root, id, 'prompt', promptFingerprint(role, used, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
         profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes, tier), undefined, { run });
     };
@@ -991,7 +1010,75 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // The builder's Claude session in this pass: a test-gate failure resumes it (config.gateFixes), so the fix keeps its context.
     // A skipped build has no session, so its gate failure stays an ordinary failure.
     let builderSession: string | null = null, builderNotes: string | null = null;
+    // The planner (lib/plan.ts): once per spec, before the first build. Its answer is saved beside the runs and reused while the
+    // spec (holdInputs) is the same; a skipped build (revalidation) still shows a saved plan to the evaluator.
+    const planInputs = holdInputs(root, config, f);
+    let planBrief = '', evalPlan = '';
+    const usePlan = (p: SavedPlan) => {
+      if (p.verdict !== 'FEASIBLE') return;
+      planBrief = planSection({ verdict: 'FEASIBLE', text: p.text }); evalPlan = p.text;
+      planStep = ladder ? null : plannedEffort(config, profile, f, resolveRole(config, profile, 'builder', { feature: f }), p.effort);
+    };
+    { const saved = skipBuild ? cachedPlan(runDir, planInputs) : null; if (saved) usePlan(saved); }
+    const plan = async (): Promise<'go' | 'stop'> => {
+      const saved = cachedPlan(runDir, planInputs);
+      if (saved?.verdict === 'INFEASIBLE') { // only a person's release relaunches a held spec unchanged
+        planBrief = planSection({ verdict: 'INFEASIBLE', conflicts: saved.conflicts ?? [] });
+        log(root, id, 'plan-overridden', 'the spec-conflict hold was released for this unchanged spec; building without a plan, with the planner\'s concerns');
+        return 'go';
+      }
+      if (saved) {
+        if (saved.verdict === 'FEASIBLE') usePlan(saved);
+        log(root, id, 'plan-reused', saved.verdict === 'FEASIBLE' ? `the plan of ${saved.ts} for this unchanged spec` : `no plan for this unchanged spec (${saved.error ?? 'none'})`);
+        return 'go';
+      }
+      const why = planSkip(config, f, plannerRunsSince(readEvents()))
+        ?? (git(['rev-parse', '--quiet', '--verify', 'MERGE_HEAD'], wt).code === 0 || git(['status', '--porcelain'], wt).out ? 'the worktree has a merge in progress or uncommitted changes' : null);
+      if (why) { log(root, id, 'plan-skipped', why); return 'go'; }
+      const cfg = plannerRole(config, profile, f), prompt = plannerPrompt(f, branch, config, onMockBrief(mockTasks, 'A missing real integration of exactly ' +
+        'that capability is a deliberate deferral, not a CONFLICT.')), head = git(['rev-parse', 'HEAD'], wt).out;
+      writeFileSync(join(runDir, `${tag}-plan.prompt.md`), prompt);
+      // Logged before the run starts (no await in between), so concurrent launches count it against the daily cap.
+      log(root, id, 'prompt', `planner model=${cfg.model || '-'} effort=${cfg.effort || '-'}`, undefined, { run: { phase: 'plan', tag, role: 'planner', provider: 'claude',
+        model: cfg.model ?? null, effort: cfg.effort ?? null, tier: f.tier ?? null, resumed: false, promptBytes: Buffer.byteLength(prompt),
+        ...(cfg.high ? { rule: 'planner: high effort (a sensitive spec, or an earlier failed attempt)' } : {}) } });
+      out(`plan ${id}: ${cfg.model ?? 'claude'} ${cfg.effort ?? ''}`.trim());
+      const r = await claude('builder', prompt, `${tag}-plan.json`, { cfg, diagnose: true }); // diagnose: a read-only run, not builder work
+      if (await stopped()) return 'stop';
+      const record = (x: Partial<SavedPlan>): SavedPlan => {
+        const p: SavedPlan = { inputs: planInputs, ts: now(), tag, model: cfg.model ?? null, plannerEffort: cfg.effort ?? null, verdict: 'none', text: '', ...x };
+        try { savePlan(runDir, p); } catch {}
+        return p;
+      };
+      const soft = async (what: string) => { const p = record({ error: what }); await edit(id, (x) => { x.plan = summaryOf(p); }); log(root, id, 'plan', `${what}; building without a plan`); out(`plan ${id}: ${what}; building without a plan`); return 'go' as const; };
+      if (git(['rev-parse', 'HEAD'], wt).out !== head || git(['status', '--porcelain'], wt).out) { // read-only, or nothing
+        git(['reset', '-q', '--hard', head], wt); git(['clean', '-q', '-fd'], wt);
+        return soft('refused: the planner changed the worktree; its edits were undone');
+      }
+      if (!r.ok) return soft(`failed: ${r.error}`);
+      const p = parsePlan(r.text);
+      if ('error' in p) return soft(`invalid: ${p.error}`);
+      const split = p.split ? `; split suggested: ${p.split}` : '';
+      if (p.verdict === 'INFEASIBLE') {
+        const held = record({ verdict: 'INFEASIBLE', effort: p.effort, split: p.split, conflicts: p.conflicts });
+        await edit(id, (x) => {
+          const stop = { attempt: (x.attempts || 0) + 1, counted: false };
+          Object.assign(x, { status: 'todo', stop, updatedAt: now(), plan: summaryOf(held), planningHold: { cause: 'spec-conflict', confidence: 'high', evidence: p.conflicts,
+            review: `plan:${id}/${tag}`, passEnd: now(), inputs: planInputs, ts: now() } });
+        });
+        log(root, id, 'planning-hold', `spec-conflict (high), planner before any build: ${p.conflicts.map((c, i) => `${i + 1}. ${c.split('\n')[0]}`).join(' ')}${split}. ` +
+          `No builder was started and no attempt spent. Edit the spec (a spec fix may be drafted), or \`${NAME} release ${id}\` to launch it unchanged.`);
+        out(`hold ${id}: the planner found the spec cannot be met as written (${p.conflicts.length} conflict${p.conflicts.length === 1 ? '' : 's'}); no build started`);
+        return 'stop';
+      }
+      const made = record({ verdict: 'FEASIBLE', effort: p.effort, split: p.split, text: p.plan });
+      usePlan(made);
+      await edit(id, (x) => { x.plan = summaryOf(made); });
+      log(root, id, 'planned', `FEASIBLE, effort ${p.effort}${planStep ? ` (${planStep.rule})` : ''}${split}`);
+      return 'go';
+    };
     if (!skipBuild) {
+    if (await plan() === 'stop') return;
     const bn = notesFor('builder');
     const map = candidateMap(f, wt, git), pick = config.contextMaxBytes
       ? pickAtoms(readAtoms(P.dir).atoms, [...map.files.map((m) => m.path), ...(f.touches ?? [])], config.contextMaxBytes, (a) => atomStale(a, 'HEAD', wt, git))
@@ -1003,7 +1090,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const allLessons = readIf(resolve(root, config.lessonsFile)), lessonsFile = join(runDir, `${tag}-lessons.md`);
     const sel = allLessons && config.lessonsMaxBytes && Buffer.byteLength(allLessons) > config.lessonsMaxBytes
       ? (writeFileSync(lessonsFile, allLessons), selectLessons(allLessons, [...predicted, ...(f.touches ?? [])], [f.title, f.description, ...(f.acceptance ?? [])].join('\n'), config.lessonsMaxBytes, lessonsFile)) : null;
-    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn), { map: renderContext(map, pick), feedbackFile, ...(sel ? { lessons: sel.text } : {}) });
+    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn), { map: renderContext(map, pick), feedbackFile, ...(sel ? { lessons: sel.text } : {}), ...(planBrief ? { plan: planBrief } : {}) });
     recordPrompt('builder', bp, bn, undefined, 'build', false, { map: map.files.length, atoms: pick.included.map((a) => a.id), deferred: pick.deferred, atomBytes: pick.bytes, recap: !!feedbackFile,
       ...(sel ? { lessons: { included: sel.included, total: sel.total } } : {}) });
     const b = await claude('builder', bp, `${tag}-build.json`);
@@ -1240,7 +1327,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const evalBase = git(['merge-base', config.base, sha], wt).out, holdInputsAtEval = holdInputs(root, config, f); // pinned before the paid run
       const edits = testEdits(wt, git(['merge-base', config.base, sha], wt).out, sha);
       if (edits.length) log(root, id, 'test-edits', edits.join('; '));
-      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks);
+      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks, evalPlan);
       const epPinned = `${ep}\nFor "baseDefects": the base commit of this evaluation is ${evalBase} and the feature commit is ${sha}; reproduce on exactly those and report them as "baseSha" and "featureSha".`;
       recordPrompt('evaluator', epPinned, en, undefined, 'review');
       const e = await agent('evaluator', epPinned, `${tag}-eval.json`);

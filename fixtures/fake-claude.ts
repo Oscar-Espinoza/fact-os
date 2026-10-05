@@ -15,7 +15,7 @@ const id = (process.env.FACTOS_FEATURE ?? /^Feature: (\S+?):/m.exec(prompt)?.[1]
 const log = process.env.FAKE_LOG as string;
 const argv = process.argv.slice(2);
 // fix: a resumed builder session (--resume) fixing a failed test gate; diagnose: the read-only gate-failure diagnosis
-const mode = argv.includes('--resume') ? 'fix' : prompt.startsWith('You diagnose a failed test gate') ? 'diagnose'
+const mode = argv.includes('--resume') ? 'fix' : prompt.startsWith('You diagnose a failed test gate') ? 'diagnose' : prompt.startsWith('You are the planner') ? 'plan'
   : prompt.startsWith('You are the builder') ? 'build' : prompt.startsWith('You are the merge resolver') ? 'resolve' : prompt.startsWith('You review one failed pass') ? 'review' : 'eval';
 const flags = ((JSON.parse(process.env.FAKE_SCENARIO || '{}') as Record<string, string>)[id] || '').split(',');
 const has = (f: string) => flags.includes(mode === 'build' ? f : `${mode}:${f}`);
@@ -146,6 +146,16 @@ if (mode === 'resolve') {
   const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'diagnose' && e.id === id; }).length : 0;
   const scripted = process.env.FAKE_DIAGNOSES ? (JSON.parse(readFileSync(process.env.FAKE_DIAGNOSES, 'utf8')) as Record<string, unknown[]>)[id]?.[past] : undefined;
   result = 'Diagnosis:\n```json\n' + JSON.stringify(scripted ?? { fault: 'code', evidence: 'broken.txt makes the gate fail', fix: 'delete broken.txt and commit' }) + '\n```';
+} else if (mode === 'plan') {
+  // The read-only planner: a FEASIBLE plan by default. "plan:infeasible" (a conflict with file:line evidence), "plan:garbage" (breaks
+  // the contract), "plan:error" (the run fails), "plan:high" (EFFORT: high), "plan:split" (suggests a cut), "plan:edit" (commits a file,
+  // which it must not).
+  if (has('edit')) commit('planner.txt', 'edited by the planner\n');
+  const head = `EFFORT: ${has('high') ? 'high' : 'medium'}\nSPLIT: ${has('split') ? 'yes: the API part and the UI part' : 'no'}`;
+  result = has('garbage') ? 'Here is my plan: just build it.' : has('infeasible')
+    ? `VERDICT: INFEASIBLE\n${head}\nCONFLICTS\n1. "no runtime change" contradicts "must fail safely": README.md:1 has no failure path.\n   Resolutions: drop one requirement.`
+    : `VERDICT: FEASIBLE\n${head}\n1. Add ${id}.txt (no existing helper: rg found none).\n2. Do not touch README.md.`;
+  if (has('error')) extra = { is_error: true, subtype: 'error_during_execution' };
 } else if (mode === 'review') {
   const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'review' && e.id === id; }).length : 0;
   const scripted = process.env.FAKE_REVIEWS ? (JSON.parse(readFileSync(process.env.FAKE_REVIEWS, 'utf8')) as Record<string, unknown[]>)[id]?.[past] : undefined;

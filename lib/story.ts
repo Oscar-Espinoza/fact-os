@@ -257,6 +257,7 @@ export function buildStory(inp: StoryInput): Story {
         if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`);
         push({ kind: 'stop', label: 'Sent back', state: 'info', text: `Sent back to the queue on the same try (no retry used): ${departure(d)}.`, start: e.ts, end: e.ts }); break;
       case 'planning-hold': push({ kind: 'hold', label: 'On hold', state: 'info', text: /^base/.test(d) ? 'On hold.' : `On hold: the ${/prompt-conflict/.test(d) ? 'instructions conflict' : 'spec cannot be met as written'}; it needs a clarification.`, start: e.ts, end: e.ts }); break;
+      case 'planned': push({ kind: 'note', label: 'Planned', state: 'info', text: `A read-only planner checked the spec against the code and wrote a plan for the builder${/split suggested: (.+)$/.exec(d)?.[1] ? `; it suggests splitting the feature: ${/split suggested: (.+)$/.exec(d)![1]}` : ''}.`, start: e.ts }); break;
       case 'planning-hold-released': push({ kind: 'note', label: 'Released', state: 'info', text: /base changed|recheck/.test(d) ? 'Main changed the implicated code; checking again.' : 'Hold released.', start: e.ts }); break;
       case 'failed': case 'stuck': {
         const isCounted = counted(e), stuck = e.event === 'stuck';
@@ -342,6 +343,7 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
         const h = f.planningHold;
         state = h.cause === 'base-defect' ? { word: 'On hold', tone: 'hold', why: `The same failure happens on ${inp.base}: ${h.evidence[0] ?? ''}`.trim(), next: `Checked again when ${inp.base} changes that code.` }
           : { word: 'On hold', tone: 'hold', why: h.review.startsWith('precheck:') ? `Before its first build, the spec was found to break a learned spec-writing rule: "${h.evidence[0] ?? ''}" ${h.evidence[1] ?? ''}`.trim()
+              : h.cause === 'spec-conflict' ? `Before its first build, the planner found the spec cannot be met as written: ${h.evidence[0] ?? ''}`.trim()
               : `The ${h.cause === 'prompt-conflict' ? 'instructions conflict' : 'spec cannot be met as written'}: ${h.evidence[0] ?? ''}`.trim(),
             next: f.specFix?.status === 'proposed' ? 'Review the proposed spec fix below: apply it, or dismiss it and edit the spec yourself.' : 'Edit the spec, or release the hold to launch it as it is.' };
         if (h.cause !== 'base-defect') needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: state.why ?? '' } : { what: 'Clarify the conflicting requirement', why: state.why ?? '' };

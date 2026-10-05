@@ -35,6 +35,9 @@ function setup(t: TestContext, features: Feature[], { delayMs = 50, scenario = {
     FAKE_LOG: join(base, 'fake.jsonl'), FAKE_VERDICTS: join(base, 'verdicts.json'), FAKE_PIDS: join(base, 'pids'), FAKE_SCENARIO: JSON.stringify(scenario) };
   const cli = (...a: string[]) => spawnSync(process.execPath, [BIN, ...a], { cwd: repo, env, encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' });
   assert.equal(cli('init', '--test', 'true').status, 0);
+  // Lanes and profile timing: the planner's extra run (tested in plan.test.ts) is off here.
+  const cfgFile = join(repo, '.fact-os/config.json');
+  writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), planner: { enabled: false } }));
   writeFileSync(join(repo, '.fact-os/features.json'), JSON.stringify({ features }));
   writeFileSync(env.FAKE_VERDICTS, JSON.stringify(verdicts));
   const read = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8') : '');

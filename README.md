@@ -71,7 +71,7 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   next-best ready feature of another group instead, so `maxParallel` is a ceiling, not a target), `restoreFrom` (null;
   a ref with `{id}`, e.g. `"archive/task/{id}"`: a feature branch with no commits of its own, new or recreated from
   `base`, is moved to that ref when it holds work `base` lacks, so work saved by a cleanup is not lost; logged as
-  `restored`), `profiles` (extra model profiles, `{name: {builder|resolver|evaluator|observer|curator: {model?, effort?,
+  `restored`), `profiles` (extra model profiles, `{name: {builder|resolver|evaluator|observer|curator|planner: {model?, effort?,
   effortHigh?}}}`; see SPEC.md "Model profiles"), `mergeHook` (null;
   a shell command run in the main checkout on the staged `git merge --no-ff --no-commit`, with
   `FACTOS_FEATURE`/`FACTOS_BRANCH`, e.g. to renumber migrations: what it `git add`s joins the merge commit; a
@@ -122,6 +122,14 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   same prompt with `codex.fallback` (default `{model: "opus", effort: "high"}`); a usage-limit, rate-limit or login
   error also cools Codex down for `codex.cooldownMin` minutes (default 30; `.fact-os/codex.json`). Codex reports
   tokens, not dollars, so its runs add nothing to the cost totals or budgets.
+- **Planner.** Before a spec's first build, a read-only Opus run (`config.planner`: `enabled` true, `model` opus, `effort`
+  medium, `effortHigh` high for specs saying "must not change"/"all paths"/"every" or touching money, auth or tenants, and
+  after a failed attempt; `maxPerDay` 50; `skipBelow` null or a tier; a profile may set a `planner` entry) checks every
+  acceptance line against the code. `VERDICT: INFEASIBLE` (conflicts quoting file:line) puts the feature on a `spec-conflict`
+  planning hold without starting a builder or spending an attempt (edit the spec, apply a drafted spec fix, or `fact-os
+  release` it); `VERDICT: FEASIBLE` saves a plan under `runs/<id>/plan.md` that the builder follows and the evaluator sees
+  as context only. Its `EFFORT: high` lifts the builder to the profile's `effortHigh`; `SPLIT: yes` is only recorded. A
+  plan is reused until the spec changes; a failed or unparseable planner never blocks a build. See SPEC.md "Plan".
 - **Feature tiers.** Intake sets each feature's `tier` (`normal`, `multi`, `hard`, `risky`, `investigate`); a profile's
   `tiers` maps tiers to builder, resolver and evaluator overrides, e.g. `"tiers": {"risky": {"builder": {"model":
   "opus", "effort": "high"}, "evaluator": {"effort": "xhigh"}}}`. A tier replaces the keyword risk heuristic for that
@@ -134,7 +142,7 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   two such keyword families in the description, decide.
 - `human.json` — `{tasks: [{id, title, steps[], unblocks[], mockable, status: open|done, doneAt?}]}`.
 - `log.jsonl` (`{ts, feature, event, detail}`), `activity.jsonl` (hook events, last 2000 lines),
-  `runs/<feature>/<tag>-{build,eval,resolve}.json` (raw `claude -p` output), `.lock`,
+  `runs/<feature>/<tag>-{plan,build,eval,resolve}.json` (raw `claude -p` output), `runs/<feature>/plan.{json,md}` (the planner's saved answer), `.lock`,
   `.foreman` / `.observer` (PID on the first line, invocation token on the second).
 - `prompt-notes/<model>-<role>.md` — short per-model advice the observer learns from reviewed failures (config `observer.promptReview`:
   `enabled`, `maxPerPass` (6), `notesMaxBytes` (3000)); the foreman appends it under `## Notes for <model> as <role>`. Deleting a file drops its notes for good: the reviews behind it are marked as used and are not applied again. Reviews are throttled (`everyMinutes` 30, `maxPerDay` 24) and run on each profile's `curator` role; the report shows what they cost.

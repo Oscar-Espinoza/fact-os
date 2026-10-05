@@ -96,7 +96,7 @@ test('resolver with refreshBeforeTest: a conflict before the test is resolved in
   const r = s.cli('run');
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual([s.feature('a').status, s.feature('a').refreshes], ['merged', 1]);
-  assert.deepEqual(s.events('a'), ['launch', 'refreshed', 'resolving', 'resolved', 'testing', 'evaluating', 'merged']);
+  assert.deepEqual(s.events('a'), ['launch', 'planned', 'refreshed', 'resolving', 'resolved', 'testing', 'evaluating', 'merged']);
   const [res] = s.calls('resolve', 'a');
   assert.match(res.prompt, /- commit [0-9a-f]{12} "the user's a\.txt on main" \(files: a\.txt\)/, 'a non-feature commit on base is named too');
   assert.equal(s.calls('eval', 'a').length, 1);
