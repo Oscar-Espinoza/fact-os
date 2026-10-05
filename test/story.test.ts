@@ -111,3 +111,35 @@ test('buildStory: a failure logged outside any recorded try is kept under earlie
   const s = buildStory({ feature: F({ status: 'stuck', attempts: 1 }), events: [ev('stuck', 'merge conflict with main: too many base refreshes (5)')], runs: [], maxAttempts: 3, base: 'main' });
   assert.match(s.problems.earlier[0]!.text, /^A failure whose try was not recorded: merge conflicts kept coming back/);
 });
+
+test('review fixes: a passing review stays passed when merging stops; a later repair\'s output is not the Build\'s; a ready feature merges; an uncounted hold resumes the same try; a contradicting summary is ignored; a requeue is explained', () => {
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const pass = V({ pass: true, findings: [{ check: 'a', ok: true, evidence: 'e' }] });
+  const s1 = buildStory({ feature: F({ status: 'stuck', attempts: 1 }), events: [ev('launch'), ev('testing', 's'), ev('evaluating'), ev('stuck', 'merge conflict with main: too many base refreshes (10)', { stop: { attempt: 1, counted: true } })],
+    runs: [{ tag: '1', role: 'eval', at: at(3.5), text: '', verdict: pass }], maxAttempts: 3, base: 'main' });
+  assert.deepEqual(s1.current!.steps.slice(2, 4).map((x) => [x.label, x.state]), [['Review', 'done'], ['Merge', 'failed']]);
+  assert.match(s1.current!.summary, /^Merging stopped: merge conflicts kept coming back/);
+
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const s2 = buildStory({ feature: F({ status: 'testing' }), events: [ev('launch'), ev('commit-fix', 'resuming'), ev('testing', 's')],
+    runs: [{ tag: '1', role: 'build', at: at(1.9), text: 'The gate is still running; nothing committed.' }, { tag: '1.2', role: 'build', at: at(2.5), text: 'The work is committed and clean.' }], maxAttempts: 3, base: 'main' });
+  assert.equal(s2.current!.steps[0]!.text, 'Builder reported: The gate is still running; nothing committed.');
+
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const s3 = buildStory({ feature: F({ status: 'merged' }), events: [ev('launch'), ev('testing', 's'), ev('evaluating'), ev('ready', 'b'), ev('merged', '')], runs: [], maxAttempts: 3, base: 'main' });
+  assert.equal(s3.current!.outcome, 'merged'); assert.equal(s3.current!.steps.at(-1)!.label, 'Merge');
+  const s3b = buildStory({ feature: F({ status: 'merged' }), events: [ev('launch'), ev('failed', 'prepare `x` exited 1', { stop: { attempt: 1, counted: false } }), ev('stuck', 'prepare', { stop: { attempt: 1, counted: false } }), ev('merged', 'external')], runs: [], maxAttempts: 3, base: 'main' });
+  assert.match(s3b.state.why!, /outside a factory try/);
+
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const s4 = buildStory({ feature: F({ status: 'testing' }), events: [ev('launch'), ev('testing', 's'), ev('evaluating'), ev('failed', 'BASE', { cause: 'base-defect', stop: { attempt: 1, counted: false } }), ev('planning-hold-released', 'recheck'), ev('launch'), ev('testing', 's')], runs: [], maxAttempts: 3, base: 'main' });
+  assert.equal(s4.current!.n, 1, 'no retry was spent');
+
+  assert.equal(reviewHeadline(V({ error: 'pass:true contradicted', summary: 'All checks passed; the feature is ready to merge.', blocking: ['Cross-tenant leak.'] })), 'Cross-tenant leak.');
+
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const s5 = buildStory({ feature: F({ status: 'todo' }), events: [ev('launch'), ev('testing', 's'), ev('gate-fix', 'r'), ev('refresh-skipped', 'config.json changed on disk during the run; back to todo')], runs: [], maxAttempts: 3, base: 'main' });
+  assert.match(s5.state.why!, /factory settings changed during the run/);
+  const t = transitions([ev('launch'), ev('refresh-skipped', 'config.json changed on disk during the run; back to todo')], { a: 'A' }, 3, 'main');
+  assert.equal(t[0]!.badge, 'Queued'); assert.match(t[0]!.text, /no retry used/);
+});

@@ -180,3 +180,5 @@ details.d-sm>summary{font-size:12px;color:var(--dim)}
   .d-arch{padding:12px 14px}
 }
 @media (prefers-reduced-motion:reduce){#detail *{animation:none!important}}
+
+#detail .d-stale{color:var(--amber);font-size:13px;margin:6px 0 0}

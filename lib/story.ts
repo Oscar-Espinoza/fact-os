@@ -18,6 +18,7 @@ export interface Story {
   current: Try | null; earlier: Try[]; archive: { label: string; tries: Try[] }[];
   problems: { active: { title: string; reasons: Reason[] } | null; earlier: { when: string; text: string }[] };
   nextTry: number | null;
+  status: Feature['status'];          // the feature status this story was built from (the page can tell when it is stale)
 }
 export interface StoryInput {
   feature: Feature; events: LogEvent[]; runs: StoryRun[]; maxAttempts: number; base: string;
@@ -58,7 +59,8 @@ export function reviewReasons(v: Verdict): Reason[] {
 export function reviewHeadline(v: Verdict): string {
   const failed = v.findings.filter((f) => f.ok !== true).length, n = v.findings.length;
   if (v.pass) return `Passed all ${n} checks.`;
-  if (v.summary) return clip(v.summary, 170);
+  // The evaluator's own summary only when the verdict is valid and it does not claim success for a rejection.
+  if (v.summary && !v.error && !/\b(all (the )?checks pass|ready to merge|approved|passes all)\b/i.test(v.summary)) return clip(v.summary, 170);
   const rs = reviewReasons(v), r = rs[0];
   const lead = r ? r.title.replace(/^Check failed: /, '') : 'see the review details';
   void failed; void n;
@@ -100,6 +102,11 @@ const testFailText = (e: LogEvent | undefined, detail?: string): string => {
   return 'Checks failed; no specific failing test was recorded.';
 };
 
+// Why work went back to the queue without spending a try, in plain words.
+const departure = (d: string): string => /config\.json changed/.test(d) ? 'the factory settings changed during the run'
+  : /left in flight by a dead foreman/.test(d) ? 'the factory restarted during the run'
+  : /tamper|changed on disk/.test(d) ? 'factory files changed during the run' : clip(sentence(d.replace(/; back to todo$/, ''), 120).replace(/\.$/, ''), 120);
+
 // ---- the projection ----
 
 const COUNTED_LEGACY = (e: LogEvent) => !/no attempt spent|without using a retry/.test(e.detail || '') && !/^merge conflict with \S+: too many base refreshes \(\d+\)$/.test(e.detail || '') && !/^previous child still running/.test(e.detail || '');
@@ -109,14 +116,15 @@ const CYCLE_START: Record<string, string> = { retrying: 'before a person retried
 export function buildStory(inp: StoryInput): Story {
   const f = inp.feature, runs = [...inp.runs].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), used = new Set<StoryRun>();
   const cycles: Cycle[] = [{ tries: [] }];
-  let tr: Try | null = null, pendingNote: string | null = null, testsInTry = 0, reviewsInTry = 0, envRetest = false;
+  let tr: Try | null = null, pendingNote: string | null = null, testsInTry = 0, reviewsInTry = 0, envRetest = false, lateMerge: string | null = null;
   const cyc = () => cycles[cycles.length - 1]!, orphans: { when: string; text: string }[] = []; // failures logged outside any recorded try
   const st = { open: null as Step | null }; // the running step (a holder: closures reassign it)
-  // The artifact of a step that ended at `end`: the newest unused one of `roles` written between its start and shortly after.
-  const artifact = (roles: StoryRun['role'][], start: string | undefined, end: string) => {
-    const s = start ? Date.parse(start) - 5e3 : -Infinity, e = Date.parse(end) + 120e3;
+  // The artifact of a step that ended at `end`: the newest unused one of `roles` written during the step. The foreman writes
+  // a run's output before logging the event that ends the step, so a later repair's output never belongs to it.
+  const artifact = (roles: StoryRun['role'][], start: string | undefined, end: string, peek = false) => {
+    const s = start ? Date.parse(start) - 5e3 : -Infinity, e = Date.parse(end) + 5e3;
     const hit = runs.filter((r) => roles.includes(r.role) && !used.has(r) && Date.parse(r.at) >= s && Date.parse(r.at) <= e).pop();
-    if (hit) used.add(hit);
+    if (hit && !peek) used.add(hit);
     return hit;
   };
   const push = (s: Step) => { if (!tr) return; if (pendingNote && s.kind !== 'note') { s.note = s.note ? `${pendingNote} ${s.note}` : pendingNote; pendingNote = null; } tr.steps.push(s); if (s.state === 'running') st.open = s; };
@@ -124,7 +132,11 @@ export function buildStory(inp: StoryInput): Story {
   const close = (ts: string, state: StepState, text?: string) => {
     const s = st.open; if (!s) return; st.open = null; s.end = ts; s.state = state;
     if (text) s.text = text;
-    else if (s.kind === 'build' || s.kind === 'fix' || s.kind === 'resolve') { const a = artifact(s.kind === 'resolve' ? ['resolve'] : ['build', 'resolve'], s.start, ts); if (a) { s.text = builderText(a.text); s.tag = a.tag; } }
+    else if (s.kind === 'build' || s.kind === 'fix' || s.kind === 'resolve') {
+      const a = artifact(s.kind === 'resolve' ? ['resolve'] : ['build', 'resolve'], s.start, ts);
+      if (a) { s.text = builderText(a.text); s.tag = a.tag; }
+      else if (state === 'done') s.text = s.kind === 'resolve' ? 'Combined the changes; no output was recorded.' : 'Builder finished; its output was not recorded for this step.';
+    }
   };
   const closeReview = (ts: string, state: StepState, lead: string) => {
     const s = st.open; if (!s || s.kind !== 'review') return close(ts, state);
@@ -144,9 +156,19 @@ export function buildStory(inp: StoryInput): Story {
     }
     if (e.event === 'launch') {
       if (st.open) close(e.ts, 'interrupted', `${(st.open as Step).text.replace(/\.$/, '')} (interrupted).`);
-      if (!tr) { tr = { n: cyc().tries.length + 1, outcome: 'running', summary: '', steps: [], start: e.ts }; cyc().tries.push(tr); }
+      const prev = cyc().tries.at(-1);
+      if (!tr && prev && (prev.outcome === 'held' || prev.outcome === 'stopped')) { // no retry was spent: the same try resumes
+        tr = prev; tr.outcome = 'running'; tr.summary = ''; delete tr.end;
+        push({ kind: 'note', label: 'Resumed', state: 'info', text: 'Work resumed on the same try (no retry was used).', start: e.ts });
+      } else if (!tr) { tr = { n: cyc().tries.length + 1, outcome: 'running', summary: '', steps: [], start: e.ts }; cyc().tries.push(tr); }
       else push({ kind: 'note', label: 'Resumed', state: 'info', text: 'Work resumed on the same try.', start: e.ts });
       push({ kind: 'build', label: 'Build', state: 'running', text: 'Building.', start: e.ts, ...(d === 'onMock' ? { note: 'Mocked providers allowed for capabilities still pending.' } : {}) });
+      continue;
+    }
+    if (!tr && e.event === 'merged') { // a merge after the try closed: a ready feature merging, or a merge recorded outside the factory
+      const prev = cyc().tries.at(-1);
+      if (prev?.outcome === 'ready') { prev.steps.push({ kind: 'merge', label: 'Merge', state: 'done', text: `Merged into ${inp.base}.`, start: e.ts, end: e.ts }); prev.outcome = 'merged'; prev.summary = `Merged into ${inp.base}.`; prev.end = e.ts; }
+      else lateMerge = e.ts;
       continue;
     }
     if (!tr) { if (e.event === 'failed' || e.event === 'stuck') orphans.push({ when: e.ts, text: `A failure whose try was not recorded: ${reasonOf(e.detail)}.` }); continue; }
@@ -189,7 +211,12 @@ export function buildStory(inp: StoryInput): Story {
       case 'merge-failed': case 'merge-hook-failed': case 'merge-skipped':
         if (st.open?.kind === 'review') closeReview(e.ts, 'done', '');
         push({ kind: 'merge', label: 'Merge', state: 'failed', text: e.event === 'merge-hook-failed' ? 'The merge check failed; the work went back to the queue.' : `The merge could not finish: ${reasonOf(d)}.`, start: e.ts, end: e.ts }); st.open = null; break;
-      case 'interrupted': if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`); break;
+      case 'interrupted': if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`);
+        push({ kind: 'stop', label: 'Sent back', state: 'info', text: 'The factory stopped mid-step; the feature went back to the queue on the same try (no retry used).', start: e.ts, end: e.ts }); break;
+      case 'refresh-skipped': case 'recovered':
+        if (e.event === 'recovered' && !/back to todo/.test(d)) break;
+        if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`);
+        push({ kind: 'stop', label: 'Sent back', state: 'info', text: `Sent back to the queue on the same try (no retry used): ${departure(d)}.`, start: e.ts, end: e.ts }); break;
       case 'planning-hold': push({ kind: 'hold', label: 'On hold', state: 'info', text: /^base/.test(d) ? 'On hold.' : `On hold: the ${/prompt-conflict/.test(d) ? 'instructions conflict' : 'spec cannot be met as written'}; it needs a clarification.`, start: e.ts, end: e.ts }); break;
       case 'planning-hold-released': push({ kind: 'note', label: 'Released', state: 'info', text: /base changed|recheck/.test(d) ? 'Main changed the implicated code; checking again.' : 'Hold released.', start: e.ts }); break;
       case 'failed': case 'stuck': {
@@ -205,11 +232,14 @@ export function buildStory(inp: StoryInput): Story {
           push({ kind: 'hold', label: 'On hold', state: 'info', text: `On hold: the same failure happens on ${inp.base}. It is checked again when ${inp.base} changes that code; no retry used.`, start: e.ts, end: e.ts });
           endTry(e.ts, 'held', `On hold for a defect already on ${inp.base}.`); break;
         }
-        const reason = reasonOf(d), stage = st.open?.kind;
-        if (st.open?.kind === 'review') closeReview(e.ts, 'failed', 'Rejected');
+        const reason = reasonOf(d);
+        const passedReview = st.open?.kind === 'review' && !!artifact(['eval'], st.open.start, e.ts, true)?.verdict?.pass;
+        const stage = passedReview ? 'merge' : st.open?.kind;
+        if (passedReview) { closeReview(e.ts, 'done', ''); push({ kind: 'merge', label: 'Merge', state: 'failed', text: `Merging stopped: ${reason}.`, start: e.ts, end: e.ts }); st.open = null; }
+        else if (st.open?.kind === 'review') closeReview(e.ts, 'failed', 'Rejected');
         else if (st.open?.kind === 'test') close(e.ts, 'failed', testFailText(e, d));
         else if (st.open) close(e.ts, 'failed', `${st.open.label === 'Build' ? 'The build' : 'This step'} did not finish: ${reason}.`);
-        const what = stage === 'review' ? 'Review rejected' : stage === 'test' ? 'Checks failed' : stage === 'resolve' ? 'Combining changes failed' : 'Did not finish';
+        const what = stage === 'merge' ? 'Merging stopped' : stage === 'review' ? 'Review rejected' : stage === 'test' ? 'Checks failed' : stage === 'resolve' ? 'Combining changes failed' : 'Did not finish';
         if (!isCounted) { push({ kind: 'stop', label: 'Stopped', state: 'info', text: `Stopped without using a retry: ${reason}.`, start: e.ts, end: e.ts }); if (stuck) endTry(e.ts, 'stopped', `Stopped without using a retry: ${reason}.`); break; }
         const last = tr.n >= inp.maxAttempts || stuck;
         push({ kind: 'end', label: last ? 'Stuck' : 'Try ended', state: 'failed', text: last ? `No retries left: ${reason}.` : `Try ${tr.n} of ${inp.maxAttempts} used; it goes back to the queue for try ${tr.n + 1}.`, start: e.ts, end: e.ts });
@@ -227,7 +257,8 @@ export function buildStory(inp: StoryInput): Story {
   const archive = cycles.slice(0, -1).filter((c) => c.tries.length).map((c) => ({ label: `${c.tries.length} earlier ${c.tries.length === 1 ? 'try' : 'tries'} ${c.endedBy ?? 'before a reset'}`, tries: [...c.tries].reverse() })).reverse();
   const d = describe(inp, current, cur);
   d.problems.earlier.push(...orphans.reverse());
-  return { title: inp.goal?.shortTitle || f.shortTitle || f.title, goal: f.goal ?? inp.goal?.goal ?? null, ...d, current, earlier, archive };
+  if (f.status === 'merged' && current?.outcome !== 'merged') d.state = { word: 'Merged', tone: 'ok', why: `Merged into ${inp.base}${lateMerge ? ' outside a factory try' : ''}; the earlier tries are kept below as history.`, next: null };
+  return { title: inp.goal?.shortTitle || f.shortTitle || f.title, goal: f.goal ?? inp.goal?.goal ?? null, ...d, current, earlier, archive, status: f.status };
 }
 
 // The header: one state word, why, what happens next, whether a person must act, and the problems.
@@ -271,6 +302,7 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
       if (f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now()) { state = { word: 'Waiting to retry', tone: 'hold', why: 'Workspace setup failed; no retry used.', next: `Retries at ${new Date(f.setupRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` }; break; }
       if (blocking.length) { state = { word: 'Needs you', tone: 'hold', why: `Waiting on: ${blocking[0]!.title}`, next: null }; needsYou = { what: blocking[0]!.title, why: 'This feature cannot start until it is done.' }; break; }
       if (inp.unmetDeps?.length) { state = { word: 'Waiting', tone: 'idle', why: `Waiting on ${inp.unmetDeps[0]!.title}${inp.unmetDeps.length > 1 ? ` and ${inp.unmetDeps.length - 1} more` : ''} to merge first.`, next: null }; break; }
+      if (last?.label === 'Sent back' && current?.outcome !== 'failed') { state = { word: (f.attempts || 0) > 0 ? `Queued for try ${(f.attempts || 0) + 1} of ${inp.maxAttempts}` : 'Queued', tone: 'queue', why: last.text, next: 'Starts again when a lane is free.' }; break; }
       if (counts > 0 || (f.attempts || 0) > 0) {
         nextTry = (f.attempts || counts) + 1;
         state = { word: `Queued for try ${nextTry} of ${inp.maxAttempts}`, tone: 'queue', why: lastEnded?.summary ?? (f.lastFeedback ? `${reasonOf(f.lastFeedback)}.` : null), next: 'Starts when a lane is free; the builder gets the last problems as its brief.' };
@@ -298,6 +330,10 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
     else if (e.event === 'gate-fix') { fixedInTry.add(id); t('Checks failed; fixing them in the same session (no retry used).', 'Fixing', 'fix'); }
     else if (e.event === 'merged') { tryOf.delete(`${id}#open`); t(`Merged into ${base}${fixedInTry.has(id) ? ' after a same-session fix' : ''}.`, 'Merged', 'ok'); }
     else if (e.event === 'ready') { tryOf.delete(`${id}#open`); t('Passed review; ready to merge.', 'Ready', 'ok'); }
+    else if (e.event === 'refresh-skipped' || (e.event === 'recovered' && /back to todo/.test(d)) || e.event === 'interrupted') {
+      tryOf.delete(`${id}#open`);
+      t(`Sent back to the queue on the same try (no retry used): ${e.event === 'interrupted' ? 'the factory stopped mid-step' : departure(d)}.`, 'Queued', 'queue');
+    }
     else if (e.event === 'planning-hold' && !/base/.test(d)) t('On hold: the spec cannot be met as written; it needs a clarification.', 'On hold · needs you', 'hold', true);
     else if (e.event === 'failed' || e.event === 'stuck') {
       const reason = reasonOf(d), stuck = e.event === 'stuck';
