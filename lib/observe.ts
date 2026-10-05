@@ -6,6 +6,7 @@
 // the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). It also reviews
 // each failed pass (promptreview.ts) to learn whether the prompt or the model was at fault, and keeps per-model prompt notes
 // from that. The observer itself never changes code: every code change goes through the factory's own checks.
+import { ATOM_REVALIDATE_DAYS, readAtoms, refsHold, writeAtoms, type Atom, type AtomStatus } from './context.ts';
 import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -469,6 +470,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   }
   state.promptRates = promptRates(passes);
   state.promptRatesUnit = PROMPT_RATES_UNIT;
+  if (cfg.agent && !stopping()) await step('context atoms', () => atomsPass(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), out, children, stopping));
   if (cfg.agent && cfg.goals && !stopping()) await step('feature goals', () => goalsPass(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), state, out, children, stopping));
   if (cfg.agent && !stopping()) await step('lesson curation', () => curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, children, stopping));
   if (cfg.agent && cfg.improve && !stopping()) await step('improver', () => improvePass(root, config, resolveRole(config, profile, 'observer', { agent: cfg.agent }), cfg, state, out, children, stopping));
@@ -516,6 +518,47 @@ export function parseGoal(text: string): { goal: string; shortTitle: string } | 
   if (!goal || !shortTitle || goal.length > 240 || shortTitle.length > 70) return null;
   return { goal, shortTitle };
 }
+const ATOMS_PER_PASS = 3;
+export function atomCheckPrompt(a: Atom, base: string): string {
+  return [`Check one pointer that ${NAME} gives builders working in ${a.scope.join(', ')}. You are read-only: change nothing.`,
+    `Read the referenced code on the ${base} branch (git show ${base}:<path>) before answering.`, '',
+    `Pointer: ${a.text}`, `References: ${a.refs.map((r) => (r.symbol ? `${r.symbol} in ${r.path}` : r.path)).join('; ')}`, '',
+    'Answer with ONLY a JSON object: {"accurate": boolean (the referenced code exists and does what the pointer says), "applies": boolean ' +
+    '(a builder changing files under that scope would be better off knowing it; false for one-off facts or advice that is wrong in general), ' +
+    '"reason": one short sentence}.'].join('\n');
+}
+export function parseAtomCheck(text: string): { ok: boolean; reason: string } | null {
+  const m = text.match(/\{[\s\S]*\}/); if (!m) return null;
+  try { const v = JSON.parse(m[0]); return typeof v.accurate === 'boolean' && typeof v.applies === 'boolean' ? { ok: v.accurate && v.applies, reason: String(v.reason ?? '').slice(0, 200) } : null; } catch { return null; }
+}
+// Keeps the context atoms honest: a verified atom whose refs no longer hold on base is quarantined (and returns to proposed
+// when they hold again); one verified more than ATOM_REVALIDATE_DAYS ago is checked again; up to ATOMS_PER_PASS proposed atoms
+// are checked by the curator against the code, becoming verified or retired. Nothing here needs a person.
+async function atomsPass(root: string, config: Config, agent: RoleConfig, out: (s: string) => void, children: Set<ChildProcess>, stopping: () => boolean): Promise<void> {
+  const dir = paths(root).dir, store = readAtoms(dir);
+  if (!store.atoms.length) return;
+  const note = (a: Atom, status: AtomStatus, why: string) => { a.status = status; a.why = why; a.checkedAt = now(); log(root, null, 'observer-atom', `${a.id} ${status}: ${why}`); };
+  for (const a of store.atoms) {
+    const why = a.status === 'verified' || a.status === 'quarantined' ? refsHold(a.refs, config.base, root, git) : null;
+    if (a.status === 'verified' && why) note(a, 'quarantined', why);
+    else if (a.status === 'quarantined' && !why) note(a, 'proposed', 'its references hold again');
+    else if (a.status === 'verified' && a.verifiedAt && Date.now() - Date.parse(a.verifiedAt) > ATOM_REVALIDATE_DAYS * DAY) note(a, 'proposed', `verified over ${ATOM_REVALIDATE_DAYS} days ago`);
+  }
+  writeAtoms(dir, store);
+  let checked = 0;
+  for (const a of store.atoms.filter((x) => x.status === 'proposed').slice(0, ATOMS_PER_PASS)) {
+    if (stopping()) break;
+    const r = await exec(envVar('CLAUDE') || 'claude', claudeArgs(config, { ...agent, permissionMode: 'plan' }, root), { cwd: root, env: childEnv(), input: atomCheckPrompt(a, config.base), children, timeoutMin: 10 });
+    const c = parseClaudeOutput(r.out), v = c.ok ? parseAtomCheck(c.text) : null;
+    if (!v) continue; // asked again next pass
+    const fresh = readAtoms(dir), x = fresh.atoms.find((y) => y.id === a.id);
+    if (!x || x.status !== 'proposed') continue;
+    if (v.ok) { x.verifiedAt = now(); note(x, 'verified', v.reason || 'checked against the code'); } else note(x, 'retired', v.reason || 'the curator rejected it');
+    writeAtoms(dir, fresh); checked++;
+  }
+  if (checked) out(`observer: checked ${checked} context pointers`);
+}
+
 async function goalsPass(root: string, config: Config, agent: RoleConfig, state: ObserverState, out: (s: string) => void, children: Set<ChildProcess>, stopping: () => boolean): Promise<void> {
   const goals = state.goals ??= {}, { features } = load(root);
   const todo = features.filter((f) => !f.goal && goals[f.id]?.hash !== specHash(f)).sort((a, b) => Number(a.status === 'merged') - Number(b.status === 'merged')).slice(0, GOALS_PER_PASS);

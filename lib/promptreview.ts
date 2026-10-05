@@ -11,6 +11,7 @@ import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { childEnv, paths, log, envVar, mutate, NAME } from './state.ts';
 import { git, exec, claudeArgs, parseClaudeOutput, holdInputs } from './foreman.ts';
+import { atomId, parsePointer, readAtoms, refsHold, writeAtoms, type Pointer } from './context.ts';
 import { NOTE_MAX, clipNote, noteBullets, mergeNotes, fitNotes, overCap, renderNotes, parseNotes, notesFile, notesArchive, notesDir } from './notes.ts';
 import { PROMPT_CAUSES, type Cause, type Config, type Feature, type HumanTask, type LogEvent, type PlanningHold, type PromptCause, type PromptReviewConfig, type Role, type RoleConfig } from './types.ts';
 
@@ -166,13 +167,17 @@ export function reviewPrompt(i: ReviewInput): string {
     `addressed to ${i.model} as ${i.role}, at most ${NOTE_MAX} characters, an instruction to add or rewrite with the concrete paths, commands or names that matter. "target" says where it belongs: ` +
     '"template" (the fixed instructions of the role\'s prompt, which every feature gets), "briefs" (the project\'s brief files) or "lessons" (the lessons file). ' +
     'For the other causes the suggestion may be an empty string.', '',
-    'Answer with ONLY a JSON object: {"cause": string, "evidence": string[], "confidence": "low" | "medium" | "high", "suggestion": string, "target": "template" | "briefs" | "lessons"}. ' +
+    'Optionally, when the failure came from not knowing something that already exists in the repository (a helper to reuse, a contract, ' +
+    'a convention, where something is wired), add "pointer": {"text": one line (at most 250 characters) a builder working in that area should ' +
+    'know, "refs": [{"path": repository path, "symbol": exported name or omit}] (1-3, existing on the base branch), "scope": [path prefixes ' +
+    'where it applies, e.g. "apps/api/src/routes/"]}. Only for a fact you checked in the repository; omit it otherwise.', '',
+    'Answer with ONLY a JSON object: {"cause": string, "evidence": string[], "confidence": "low" | "medium" | "high", "suggestion": string, "target": "template" | "briefs" | "lessons", "pointer"?: object}. ' +
     '"evidence" holds one to four short quotes, from the prompt and from the outcome, that show the cause.', '',
     `The prompt the ${i.role} was given (${i.file}):`, '', '````', middle(i.prompt, 16000, 6000), '````',
     ...(i.first ? ['', `That prompt resumed a session. The pass started with this prompt, which holds the full feature spec (${i.first.file}):`, '', '````', middle(i.first.prompt, 12000, 4000), '````'] : [])].join('\n');
 }
 
-export interface ParsedReview { cause: PromptCause; evidence: string[]; confidence: Confidence; suggestion: string; target: Target | null }
+export interface ParsedReview { cause: PromptCause; evidence: string[]; confidence: Confidence; suggestion: string; target: Target | null; pointer?: Pointer }
 // The agent's answer, or why it is refused: a JSON object with one of the six causes, quotes, a confidence, and for a prompt-*
 // cause a suggestion and where it belongs.
 export function parseReview(text: string): ParsedReview | { error: string } {
@@ -186,7 +191,8 @@ export function parseReview(text: string): ParsedReview | { error: string } {
   const suggestion = typeof v.suggestion === 'string' ? clipNote(v.suggestion) : '';
   const target = v.target === 'template' || v.target === 'briefs' || v.target === 'lessons' ? v.target : null;
   if (isPromptCause(cause) && (!suggestion || !target)) return { error: `a ${cause} answer needs a suggestion and a target (template, briefs or lessons)` };
-  return { cause, evidence: v.evidence.map(String).map((s) => s.replace(/\s+/g, ' ').trim().slice(0, 300)).filter(Boolean).slice(0, 4), confidence: v.confidence, suggestion, target };
+  const pointer = parsePointer(v.pointer); // optional: a malformed pointer is no pointer, never an invalid review
+  return { cause, evidence: v.evidence.map(String).map((s) => s.replace(/\s+/g, ' ').trim().slice(0, 300)).filter(Boolean).slice(0, 4), confidence: v.confidence, suggestion, target, ...(pointer ? { pointer } : {}) };
 }
 
 // What the observer keeps of one review. A failed answer is kept too (`error`), so a pass is asked about once.
@@ -270,6 +276,7 @@ export async function reviewFailures(root: string, config: Config, agent: RoleCo
     log(root, null, 'observer-review', `${k.key} ${p.role} ${used.model}: ${'error' in a ? `invalid answer (${a.error})` : `${a.cause} (${a.confidence})`}; $${c.cost.toFixed(2)}`);
     // Evidence is checked against the pass's first prompt too: a resumed prompt (a repair) does not repeat the spec.
     if (!('error' in a)) await placeHold(root, config, p, k.key, a, input.first ? `${input.first.prompt}\n${input.prompt}` : input.prompt);
+    if (!('error' in a) && a.pointer && a.confidence !== 'low') proposeAtom(root, config, a.pointer, { feature: p.feature, review: k.key, ts: now() });
     done++;
   };
   for (let i = 0; i < todo.length && !stopping(); i += PARALLEL) await Promise.all(todo.slice(i, i + PARALLEL).map(one));
@@ -486,4 +493,18 @@ export function renderPromptSection(s: PromptSummary, at: (iso: string) => strin
       '', r.notes ? `Notes in force: ${noteBullets(r.notes.text).length}, ${r.notes.bytes} bytes.` : 'No notes yet.',
       ...(r.versions.some((v) => v.notes !== '-') ? ['', '| Notes version | Since | Passes | Failed | Against the version before |', '| --- | --- | --- | --- | --- |',
         ...r.versions.map((v) => `| ${v.notes === '-' ? 'no notes' : v.notes} | ${at(v.since)} | ${v.ok + v.bad} | ${v.bad} (${pct(v.bad, v.ok + v.bad)}) | ${v.trend ? `${v.trend}` : '–'} |`)] : []), ''])];
+}
+
+// ---- context atoms ----
+
+// A reviewer's pointer becomes a proposed atom when its refs hold on the base branch and no atom with the same refs and text
+// exists. Proposed atoms reach no prompt until the curator verifies them (lib/observe.ts atomsPass).
+export function proposeAtom(root: string, config: Config, ptr: Pointer, source: { feature: string; review: string; ts: string }): void {
+  const dir = paths(root).dir, store = readAtoms(dir), id = atomId(ptr.refs, ptr.text);
+  if (store.atoms.some((a) => a.id === id)) return;
+  const why = refsHold(ptr.refs, config.base, root, git);
+  if (why) { log(root, null, 'observer-atom', `pointer from ${source.review} not kept: ${why}`); return; }
+  store.atoms.push({ id, ...ptr, role: 'builder', status: 'proposed', source });
+  writeAtoms(dir, store);
+  log(root, null, 'observer-atom', `${id} proposed from ${source.review}: ${ptr.text}`);
 }

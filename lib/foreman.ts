@@ -10,7 +10,8 @@ import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, 
 import { escalates, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { testFailure } from './story.ts';
-import { IN_FLIGHT, ISSUE_KINDS, type IssueKind, type BaseDefect, type RunPhase, type RunRecord, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
+import { candidateMap, pickAtoms, readAtoms, recap, refsHold, renderContext } from './context.ts';
+import { IN_FLIGHT, ISSUE_KINDS, BLOCK_REASONS, type BuilderExit, type IssueKind, type BaseDefect, type RunPhase, type RunRecord, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
@@ -264,7 +265,10 @@ const mockList = (tasks: MockTask[]): string => tasks.map((t) => `- ${t.id}: ${t
   (t.via?.length ? ` (inherited: open for dependenc${t.via.length > 1 ? 'ies' : 'y'} ${t.via.join(', ')}, which this feature builds on)` : '') +
   `${(t.steps || []).length ? `\n${t.steps.map((x) => `  - ${x}`).join('\n')}` : ''}`).join('\n');
 
-export function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = [], notes = ''): string {
+// `extra.map`: the rendered candidate map and verified pointers (lib/context.ts). `extra.feedbackFile`: where the previous attempt's
+// full feedback was written, so long feedback reaches the builder as a recap plus that file.
+export function builderPrompt(root: string, config: Config, f: Feature, branch: string, mockTasks: HumanTask[], hotHeld: string[] = [], notes = '',
+  extra: { map?: string; feedbackFile?: string | null } = {}): string {
   const lessons = readIf(resolve(root, config.lessonsFile));
   return [`You are the builder for feature "${f.id}": ${f.title}`,
     `You work in a git worktree on branch ${branch}, created from ${config.base}.`, '', f.description || '', '',
@@ -273,7 +277,7 @@ export function builderPrompt(root: string, config: Config, f: Feature, branch: 
       'capability they provide, behind a boundary that is easy to swap for the real thing later. Wire everything else for production: the ' +
       'real routes, jobs and state transitions must reach that boundary, and production must fail explicitly while no real integration ' +
       `exists (never enable the fake in production):\n${mockList(mockTasks)}\n` : '',
-    f.lastFeedback ? `Feedback on your previous attempt:\n${f.lastFeedback}\n` : '',
+    f.lastFeedback ? `Feedback on your previous attempt:\n${config.recapMaxBytes ? recap(f.lastFeedback, extra.feedbackFile ?? null, config.recapMaxBytes) : f.lastFeedback}\n` : '',
     hotHeld.length ? `Hot files: merge conflicts keep sending work back on these, and other features in flight are changing them:\n${
       hotHeld.map((h) => `- ${h}`).join('\n')}\nKeep your edits there small and additive (never reorder or reformat them); do not skip a change the feature needs.\n` : '',
     'Rules:', '- Commit your work on this branch (git add + git commit). Uncommitted changes are not evaluated.',
@@ -287,7 +291,7 @@ export function builderPrompt(root: string, config: Config, f: Feature, branch: 
     '  git add, git commit); the foreman alone merges into ' + config.base + '.',
     `- The test command \`${config.test}\` must pass.`,
     `- ${FINISH_RULE}`,
-    lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config), notes].join('\n');
+    extra.map ?? '', lessons ? `\n## Lessons (${config.lessonsFile})\n\n${lessons}` : '', briefs(root, config), notes].join('\n');
 }
 
 // The evaluator's view of the diff: a file list first, then whole files' diffs while they fit in `budget` characters
@@ -440,7 +444,24 @@ export const FINISH_RULE = 'Before your final reply, wait for every command need
   'required code and evidence. Prefer foreground commands; if a tool backgrounds a long command, poll or wait within this run until it finishes. ' +
   'Never finish with required work or evidence still pending. Keep any acceptance requirement for a complete gate run: do not replace it with ' +
   'partial checks; if it cannot complete here, say so plainly with the actual limitation. Begin your final reply with one plain sentence, ' +
-  'starting "Summary:", saying what you changed or what stopped you, in words a non-programmer understands (no paths or code).';
+  'starting "Summary:", saying what you changed or what stopped you, in words a non-programmer understands (no paths or code). ' +
+  'End it with a fenced ```exit block holding one JSON object: {"touched": [the repository paths you changed], "unsure": [assumptions you made ' +
+  'or questions you could not settle, at most 5, one line each], "blocked": null, or {"reason": "missing-info" | "spec-conflict" | "environment" | ' +
+  '"tooling", "what": one line} when something outside your control stopped you}.';
+
+// The builder's exit block, bounded and validated; anything malformed is simply absent (it never fails a run).
+export function parseExit(text: string): BuilderExit | null {
+  const m = [...(text || '').matchAll(/```exit\s*\n([\s\S]*?)```/g)].pop();
+  if (!m) return null;
+  let o: unknown; try { o = JSON.parse(m[1]!); } catch { return null; }
+  if (!o || typeof o !== 'object') return null;
+  const r = o as Record<string, unknown>;
+  const strs = (v: unknown, n: number, len: number) => (Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string' && !!s.trim()).slice(0, n).map((s) => s.trim().slice(0, len)) : []);
+  const b = r.blocked as Record<string, unknown> | null | undefined;
+  const blocked = b && typeof b === 'object' && (BLOCK_REASONS as readonly string[]).includes(b.reason as string) && typeof b.what === 'string' && b.what.trim()
+    ? { reason: b.reason as typeof BLOCK_REASONS[number], what: b.what.trim().slice(0, 300) } : null;
+  return { touched: strs(r.touched, 80, 200), unsure: strs(r.unsure, 5, 300), blocked };
+}
 
 // Sent to the builder's own resumed session when its build left the content the evaluator rejected unchanged (config.progressFixes).
 export function progressFixPrompt(config: Config, rejection: string): string {
@@ -733,14 +754,25 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const stopped = async () => { if (!stopping) return false; await set(id, { status: 'todo', pendingLesson: undefined }); log(root, id, 'interrupted'); return true; };
     const roleCfg = (role: Role) => resolveRole(config, profile, role, { feature: f });
     const claude = async (role: Role, prompt: string, file: string, opts: { extra?: string[]; cfg?: RoleConfig } = {}): Promise<ClaudeResult> => {
-      const r = await exec(envVar('CLAUDE') || 'claude', [...claudeArgs(config, opts.cfg ?? roleCfg(role), root), ...(opts.extra ?? [])],
+      const r = await exec(envVar('CLAUDE') || 'claude', [...claudeArgs(config, opts.cfg ?? roleCfg(role), root), ...(role === 'builder' ? ['--add-dir', runDir] : []), ...(opts.extra ?? [])],
         { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin, onSpawn });
       writeFileSync(join(runDir, file), tryJson(r.out) ? r.out : JSON.stringify({ exitCode: r.code, stdout: r.out, stderr: tail(r.err) }));
       const p = parseClaudeOutput(r.out);
       spent += p.cost;
       if (p.cost) await edit(id, (x) => { x.costUsd = Math.round(((x.costUsd || 0) + p.cost) * 1e6) / 1e6; });
       if (r.timedOut) return { ...p, ok: false, error: `timed out after ${config.timeoutMin} min` };
+      if (role === 'builder' && p.ok) noteExit(p.text, file);
       return r.code === 0 || !p.ok ? p : { ...p, ok: false, error: `exit ${r.code}: ${tail(r.err, 500)}` };
+    };
+    // Beside each builder run: its exit block, the touches the spec declared and the files actually changed since base (merge-base,
+    // so main's changes brought in by a refresh are not counted as the builder's). A reported blocker is logged, attributed, and
+    // nothing more: it is the builder's claim, not a verified cause.
+    let predicted: string[] | null = null; // the candidate map's files, for scoring the prediction against the actual diff
+    const noteExit = (text: string, file: string) => {
+      const x = parseExit(text), mb = git(['merge-base', 'HEAD', config.base], wt).out;
+      const actual = mb ? git(['diff', '--name-only', mb, 'HEAD'], wt).out.split('\n').filter(Boolean) : [];
+      writeFileSync(join(runDir, file.replace(/\.json$/, '.exit.json')), JSON.stringify({ exit: x, declared: f.touches ?? null, predicted, actual }));
+      if (x?.blocked) log(root, id, 'builder-blocked', `${x.blocked.reason}: ${x.blocked.what}`);
     };
 
     // A role run by its provider. Codex (evaluator, diagnoser): whatever the run leaves in the worktree is undone (`cleaned`);
@@ -791,11 +823,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // The per-model notes (notes.ts) for the model this role launches with; read once per prompt, so the text in the prompt
     // and the `notes=` in its fingerprint are the same version.
     const notesFor = (role: Role) => readNotes(root, roleCfg(role).model, role);
-    const recordPrompt = (role: Role, prompt: string, notes: string | null, cfg?: RoleConfig, phase?: RunPhase, resumed = false) => {
+    const recordPrompt = (role: Role, prompt: string, notes: string | null, cfg?: RoleConfig, phase?: RunPhase, resumed = false, context?: RunRecord['context']) => {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
       const used = cfg ?? roleCfg(role), tier = cfg ? null : tierApplies(config, profile, role, f);
       const run: RunRecord = { phase: phase ?? (role === 'evaluator' ? 'review' : role === 'resolver' ? 'resolve' : 'build'), tag, role, provider: used.provider ?? 'claude',
-        model: used.model ?? null, effort: used.effort ?? null, tier: tier ?? null, resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}) };
+        model: used.model ?? null, effort: used.effort ?? null, tier: tier ?? null, resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}), ...(context ? { context } : {}) };
       log(root, id, 'prompt', promptFingerprint(role, used, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
         profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes, tier), undefined, { run });
     };
@@ -915,8 +947,14 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     let builderSession: string | null = null, builderNotes: string | null = null;
     if (!skipBuild) {
     const bn = notesFor('builder');
-    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn));
-    recordPrompt('builder', bp, bn, undefined, 'build');
+    const map = candidateMap(f, wt, git), pick = config.contextMaxBytes
+      ? pickAtoms(readAtoms(P.dir).atoms, [...map.files.map((m) => m.path), ...(f.touches ?? [])], config.contextMaxBytes, (a) => refsHold(a.refs, 'HEAD', wt, git))
+      : { included: [], deferred: [], bytes: 0 };
+    const feedbackFile = f.lastFeedback && config.recapMaxBytes && Buffer.byteLength(f.lastFeedback) > config.recapMaxBytes ? join(runDir, `${tag}-previous-feedback.md`) : null;
+    if (feedbackFile) writeFileSync(feedbackFile, f.lastFeedback!);
+    predicted = map.files.map((m) => m.path);
+    const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn), { map: renderContext(map, pick), feedbackFile });
+    recordPrompt('builder', bp, bn, undefined, 'build', false, { map: map.files.length, atoms: pick.included.map((a) => a.id), deferred: pick.deferred, atomBytes: pick.bytes, recap: !!feedbackFile });
     const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
     if (!b.ok) return fail(`builder failed: ${b.error}`);

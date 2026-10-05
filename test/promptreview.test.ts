@@ -320,3 +320,11 @@ test('recheck R4: a review of a resumed prompt also shows the pass\'s first prom
     first: { prompt: 'You are the builder\n- the document lists every table unchanged', file: 'f1' } } as never;
   assert.match(reviewPrompt(i), /That prompt resumed a session[\s\S]*the document lists every table unchanged/);
 });
+
+test('parseReview: an optional pointer is kept when well formed and never invalidates the review', () => {
+  const base = { cause: 'prompt-missing-info', evidence: ['q'], confidence: 'high', suggestion: 'Say where the helper is.', target: 'briefs' };
+  const ok = parseReview(JSON.stringify({ ...base, pointer: { text: 'Reuse x.', refs: [{ path: 'apps/b.ts', symbol: 'reuseMe' }], scope: ['apps/'] } }));
+  assert.ok(!('error' in ok)); assert.deepEqual((ok as { pointer?: unknown }).pointer, { text: 'Reuse x.', refs: [{ path: 'apps/b.ts', symbol: 'reuseMe' }], scope: ['apps/'] });
+  const bad = parseReview(JSON.stringify({ ...base, pointer: { text: 'x' } }));
+  assert.ok(!('error' in bad)); assert.equal((bad as { pointer?: unknown }).pointer, undefined);
+});

@@ -65,6 +65,8 @@ export interface Config {
   keepFixes: number;                  // safe integer >= 0: resumes per pass to restore or declare lines the builder's merge resolution lost (0 = none)
   progressFixes: number;              // safe integer >= 0: resumes per pass when a build left the content the evaluator rejected unchanged, before a counted failure with no gate or evaluation (0 = none)
   reviewFixes: number;                // safe integer >= 0: resumes per pass to fix an actionable evaluator rejection, then a fresh gate and evaluation (0 = none)
+  contextMaxBytes: number;            // safe integer >= 0: bytes of verified context atoms a builder prompt may carry (lib/context.ts; 0 = none)
+  recapMaxBytes: number;              // safe integer >= 0: previous-attempt feedback longer than this reaches a fresh try as a recap plus a file (0 = always whole)
   setupRetryDelaysSec: number[];      // delays before each setup retry; one more failure after the last makes the feature stuck
   classifier: ClassifierConfig | null; // I07: TypeSafe Jev tier/split judgments, shadow mode only (records, never changes a feature)
   diagnoser: RoleConfig | null;       // null = none; set = a read-only run diagnoses a repeated gate failure before one more fix
@@ -219,7 +221,13 @@ export interface Verdict {
 // holds what the provider reports. `phase` tells a first build from each kind of repair, a review and a diagnosis.
 export type RunPhase = 'build' | 'commit' | 'fix-gate' | 'fix-review' | 'fix-keep' | 'fix-progress' | 'resolve' | 'review' | 'diagnose';
 export interface RunRecord { phase: RunPhase; tag: string; role: string; provider: string; model: string | null; effort: string | null; tier: string | null;
-  resumed: boolean; fallback?: boolean; promptBytes: number; rule?: string }
+  resumed: boolean; fallback?: boolean; promptBytes: number; rule?: string;
+  context?: { map: number; atoms: string[]; deferred: { id: string; why: string }[]; atomBytes: number; recap: boolean } } // first build: what the Map section held
+
+// The builder's own account of a run (FINISH_RULE's optional exit block). Self-reported and attributed: it never decides an
+// outcome, places a hold or clears a failure; the foreman stores it beside the declared touches and the actual diff.
+export const BLOCK_REASONS = ['missing-info', 'spec-conflict', 'environment', 'tooling'] as const;
+export interface BuilderExit { touched: string[]; unsure: string[]; blocked: { reason: typeof BLOCK_REASONS[number]; what: string } | null }
 
 // log.jsonl
 export interface LogEvent {

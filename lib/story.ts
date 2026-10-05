@@ -243,6 +243,7 @@ export function buildStory(inp: StoryInput): Story {
       case 'merge-failed': case 'merge-hook-failed': case 'merge-skipped':
         if (st.open?.kind === 'review') closeReview(e.ts, 'done', '');
         push({ kind: 'merge', label: 'Merge', state: 'failed', text: e.event === 'merge-hook-failed' ? 'The merge check failed; the work went back to the queue.' : `The merge could not finish: ${reasonOf(d)}.`, start: e.ts, end: e.ts }); st.open = null; break;
+      case 'builder-blocked': if (st.open) st.open.note = `${st.open.note ? st.open.note + ' ' : ''}The builder reported it was blocked (${e.detail.replace(/^([\w-]+): /, (_, r) => r.replace('-', ' ') + ': ')}); not yet verified.`; break;
       case 'codex-fallback': if (st.open) st.open.note = `${st.open.note ? st.open.note + ' ' : ''}Codex was unavailable; a Claude model stood in.`; break;
       case 'interrupted': if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`);
         push({ kind: 'stop', label: 'Sent back', state: 'info', text: 'The factory stopped mid-step; the feature went back to the queue on the same try (no retry used).', start: e.ts, end: e.ts }); break;

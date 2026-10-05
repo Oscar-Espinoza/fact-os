@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
+import { parseExit, parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
 
@@ -376,4 +376,11 @@ test('parseVerdict: criterion and issue kind are optional attribution; a bad val
   assert.deepEqual(v.findings.map((f) => [f.criterion ?? null, f.kind ?? null]), [[2, 'weak-test'], [null, null], ['extra:production wiring', 'missing-wiring'], [1, null]]);
   assert.deepEqual(v.blockingKinds, ['duplicated-helper', null]);
   assert.equal(parseVerdict(JSON.stringify({ pass: false, cheating: [], notes: [], lesson: null, blocking: ['x'], blockingKinds: ['a', 'b'], findings: [{ check: 'a', ok: false, evidence: 'e' }] })).blockingKinds, undefined);
+});
+
+test('parseExit: the last exit block, bounded; malformed or missing is simply absent', () => {
+  const x = parseExit('Summary: Done.\n```exit\n{"touched": ["a.ts", 3, ""], "unsure": ["u1","u2","u3","u4","u5","u6"], "blocked": {"reason": "missing-info", "what": "which currency"}}\n```');
+  assert.deepEqual(x, { touched: ['a.ts'], unsure: ['u1', 'u2', 'u3', 'u4', 'u5'], blocked: { reason: 'missing-info', what: 'which currency' } });
+  assert.equal(parseExit('```exit\n{"touched": [], "blocked": {"reason": "bored", "what": "x"}}\n```')!.blocked, null);
+  assert.equal(parseExit('Summary: no block'), null); assert.equal(parseExit('```exit\nnot json\n```'), null);
 });

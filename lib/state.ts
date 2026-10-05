@@ -19,7 +19,7 @@ export const DEFAULT_CONFIG: Config = {
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
-  gateFixes: 0, commitFixes: 0, keepFixes: 1, progressFixes: 1, reviewFixes: 0, setupRetryDelaysSec: [30, 120], diagnoser: null, classifier: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
+  gateFixes: 0, commitFixes: 0, keepFixes: 1, progressFixes: 1, reviewFixes: 0, contextMaxBytes: 1200, recapMaxBytes: 4000, setupRetryDelaysSec: [30, 120], diagnoser: null, classifier: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
@@ -223,7 +223,7 @@ function configProblems(raw: unknown): string[] {
     'an array of at most 10 positive delays in seconds (each <= 86400)');
   for (const key of ['refreshBeforeTest', 'conflictBrief']) field(c, 'config', key, (x) => typeof x === 'boolean', 'a boolean');
   field(c, 'config', 'merge', (x) => x === 'auto' || x === 'manual', '"auto" or "manual"');
-  for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes', 'commitFixes', 'keepFixes', 'progressFixes', 'reviewFixes']) field(c, 'config', key, uint, 'a safe integer >= 0');
+  for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes', 'commitFixes', 'keepFixes', 'progressFixes', 'reviewFixes', 'contextMaxBytes', 'recapMaxBytes']) field(c, 'config', key, uint, 'a safe integer >= 0');
   field(c, 'config', 'maxAttempts', (x) => uint(x) && (x as number) >= 1, 'a safe integer >= 1');
   for (const key of ['budgetUsdPerRun', 'budgetUsdTotal'])
     field(c, 'config', key, (x) => x === null || nonnegative(x), 'a finite number >= 0 or null');
