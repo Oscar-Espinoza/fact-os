@@ -1,4 +1,5 @@
 // Dashboard: one page across every project under --root, bound to 127.0.0.1.
+import { applySpecFix, dismissSpecFix, specFixMode, undoSpecFix } from './specfix.ts';
 import { readAtoms, readIfExists } from './context.ts';
 import type { Scorecard } from './scorecard.ts';
 import { createServer, type Server } from 'node:http';
@@ -73,7 +74,8 @@ const tryJson = (s: string): unknown => { try { return JSON.parse(s); } catch { 
 const isWorktree = (dir: string) => { try { return statSync(join(dir, '.git')).isFile(); } catch { return false; } };
 
 const HUMAN = ['start', 'done', 'reopen', 'step', 'wait', 'unwait'] as const;
-const CONTROL = ['pause', 'resume', 'lanes', 'profile'] as const;
+const CONTROL = ['pause', 'resume', 'lanes', 'profile', 'spec-fixes'] as const;
+const SPEC_FIX = ['apply', 'dismiss', 'undo'] as const; // POST /api/spec-fix/<what> {project, id}: a person's decision
 
 export function controlState(dir: string, config: Config): ControlState {
   const r = readControlFile(dir, config), configMax = Math.max(1, config.maxParallel), agent = observerConfig(config, { agent: true }).agent;
@@ -398,7 +400,7 @@ export function featureHistory(dir: string, id: string): { log: LogEvent[]; acti
     const { config, features, tasks } = load(dir), f = features.find((x) => x.id === id);
     if (f) {
       const unmet = (f.deps || []).map((d) => features.find((x) => x.id === d)).filter((x): x is Feature => !!x && x.status !== 'merged').map((x) => ({ id: x.id, title: x.shortTitle || x.title }));
-      story = buildStory({ feature: f, events: all, runs: storyRuns(dir, id), maxAttempts: config.maxAttempts, base: config.base, manualMerge: config.merge === 'manual',
+      story = buildStory({ feature: f, specFixMode: specFixMode(dir) ?? undefined, events: all, runs: storyRuns(dir, id), maxAttempts: config.maxAttempts, base: config.base, manualMerge: config.merge === 'manual',
         openTasks: tasks.filter((t) => t.status === 'open' && (t.unblocks || []).includes(id)).map((t) => ({ title: t.title, mockable: t.mockable })), unmetDeps: unmet, goal: goalOf(dir, f) });
     }
   } catch { story = null; }
@@ -444,21 +446,23 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
           : send(404, { error: 'no project view' });
       }
       const action = ACTIONS.find((a) => req.url === `/api/feature/${a}`);
-      const ctl = CONTROL.find((c) => req.url === `/api/control/${c}`);
-      if (req.method !== 'POST' || (!action && !ctl && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged', '/api/setup/resume'].includes(req.url!))) return send(404, { error: 'not found' });
+      const ctl = CONTROL.find((c) => req.url === `/api/control/${c}`), fix = SPEC_FIX.find((x) => req.url === `/api/spec-fix/${x}`);
+      if (req.method !== 'POST' || (!action && !ctl && !fix && ![...HUMAN.map((h) => `/api/human/${h}`), '/api/feature/merged', '/api/setup/resume'].includes(req.url!))) return send(404, { error: 'not found' });
       let body = '';
       for await (const c of req) { body += c; if (body.length > 10000) return send(413, { error: 'body too large' }); }
-      const parsed = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown; maxParallel?: unknown; profile?: unknown };
+      const parsed = (tryJson(body) || {}) as { project?: unknown; id?: unknown; step?: unknown; on?: unknown; who?: unknown; maxParallel?: unknown; profile?: unknown; specFixes?: unknown; fix?: unknown };
       const { project, id, step, on, who } = parsed;
       if (typeof project !== 'string' || !discover(root).includes(project)) return send(400, { error: 'unknown project' });
       if (ctl) { // pause / resume new launches, set the lanes (null = config default) or the model profile (null = opus); the
         // foreman re-reads control.json every tick and applies a profile to new launches only
         if (ctl === 'lanes' && !('maxParallel' in parsed && validLanes(parsed.maxParallel)))
           return send(400, { error: `maxParallel must be an integer from 0 to ${MAX_LANES}, or null for the config default` });
+        if (ctl === 'spec-fixes' && parsed.specFixes !== 'manual' && parsed.specFixes !== 'auto') return send(400, { error: 'specFixes must be "manual" or "auto"' });
         const config = loadConfig(project); // before the write: an unreadable config fails the request without changing anything
         if (ctl === 'profile' && !('profile' in parsed && validProfile(config, parsed.profile)))
           return send(400, { error: `profile must be one of ${profileNames(config).join(', ')}, or null for opus (is ${JSON.stringify(parsed.profile)})` });
         await writeControl(project, ctl === 'lanes' ? { maxParallel: parsed.maxParallel as number | null } : ctl === 'profile' ? { profile: parsed.profile as string | null }
+          : ctl === 'spec-fixes' ? { specFixes: parsed.specFixes as 'manual' | 'auto' }
           : { paused: ctl === 'pause' }, 'dashboard', config);
         return send(200, { ok: true, control: controlState(project, config) });
       }
@@ -467,6 +471,11 @@ export function startDash({ root = process.cwd(), port = 7420 } = {}): Promise<{
         return send(200, { ok: true, released: was });
       }
       if (typeof id !== 'string') return send(400, { error: 'id must be a string' });
+      if (fix) { // apply / dismiss name the proposal they were shown (`fix`): a newer draft is never applied by an older click
+        if (fix !== 'undo' && typeof parsed.fix !== 'string') return send(400, { error: 'fix must be the proposal id' });
+        const err = fix === 'undo' ? await undoSpecFix(project, id) : fix === 'apply' ? await applySpecFix(project, id, parsed.fix as string, 'person') : await dismissSpecFix(project, id, parsed.fix as string);
+        return send(err ? (err === 'unknown feature' ? 404 : 409) : 200, err ? { error: `${id}: ${err}` } : { ok: true });
+      }
       if (action) {
         const err = (await act(project, action as Action, [id]))[id];
         return send(err ? (err === 'unknown feature' ? 404 : 409) : 200, err ? { error: `${id}: ${err}` } : { ok: true });

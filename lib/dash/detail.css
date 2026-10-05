@@ -183,3 +183,40 @@ details.d-sm>summary{font-size:12px;color:var(--dim)}
 
 #detail .d-stale{color:var(--amber);font-size:13px;margin:6px 0 0}
 #detail .d-who{display:block;color:var(--dim);font-size:12px;font-family:var(--mono);margin-top:2px}
+
+/* spec fix: a drafted correction (old → new) with Apply / Dismiss, and the fixes applied so far */
+.d-sx{border-color:#4a3d80;display:flex;flex-direction:column;gap:10px}
+.d-sx h3,.d-sxl h3{font-size:13px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:600}
+.d-sx p{max-width:72ch}
+.d-sxd{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;min-width:0}
+.d-sxo,.d-sxn{padding:10px 12px;border-radius:6px;border:1px solid var(--line);background:var(--bg);min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}
+.d-sxo .d-lbl,.d-sxn .d-lbl{display:block;margin-bottom:4px}
+.d-sxo del{color:var(--dim);text-decoration-color:var(--dim)}
+.d-sxn{border-color:#1f5a37;background:#0f2419}
+.d-sxn ins{color:var(--fg);text-decoration:none}
+.d-sxq{display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.d-sxq q{color:var(--fg);quotes:'“' '”'}
+.d-sxq .d-tag{white-space:normal}
+.d-sxv b.ok{color:var(--green)}.d-sxv b.no{color:var(--red2)}.d-sxv b.un{color:var(--amber)}
+.d-sxg{color:var(--purple)}.d-sxg b{font-weight:600}
+.d-sxa{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.d-sxa .d-b:disabled{opacity:.55;cursor:default}
+.d-sxh{color:var(--dim);font-size:13px;max-width:60ch}
+.d-sxe{color:var(--red2);font-size:14px}
+.d-sxnone{border-color:#5e4718}
+.d-sxnone p{color:var(--muted)}
+.d-sxl{display:flex;flex-direction:column;gap:0}
+.d-sxl h3{margin-bottom:6px}
+.d-sxr{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-top:1px solid var(--line)}
+.d-sxl h3+.d-sxr{border-top:0;padding-top:4px}
+.d-sxrh{display:flex;gap:6px 12px;flex-wrap:wrap;align-items:baseline}
+.d-sxrh b{font-weight:600}
+.d-sxr .d-sxd{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;font-size:14px}
+.d-sxar{color:var(--muted)}
+.d-sxw{color:var(--muted);font-size:14px;max-width:72ch}
+.d-sxr.undone .d-sxd{opacity:.6}
+.d-sxu{color:var(--amber)}
+@media (max-width:640px){
+  .d-sxd,.d-sxr .d-sxd{grid-template-columns:minmax(0,1fr)}
+  .d-sxar{display:none}
+}

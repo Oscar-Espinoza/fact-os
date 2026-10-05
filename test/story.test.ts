@@ -184,3 +184,20 @@ test('a fallback diagnosis names the model that actually diagnosed', () => {
   const s = buildStory({ feature: F({ status: 'testing' }), events, runs: [], maxAttempts: 3, base: 'main' });
   assert.equal(s.current!.steps.find((x) => x.kind === 'diagnose')!.who, 'Diagnosed by Opus · high (fallback)');
 });
+
+test('spec fixes: a waiting proposal is what the person must do; applied fixes are listed and only the latest unchanged one can be undone', () => {
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const hold = { cause: 'spec-error' as const, confidence: 'high' as const, evidence: ['needs 6 minutes'], review: 'a/1', passEnd: '', inputs: 'h', ts: '' };
+  const fix = { id: 'S1', ts: '', status: 'proposed' as const, inputs: 'h', review: 'a/1', sha: null, target: 1, old: 'x', new: 'y', why: 'w', drafter: { model: 'opus' }, protectedBy: 'the feature is risky' };
+  const s = buildStory({ feature: F({ planningHold: hold, specFix: fix, attempts: 1 }), events: [ev('launch'), ev('failed', 'FAILED t: e', { stop: { attempt: 1, counted: true } })], runs: [], maxAttempts: 3, base: 'main', specFixMode: 'auto' });
+  assert.equal(s.needsYou!.what, 'Review the proposed spec fix'); assert.match(s.state.next!, /Review the proposed spec fix below/);
+  assert.deepEqual([s.specFix!.id, s.specFix!.protectedBy, s.specFix!.mode], ['S1', 'the feature is risky', 'auto']);
+  assert.equal(queueNote(F({ planningHold: hold, specFix: fix }), 3, 'main', []), 'Waiting for you: a proposed spec fix.');
+  const rec = (id: string, o = {}) => ({ id, ts: '', by: 'auto' as const, target: 1, old: 'x', new: 'y', why: 'w', ...o });
+  const t = buildStory({ feature: F({ acceptance: ['y'], specFixes: [rec('S0', { undone: 't' }), rec('S1')] }), events: [], runs: [], maxAttempts: 3, base: 'main' });
+  assert.deepEqual(t.fixes.map((x) => [x.id, x.undoable]), [['S0', false], ['S1', true]]); assert.equal(t.specFix, null);
+  assert.equal(buildStory({ feature: F({ acceptance: ['edited'], specFixes: [rec('S1')] }), events: [], runs: [], maxAttempts: 3, base: 'main' }).fixes[0]!.undoable, false);
+  const feed = transitions([ev('spec-fix-proposed', 'S1: acceptance item 1: "x" → "y"; Codex agrees'), ev('spec-fix-applied', 'S1 auto: acceptance item 1: "x" → "y"')], { a: 'A' }, 3, 'main', 10);
+  assert.deepEqual(feed.map((x) => [x.badge, x.needsYou]), [['Spec fixed', false], ['Spec fix · needs you', true]]);
+  assert.match(feed[0]!.text, /^Spec fixed automatically: acceptance item 1/);
+});

@@ -2,7 +2,7 @@
 // Pure: built from the feature, its log events (oldest first) and its run artifacts. State comes from recorded events and
 // validated verdicts only; an agent's own words supply a sentence, never a pass or a fail. What the records do not say is
 // not invented: a step without a recorded result says so.
-import type { Feature, LogEvent, Verdict } from './types.ts';
+import type { Feature, LogEvent, Verdict, SpecFixProposal, SpecFixRecord } from './types.ts';
 
 export type StepKind = 'build' | 'reused' | 'save' | 'resolve' | 'test' | 'diagnose' | 'review' | 'fix' | 'merge' | 'ready' | 'end' | 'stop' | 'hold' | 'note';
 export type StepState = 'done' | 'running' | 'needs-changes' | 'failed' | 'interrupted' | 'reused' | 'info';
@@ -20,8 +20,13 @@ export interface Story {
   nextTry: number | null;
   status: Feature['status'];          // the feature status this story was built from
   version: string;                    // status|attempts it was built from (the page can tell when it is stale; updatedAt changes too often mid-run)
+  // The drafted spec fix, when one is waiting or none could be found, and the fixes applied (the latest may be undone while
+  // its text is unchanged and nobody is working on the feature).
+  specFix: (Pick<SpecFixProposal, 'id' | 'status' | 'target' | 'old' | 'new' | 'why' | 'evidence' | 'verifier' | 'protectedBy' | 'autoBlocked' | 'reason'> & { mode?: string }) | null;
+  fixes: (SpecFixRecord & { undoable: boolean })[];
 }
 export interface StoryInput {
+  specFixMode?: string;               // the project's spec-fix mode, shown beside a waiting proposal
   feature: Feature; events: LogEvent[]; runs: StoryRun[]; maxAttempts: number; base: string;
   manualMerge?: boolean; openTasks?: { title: string; mockable: boolean }[]; unmetDeps?: { id: string; title: string }[];
   goal?: { goal: string; shortTitle?: string } | null;
@@ -293,7 +298,14 @@ export function buildStory(inp: StoryInput): Story {
   const d = describe(inp, current, cur);
   d.problems.earlier.push(...orphans.reverse());
   if (f.status === 'merged' && current?.outcome !== 'merged') d.state = { word: 'Merged', tone: 'ok', why: `Merged into ${inp.base}${lateMerge ? ' outside a factory try' : ''}; the earlier tries are kept below as history.`, next: null };
-  return { title: inp.goal?.shortTitle || f.shortTitle || f.title, goal: f.goal ?? inp.goal?.goal ?? null, ...d, current, earlier, archive, status: f.status, version: `${f.status}|${f.attempts || 0}` };
+  const p = f.specFix, open = p && (p.status === 'proposed' || p.status === 'none') ? p : null;
+  const fixes = (f.specFixes ?? []).map((r, i, all) => {
+    const cur = r.target === 'description' ? f.description ?? '' : f.acceptance?.[(r.target as number) - 1];
+    return { ...r, undoable: i === all.length - 1 && !r.undone && ['todo', 'stuck', 'paused'].includes(f.status) && (cur ?? '').replace(/\s+/g, ' ').trim() === r.new.replace(/\s+/g, ' ').trim() };
+  });
+  return { title: inp.goal?.shortTitle || f.shortTitle || f.title, goal: f.goal ?? inp.goal?.goal ?? null, ...d, current, earlier, archive, status: f.status, version: `${f.status}|${f.attempts || 0}`,
+    specFix: open ? { id: open.id, status: open.status, target: open.target, old: open.old, new: open.new, why: open.why, evidence: open.evidence, verifier: open.verifier,
+      protectedBy: open.protectedBy, autoBlocked: open.autoBlocked, reason: open.reason, ...(inp.specFixMode ? { mode: inp.specFixMode } : {}) } : null, fixes };
 }
 
 // The header: one state word, why, what happens next, whether a person must act, and the problems.
@@ -320,7 +332,7 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
     case 'stuck': {
       const why = lastEnded?.summary ?? (f.lastFeedback ? `${reasonOf(f.lastFeedback)}.` : null);
       state = { word: 'Stuck', tone: 'bad', why, next: null };
-      needsYou = { what: 'Retry it, or change the spec', why: why ?? 'It used all its tries.' };
+      needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: why ?? 'It used all its tries.' } : { what: 'Retry it, or change the spec', why: why ?? 'It used all its tries.' };
       active = problemOf(lastEnded) ?? (f.lastFeedback ? { title: reasonOf(f.lastFeedback), reasons: [] } : null);
       break;
     }
@@ -329,8 +341,9 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
       if (f.planningHold) {
         const h = f.planningHold;
         state = h.cause === 'base-defect' ? { word: 'On hold', tone: 'hold', why: `The same failure happens on ${inp.base}: ${h.evidence[0] ?? ''}`.trim(), next: `Checked again when ${inp.base} changes that code.` }
-          : { word: 'On hold', tone: 'hold', why: `The ${h.cause === 'prompt-conflict' ? 'instructions conflict' : 'spec cannot be met as written'}: ${h.evidence[0] ?? ''}`.trim(), next: 'Edit the spec, or release the hold to launch it as it is.' };
-        if (h.cause !== 'base-defect') needsYou = { what: 'Clarify the conflicting requirement', why: state.why ?? '' };
+          : { word: 'On hold', tone: 'hold', why: `The ${h.cause === 'prompt-conflict' ? 'instructions conflict' : 'spec cannot be met as written'}: ${h.evidence[0] ?? ''}`.trim(),
+            next: f.specFix?.status === 'proposed' ? 'Review the proposed spec fix below: apply it, or dismiss it and edit the spec yourself.' : 'Edit the spec, or release the hold to launch it as it is.' };
+        if (h.cause !== 'base-defect') needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: state.why ?? '' } : { what: 'Clarify the conflicting requirement', why: state.why ?? '' };
         break;
       }
       if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) { state = { word: 'Waiting to retry', tone: 'hold', why: 'A diagnosed test-environment fault; no retry used.', next: `Retries the same build at ${new Date(f.envRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` }; break; }
@@ -373,6 +386,10 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
       t(`Sent back to the queue on the same try (no retry used): ${e.event === 'interrupted' ? 'the factory stopped mid-step' : departure(d)}.`, 'Queued', 'queue'); // the try stays open
     }
     else if (e.event === 'planning-hold' && !/base/.test(d)) t('On hold: the spec cannot be met as written; it needs a clarification.', 'On hold · needs you', 'hold', true);
+    else if (e.event === 'spec-fix-proposed') t(`A spec fix was drafted: ${clip(d.replace(/^S\w+: /, ''), 160)}`, 'Spec fix · needs you', 'hold', true);
+    else if (e.event === 'spec-fix-none') t(`No spec fix could be drafted (${clip(d, 120)}); the spec still needs you.`, 'On hold · needs you', 'hold', true);
+    else if (e.event === 'spec-fix-applied') t(`Spec fixed ${/ auto:/.test(d) ? 'automatically' : 'by you'}: ${clip(d.replace(/^S\w+ \w+: /, ''), 160)}; it starts again with fresh tries.`, 'Spec fixed', 'queue');
+    else if (e.event === 'spec-fix-undone') t('A spec fix was undone; the earlier text is back and it starts again with fresh tries.', 'Spec fix undone', 'queue');
     else if (e.event === 'failed' || e.event === 'stuck') {
       const reason = reasonOf(d), stuck = e.event === 'stuck';
       if (e.cause === 'environment') { t(stuck ? 'Stopped after repeated environment faults; needs a person.' : 'Test-environment fault; waiting to retry the same build (no retry used).', stuck ? 'Stuck · needs you' : 'Waiting to retry', stuck ? 'bad' : 'hold', stuck); }
@@ -387,6 +404,7 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
 // A queued or waiting feature's one-line reason, for the board and the factory queue (no artifacts needed).
 export function queueNote(f: Feature, maxAttempts: number, base: string, unmetDeps: { title: string }[], blockingTask?: string): string | null {
   if (f.status !== 'todo') return null;
+  if (f.specFix?.status === 'proposed') return 'Waiting for you: a proposed spec fix.';
   if (f.planningHold) return f.planningHold.cause === 'base-defect' ? `On hold: the same failure happens on ${base}.` : 'On hold: the spec needs a clarification.';
   if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) return 'Waiting to retry after a test-environment fault (no retry used).';
   if (f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now()) return 'Waiting to retry after a setup failure (no retry used).';

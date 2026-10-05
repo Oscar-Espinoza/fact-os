@@ -2,7 +2,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, appendFileSync, lstatSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import type { ClassifierConfig, EscalationConfig, Config, Control, Feature, HumanTask, LogEvent, Paths, StateFiles, StateName } from './types.ts';
+import type { ClassifierConfig, EscalationConfig, Config, Control, Feature, HumanTask, LogEvent, Paths, SpecFixMode, StateFiles, StateName } from './types.ts';
 import { OPUS, normalizeProfile, profileNames, profileProblems, validProfile } from './profiles.ts';
 
 // Shadow classifier operating bounds (I07 v2). The model is pinned: the battery and scorer were evaluated on jev-1.13.0.
@@ -378,16 +378,18 @@ export function readControlFile(root: string, config?: Pick<Config, 'profiles'>)
   if (r.maxParallel !== undefined && !validLanes(r.maxParallel)) return bad(`"maxParallel" must be an integer from 0 to ${MAX_LANES} or null (is ${JSON.stringify(r.maxParallel)})`);
   if (r.profile !== undefined && r.profile !== null && typeof r.profile !== 'string') return bad(`"profile" must be a profile name or null (is ${JSON.stringify(r.profile)})`);
   if (typeof r.profile === 'string' && config && !validProfile(config, r.profile)) return bad(`unknown profile "${r.profile}" (known: ${profileNames(config).join(', ')})`);
+  if (r.specFixes !== undefined && r.specFixes !== 'manual' && r.specFixes !== 'auto') return bad(`"specFixes" must be "manual" or "auto" (is ${JSON.stringify(r.specFixes)})`);
   return { ok: true, missing: false, control: { paused: r.paused === true, maxParallel: (r.maxParallel ?? null) as number | null,
-    ...(r.profile !== undefined ? { profile: r.profile === OPUS ? null : r.profile as string | null } : {}),
+    ...(r.profile !== undefined ? { profile: r.profile === OPUS ? null : r.profile as string | null } : {}), ...(r.specFixes ? { specFixes: r.specFixes as SpecFixMode } : {}),
     ...(typeof r.updatedAt === 'string' ? { updatedAt: r.updatedAt } : {}), ...(r.by === 'dashboard' || r.by === 'cli' ? { by: r.by } : {}) } };
 }
 
 // Changes control.json under the state lock (atomic write); throws on an invalid maxParallel or an unknown profile ("opus" and
 // "default" are written as null). Profiles are checked against `config`, else the project's config.json. Returns what was written.
-export async function writeControl(root: string, patch: Partial<Pick<Control, 'paused' | 'maxParallel' | 'profile'>>, by: NonNullable<Control['by']>, config?: Pick<Config, 'profiles'>): Promise<Control> {
+export async function writeControl(root: string, patch: Partial<Pick<Control, 'paused' | 'maxParallel' | 'profile' | 'specFixes'>>, by: NonNullable<Control['by']>, config?: Pick<Config, 'profiles'>): Promise<Control> {
   if ('maxParallel' in patch && !validLanes(patch.maxParallel)) throw new Error(`lanes must be an integer from 0 to ${MAX_LANES}, or null for the config default`);
   if ('paused' in patch && typeof patch.paused !== 'boolean') throw new Error('paused must be a boolean');
+  if ('specFixes' in patch && patch.specFixes !== 'manual' && patch.specFixes !== 'auto') throw new Error('specFixes must be manual or auto');
   // The config is read only when needed: a lanes or pause write still works with an unreadable config.json.
   let cfg = config;
   if (!cfg) try { cfg = loadConfig(root); } catch (e) { if ('profile' in patch) throw e; }
@@ -396,7 +398,7 @@ export async function writeControl(root: string, patch: Partial<Pick<Control, 'p
   return withLock(root, () => {
     const r = readControlFile(root, cfg), cur = r.ok ? r.control : DEFAULT_CONTROL; // writing repairs an invalid file
     const next: Control = { paused: patch.paused ?? cur.paused, maxParallel: 'maxParallel' in patch ? patch.maxParallel! : cur.maxParallel,
-      profile: 'profile' in patch ? profile! : cur.profile ?? null, updatedAt: new Date().toISOString(), by };
+      profile: 'profile' in patch ? profile! : cur.profile ?? null, ...((patch.specFixes ?? cur.specFixes) ? { specFixes: patch.specFixes ?? cur.specFixes } : {}), updatedAt: new Date().toISOString(), by };
     writeJsonAtomic(paths(root).control, next);
     return next;
   });

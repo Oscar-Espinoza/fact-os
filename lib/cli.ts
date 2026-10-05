@@ -18,6 +18,9 @@ const USAGE = `usage: ${NAME} <command>
   done <human-task-id>            mark a human task done
   pause|resume|retry <id>...      pause todo/stuck features, resume paused ones, retry stuck ones (attempts reset)
   release <id>...                 launch a feature the observer put on a planning hold, unchanged (an edit releases it too)
+  spec-fixes [manual|auto]        how drafted spec fixes are applied: manual = a person applies them; auto = applied without asking
+                                  when every guard passes (protected changes stay manual); without an argument: the mode and proposals
+  spec-fix apply|dismiss|undo <id>  apply or dismiss a feature's drafted spec fix, or undo its latest applied one
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
   setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
   classify <id...> | --all        shadow-classify features with TypeSafe Jev (tier, needs split); records only, changes nothing
@@ -184,6 +187,31 @@ async function control(cmd: string, args: string[]): Promise<void> {
   if (cmd === 'profile') await showProfile(root, config, foreman);
 }
 
+// spec-fixes [manual|auto]: set or show the mode, and list proposals waiting for a person.
+async function specFixesCmd(args: string[]): Promise<void> {
+  const root = needRoot();
+  if (args.length > 1 || (args[0] && args[0] !== 'manual' && args[0] !== 'auto')) throw new Error(`usage: ${NAME} spec-fixes [manual|auto]`);
+  if (args[0]) await writeControl(root, { specFixes: args[0] as 'manual' | 'auto' }, 'cli');
+  const r = readControlFile(root);
+  console.log(`spec fixes: ${r.ok ? r.control.specFixes ?? 'manual' : `unknown (${r.error})`}`);
+  for (const f of load(root).features.filter((x) => x.specFix?.status === 'proposed')) {
+    const p = f.specFix!;
+    console.log(`  ${f.id} ${p.id}: ${p.target === 'description' ? 'description' : `item ${p.target}`}: "${p.old}" → "${p.new}"\n    why: ${p.why}\n    Codex: ${
+      p.verifier?.agree === true ? 'agrees' : p.verifier?.agree === false ? `disagrees: ${p.verifier.reason}` : 'did not verify'}${p.protectedBy ? `; manual only: ${p.protectedBy}` : p.autoBlocked ? `; not applied automatically: ${p.autoBlocked}` : ''}`);
+  }
+}
+// spec-fix apply|dismiss|undo <id>: a person's decision on a feature's drafted spec fix.
+async function specFixCmd(args: string[]): Promise<void> {
+  const root = needRoot(), [what, id] = args;
+  if (args.length !== 2 || !['apply', 'dismiss', 'undo'].includes(what!)) throw new Error(`usage: ${NAME} spec-fix apply|dismiss|undo <feature id>`);
+  const f = load(root).features.find((x) => x.id === id);
+  if (!f) throw new Error(`unknown feature ${id}`);
+  const { applySpecFix, dismissSpecFix, undoSpecFix } = await import('./specfix.ts');
+  const err = what === 'undo' ? await undoSpecFix(root, id!) : !f.specFix ? 'no drafted spec fix' : what === 'apply' ? await applySpecFix(root, id!, f.specFix.id, 'person') : await dismissSpecFix(root, id!, f.specFix.id);
+  if (err) throw new Error(`spec-fix ${what} ${id}: ${err}`);
+  console.log(`spec-fix ${what === 'apply' ? 'applied' : what === 'dismiss' ? 'dismissed' : 'undone'}: ${id}${what === 'dismiss' ? '' : ' (queued with fresh tries)'}`);
+}
+
 // The active profile and what each role runs with under it (new launches only: running features keep the one they started with).
 async function showProfile(root: string, config: Config, foreman?: boolean): Promise<void> {
   const cr = readControlFile(root, config), { observerConfig } = await import('./observe.ts');
@@ -242,6 +270,8 @@ try {
       break;
     }
     case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
+    case 'spec-fixes': await specFixesCmd(argv.slice(1)); break;
+    case 'spec-fix': await specFixCmd(argv.slice(1)); break;
     case 'classify': {
       const root = needRoot(), { config, features } = load(root), { classify, report } = await import('./classifier.ts');
       if (!config.classifier) throw new Error('config.classifier is not set: add {"classifier": {"provider": "typesafe", "mode": "shadow"}} to config.json');

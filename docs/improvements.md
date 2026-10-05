@@ -461,3 +461,32 @@ features, risky tiers backfilled from today: no model ranking yet).
   tier is the one recorded at launch (older fingerprints' `tier=`), never backfilled. Same-tier rows are described, never
   called a fair comparison. Active cards name an agent only while its invocation in the current launch and stage runs. The observer's Models section also lists what the factory
   learned (pointers, notes, escalations).
+
+## I11 — spec fixes, manual and auto (2026-10-05)
+
+Asked for: when a feature fails because its spec is wrong, the factory drafts the corrected spec; in manual mode a person
+applies it with one click, in auto mode an agent applies it without asking. Live case: F99-32 required a 6-minute saving
+computed from busy-machine timings plus a check a reports-only change never ran; the reachable saving was about 3.5 minutes.
+Designed with Codex, which shaped the guards below.
+
+- Trigger: the observer's prompt review blames the spec (`spec-error`): a queued feature it held with its current inputs, or a
+  stuck one reviewed after its last launch. At most two drafts a pass and ten a day; a spec's inputs are drafted at most once
+  (declined, applied and "no fix" outcomes are kept), a failed draft at most twice.
+- Draft (the curator, Opus, read-only): one replacement of one acceptance item or the description, its reason, and evidence
+  quotes with their sources (the rejection, the review, the branch's committed evidence files) — or no fix, when the failure
+  was the implementation, a measurement or the environment.
+- Guards: the old text is current; the change is one bounded rewrite; every quote is found word for word in its source.
+- Verify: a fresh Codex session (read-only) decides whether the evidence shows the old requirement was mistaken, not merely
+  missed, and whether the new text lowers it no further than that forces. Unavailable or unusable verification is recorded as
+  such and never counts as agreement.
+- Protected (always a person's call): description rewrites, risky features, wording about money, auth, tenants, security,
+  privacy, data deletion, migrations, concurrency or transactions, a replacement that could weaken a test, and one that drops
+  any word of the old requirement (a corrected number keeps its metric, scope and conditions).
+- Modes (`control.json` `specFixes`, `fact-os spec-fixes manual|auto`, the dashboard toggle; default manual). Auto applies a
+  proposal only with Codex's agreement, a counted substantive failure before it, no protection, no pause, and no earlier
+  automatic fix on that feature; otherwise it waits for a person with the reason shown. Switching to auto reconsiders waiting
+  proposals.
+- Apply (one function for both modes, rechecked at apply time): replaces the text, records it, resets tries and rebuild
+  state, releases the spec-error hold, keeps a pause, logs `acceptance-changed`; the feature goes through the ordinary build,
+  gate and review. Dismiss keeps the hold. Undo restores the latest fix while its text is unchanged and nobody is working on
+  the feature; the one automatic fix stays spent.

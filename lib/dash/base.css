@@ -67,6 +67,17 @@ b{font-weight:600}
 .mode[hidden]{display:none}
 .mode .mode-k{color:var(--muted);font-weight:400;white-space:pre}
 .mode.alt{border-color:var(--blue2);box-shadow:inset 0 0 0 1px var(--blue2)}
+/* spec-fix mode (control.json `specFixes`): Manual | Auto; the explanation is in the tooltip and the toast after a switch */
+.sfx{display:flex;align-items:center;gap:8px}
+.sfx[hidden]{display:none}
+.sfx-k{font-size:13px;color:var(--muted)}
+.sfx button{height:32px;padding:0 10px;background:var(--raised);color:var(--muted);border:1px solid var(--line2);font-size:13px;font-weight:500;cursor:pointer}
+.sfx button+button{margin-left:-8px;border-left:0}
+.sfx button:first-of-type{border-radius:var(--r) 0 0 var(--r)}
+.sfx button:last-of-type{border-radius:0 var(--r) var(--r) 0}
+.sfx button[aria-pressed=true]{background:#152031;color:var(--fg);box-shadow:inset 0 0 0 1px var(--blue2)}
+.sfx button:hover:not(:disabled){color:var(--fg)}
+.sfx button:disabled{opacity:.5;cursor:default}
 .pz{padding:0 12px}
 .pz .ic{display:inline-flex}
 .ctl.paused .pz{background:var(--amber);border-color:var(--amber);color:#1d1400}
@@ -81,6 +92,7 @@ b{font-weight:600}
    "lanes" hidden the same way) and the gaps, tabs and picker narrow. "Mode:" stays visible down to 901. */
 @media (max-width:1720px) and (min-width:901px){.top{gap:16px;padding:0 14px}.tabs a{padding:0 12px}.brand small{display:none}.status{padding-left:12px}#pick{width:200px}.ctl{gap:8px}}
 @media (max-width:1460px) and (min-width:901px){.brand span{display:none}#pick{width:180px}.pz .lbl{display:none}.pz{width:32px;padding:0}
+  .sfx-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
   .lanes-t small{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
 @media (max-width:1210px) and (min-width:901px){.top{gap:8px}.tabs a{padding:0 8px}#pick{width:105px}.mode{padding:0 10px}
   .lanes-w{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}}
@@ -93,6 +105,7 @@ b{font-weight:600}
   .status{padding-left:0;border-left:0;height:auto}
   .status > span:last-child{display:none} /* just the dot on phones; its tooltip has the text */
   .ctl{justify-content:space-between;padding:4px 0 2px}
+  .sfx-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
   .mode .mode-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
   .ib{width:32px;height:32px}
   .tabs{height:44px;overflow-x:auto;min-width:0;scrollbar-width:none;margin:0 -12px;padding:0 4px}

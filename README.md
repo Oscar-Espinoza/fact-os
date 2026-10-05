@@ -103,7 +103,10 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   full file) and `recapMaxBytes` (4000; longer previous-attempt feedback reaches a fresh try as one line per failure plus
   the full text in a file it can read). A profile may set `ladder`, its builder's approved rungs weakest first
   (`[{"model": "sonnet", "effort": "medium"}, …]`): each counted review rejection or diagnosed own-code gate failure in a cycle
-  moves a fresh try one rung up from where the profile and tier put it, never down. Every builder prompt asks it
+  moves a fresh try one rung up from where the profile and tier put it, never down. When a review blames the spec, the
+  observer drafts one corrected requirement and Codex verifies it: `fact-os spec-fixes manual|auto` decides whether a person
+  applies it (`fact-os spec-fix apply|dismiss|undo <id>`, or the dashboard) or the factory does, within the guards in
+  docs/improvements.md I11. Every builder prompt asks it
   to wait for every command acceptance needs, and commit the evidence, before its final reply.
   A diagnoser `environment` fault reruns the gate once on the same build; if it fails the same way the pass stops
   without spending an attempt and the build is revalidated after `setupRetryDelaysSec` (one more episode after the

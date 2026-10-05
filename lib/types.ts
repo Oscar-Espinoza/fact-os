@@ -168,6 +168,8 @@ export interface Feature {
   pausedAt?: string;                  // ISO, while paused
   issue?: number;                     // GitHub issue number
   touches?: string[];                 // files (or dir prefixes ending in "/") it is expected to change: claimed while it runs
+  specFix?: SpecFixProposal;          // the latest drafted spec fix (lib/specfix.ts)
+  specFixes?: SpecFixRecord[];        // spec fixes applied to it, oldest first (undo restores the latest)
   tier?: Tier;                        // set at intake; picks role models from the active profile's tiers (absent: the risk heuristic)
   risk?: 'high' | 'normal';           // "high": the builder gets its profile's effortHigh; "normal": never; absent: keyword heuristic
   conflict?: { ours: string; theirs: string; files: string[] }; // a conflicted base refresh whose committed resolution is not checked yet
@@ -192,10 +194,28 @@ export interface HumanTask {
 
 // <state dir>/control.json: a person's runtime limits on new launches (CLI or dashboard). Not config.json, so changing it
 // never trips the foreman's tamper halt. Nothing in flight is ever interrupted by it.
+// Spec fixes: when a feature failed because its spec was wrong, the observer drafts one replacement (Opus) that Codex verifies.
+// manual: a person applies it; auto: applied without asking when every guard passes (protected changes stay manual).
+export type SpecFixMode = 'manual' | 'auto';
+export interface SpecFixProposal {
+  id: string; ts: string; status: 'proposed' | 'applied' | 'declined' | 'none' | 'stale';
+  inputs: string;                     // holdInputs when drafted: a proposal applies only to exactly that spec
+  review: string; sha: string | null; // the prompt review and the feature commit it was drafted from
+  target?: number | 'description';    // 1-based acceptance index
+  old?: string; new?: string; why?: string; evidence?: { quote: string; source: string }[];
+  reason?: string;                    // status none: why no correction is supported
+  drafter: { model: string | null };
+  verifier?: { provider: string; model: string | null; agree: boolean | null; reason: string };
+  protectedBy?: string;               // why it can only be applied by a person
+  autoBlocked?: string;               // why auto mode left it to a person
+  counted?: boolean;                  // a counted, substantive failure preceded it (needed for auto)
+}
+export interface SpecFixRecord { id: string; ts: string; by: 'person' | 'auto'; target: number | 'description'; old: string; new: string; why: string; undone?: string }
 export interface Control {
   paused: boolean;                    // true: launch nothing new
   maxParallel: number | null;         // 0..32; null = config.maxParallel
   profile?: string | null;            // model profile for new launches; absent or null = "opus" (each role's own config)
+  specFixes?: SpecFixMode;            // how a drafted spec fix is applied (lib/specfix.ts); absent = manual
   updatedAt?: string;                 // ISO
   by?: 'dashboard' | 'cli';
 }
