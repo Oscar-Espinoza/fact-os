@@ -235,6 +235,8 @@ test('FEASIBLE: the plan is saved in the run directory (not the repo), prepended
   assert.equal(s.git('ls-tree', '-r', '--name-only', 'main').split('\n').some((p) => /plan/.test(p)), false, 'nothing about the plan is committed');
   assert.deepEqual([s.feature('a').plan?.verdict, s.feature('a').plan?.split], ['FEASIBLE', 'the API part and the UI part']);
   assert.match(s.events('a').find((e) => e.event === 'planned')!.detail, /^FEASIBLE, effort medium; split suggested: the API part and the UI part$/);
+  const planned = s.events('a').find((e) => e.event === 'planned')!, plannerRun = s.events('a').find((e) => e.event === 'prompt' && e.run?.role === 'planner')!.run;
+  assert.deepEqual(planned.run, plannerRun, 'the planned event names the planner\'s own model and effort');
   const order = s.events('a').map((e) => e.event === 'prompt' ? `prompt:${e.run?.role}` : e.event).filter((e) => /^(launch|planned|prompt:)/.test(e));
   assert.deepEqual(order, ['launch', 'prompt:planner', 'planned', 'prompt:builder', 'prompt:evaluator']);
 });

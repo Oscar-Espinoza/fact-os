@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStory, builderText, firstSentence, modelName, queueNote, reasonOf, reviewHeadline, testFailure, transitions, type StoryRun } from '../lib/story.ts';
+import { buildStory, builderText, firstSentence, modelName, queueNote, reasonOf, reviewHeadline, testFailure, transitions, whoOf, type StoryRun } from '../lib/story.ts';
 import type { Feature, LogEvent, Verdict } from '../lib/types.ts';
 
 const F = (o: Partial<Feature> = {}): Feature => ({ id: 'a', title: 'Fix the store restore test', description: 'd', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
@@ -200,4 +200,32 @@ test('spec fixes: a waiting proposal is what the person must do; applied fixes a
   const feed = transitions([ev('spec-fix-proposed', 'S1: acceptance item 1: "x" → "y"; Codex agrees'), ev('spec-fix-applied', 'S1 auto: acceptance item 1: "x" → "y"')], { a: 'A' }, 3, 'main', 10);
   assert.deepEqual(feed.map((x) => [x.badge, x.needsYou]), [['Spec fixed', false], ['Spec fix · needs you', true]]);
   assert.match(feed[0]!.text, /^Spec fixed automatically: acceptance item 1/);
+});
+
+test('the planner row comes before the Build row it planned for, names the planner, and says its effort is a recommendation for the builder', () => {
+  // F99-47 (ecommerce-builder): a setup failure, a relaunch, the planner (Opus high), then the builder (Opus medium), still building.
+  const t = (s: string) => `2026-10-05T${s}Z`;
+  const run = (phase: 'plan' | 'build', role: string, model: string, effort: string) => ({ run: { phase, tag: '1', role, provider: 'claude', model, effort, tier: null, resumed: false, promptBytes: 10 } });
+  const E = (ts: string, event: string, detail = '', o: Partial<LogEvent> = {}): LogEvent => ({ ts: t(ts), feature: 'a', event, detail, ...o });
+  const events = [E('20:13:01.234', 'launch'), E('20:13:01.629', 'failed', 'prepare `p` exited 1: (setup failure 1 of 3; no attempt spent)', { stop: { attempt: 1, counted: false } }),
+    E('20:14:02.081', 'launch'), E('20:14:26.191', 'prompt', 'planner model=opus effort=high', run('plan', 'planner', 'opus', 'high')),
+    E('20:15:31.787', 'planned', 'FEASIBLE, effort medium', run('plan', 'planner', 'opus', 'high')),
+    E('20:15:31.933', 'prompt', 'builder model=opus effort=medium', run('build', 'builder', 'opus', 'medium'))];
+  const s = buildStory({ feature: F({ status: 'building', updatedAt: t('20:16:00') }), events, runs: [], maxAttempts: 3, base: 'main' });
+  const steps = s.current!.steps;
+  assert.deepEqual(steps.map((x) => x.label), ['Build', 'Stopped', 'Resumed', 'Planned', 'Build']);
+  const [plan, build] = [steps[3]!, steps[4]!];
+  assert.deepEqual([plan.who, build.who, build.state], ['Planned by Opus · high', 'Built by Opus · medium', 'running']);
+  assert.match(plan.text, /recommends builder effort medium\.$/);
+  assert.deepEqual([plan.start, plan.end, build.start], [t('20:14:26.191'), t('20:15:31.787'), t('20:15:31.787')]);
+  const starts = steps.map((x) => Date.parse(x.start!)); assert.deepEqual(starts, [...starts].sort((a, b) => a - b));
+  // An older planned event without a run record takes the planner's prompt; with neither, nothing is guessed.
+  const old = buildStory({ feature: F({ status: 'building' }), events: [E('20:14:02', 'launch'), E('20:15:31', 'planned', 'FEASIBLE, effort high; split suggested: two parts')], runs: [], maxAttempts: 3, base: 'main' });
+  assert.equal(old.current!.steps[0]!.label, 'Planned'); assert.equal(old.current!.steps[0]!.who, undefined);
+  assert.match(old.current!.steps[0]!.text, /recommends builder effort high; it suggests splitting the feature: two parts\.$/);
+});
+
+test('a Codex reviewer is named as Codex', () => {
+  const r = { phase: 'review' as const, tag: '1', role: 'evaluator', provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', tier: null, resumed: false, promptBytes: 1 };
+  assert.equal(whoOf({ ts: '', feature: 'a', event: 'prompt', detail: '', run: r })!.who, 'Codex GPT-6.1 Sol · high');
 });

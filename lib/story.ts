@@ -43,14 +43,15 @@ export function modelName(m: string | null | undefined): string {
   const g = /^gpt-([\d.]+)(?:-([a-z]+))?/.exec(m); if (g) return `GPT-${g[1]}${g[2] ? ` ${g[2][0]!.toUpperCase()}${g[2].slice(1)}` : ''}`;
   return m;
 }
-// Who an invocation was, from its run record (or, for older logs, its prompt fingerprint).
+// Who an invocation was, from its run record (or, for older logs, its prompt fingerprint). A `planned` event carries its
+// planner's run record too.
 export function whoOf(e: LogEvent): { role: string; who: string } | null {
-  if (e.event !== 'prompt') return null;
+  if (e.event !== 'prompt' && !(e.event === 'planned' && e.run)) return null;
   const r = e.run, fp = /^(\w+) model=(\S+) effort=(\S+)/.exec(e.detail || '');
   const role = r?.role ?? fp?.[1]; if (!role) return null;
   const model = r ? r.model : fp![2] === '-' ? null : fp![2]!, effort = r ? r.effort : fp![3] === '-' ? null : fp![3]!;
   const extras = [r?.fallback ? 'fallback' : '', r?.resumed ? 'same session' : '', r?.rule?.includes('→') ? 'escalated after earlier failures' : ''].filter(Boolean);
-  return { role, who: `${modelName(model)}${effort ? ` · ${effort}` : ''}${extras.length ? ` (${extras.join(', ')})` : ''}` };
+  return { role, who: `${r?.provider === 'codex' && model && !/^(claude|sonnet|opus|haiku|fable)/.test(model) ? 'Codex ' : ''}${modelName(model)}${effort ? ` · ${effort}` : ''}${extras.length ? ` (${extras.join(', ')})` : ''}` };
 }
 
 // ---- plain sentences ----
@@ -142,7 +143,7 @@ const CYCLE_START: Record<string, string> = { retrying: 'before a person retried
 export function buildStory(inp: StoryInput): Story {
   const f = inp.feature, runs = [...inp.runs].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), used = new Set<StoryRun>();
   const cycles: Cycle[] = [{ tries: [] }];
-  let pendingWho: string | null = null;
+  let pendingWho: string | null = null, planWho: string | null = null, planStart: string | null = null; // the planner run in flight
   let tr: Try | null = null, pendingNote: string | null = null, testsInTry = 0, reviewsInTry = 0, envRetest = false, lateMerge: string | null = null;
   const cyc = () => cycles[cycles.length - 1]!, orphans: { when: string; text: string }[] = []; // failures logged outside any recorded try
   const st = { open: null as Step | null }; // the running step (a holder: closures reassign it)
@@ -182,6 +183,7 @@ export function buildStory(inp: StoryInput): Story {
       continue;
     }
     if (e.event === 'launch') {
+      planWho = planStart = null;
       if (st.open) close(e.ts, 'interrupted', `${(st.open as Step).text.replace(/\.$/, '')} (interrupted).`);
       const prev = cyc().tries.at(-1);
       if (!tr && prev && (prev.outcome === 'held' || prev.outcome === 'stopped')) { // no retry was spent: the same try resumes
@@ -204,6 +206,7 @@ export function buildStory(inp: StoryInput): Story {
         const fits = w.role === 'builder' ? ['build', 'fix', 'save', 'reused'].includes(s.kind) : w.role === 'resolver' ? s.kind === 'resolve' : w.role === 'evaluator' ? s.kind === 'review' : false;
         if (fits) s.who = `${w.role === 'evaluator' ? 'Reviewed by' : w.role === 'resolver' ? 'Combined by' : 'Built by'} ${w.who}`;
         if (w.role === 'diagnoser') pendingWho = `Diagnosed by ${w.who}`;
+        if (w.role === 'planner') { planWho = w.who; planStart = e.ts; }
       }
       continue;
     }
@@ -256,8 +259,18 @@ export function buildStory(inp: StoryInput): Story {
         if (e.event === 'recovered' && !/back to todo/.test(d)) break;
         if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`);
         push({ kind: 'stop', label: 'Sent back', state: 'info', text: `Sent back to the queue on the same try (no retry used): ${departure(d)}.`, start: e.ts, end: e.ts }); break;
-      case 'planning-hold': push({ kind: 'hold', label: 'On hold', state: 'info', text: /^base/.test(d) ? 'On hold.' : `On hold: the ${/prompt-conflict/.test(d) ? 'instructions conflict' : 'spec cannot be met as written'}; it needs a clarification.`, start: e.ts, end: e.ts }); break;
-      case 'planned': push({ kind: 'note', label: 'Planned', state: 'info', text: `A read-only planner checked the spec against the code and wrote a plan for the builder${/split suggested: (.+)$/.exec(d)?.[1] ? `; it suggests splitting the feature: ${/split suggested: (.+)$/.exec(d)![1]}` : ''}.`, start: e.ts }); break;
+      case 'planning-hold': push({ kind: 'hold', label: 'On hold', state: 'info', text: /^base/.test(d) ? 'On hold.' : `On hold: the ${/prompt-conflict/.test(d) ? 'instructions conflict' : 'spec cannot be met as written'}; it needs a clarification.`, start: e.ts, end: e.ts,
+        ...(planWho && /planner/.test(d) ? { who: `Planned by ${planWho}` } : {}) }); planWho = planStart = null; break;
+      case 'planned': { // the planner runs between the launch and the builder: its row goes before the Build row it planned for
+        const rec = /^FEASIBLE, effort (\w+)/.exec(d)?.[1], split = /split suggested: (.+)$/.exec(d)?.[1], who = whoOf(e)?.who ?? planWho;
+        const step: Step = { kind: 'note', label: 'Planned', state: 'info', start: planStart ?? e.ts, end: e.ts, ...(who ? { who: `Planned by ${who}` } : {}),
+          text: `A read-only planner checked the spec against the code and wrote a plan for the builder${rec ? `; it recommends builder effort ${rec}` : ''}${split ? `; it suggests splitting the feature: ${split}` : ''}.` };
+        planWho = planStart = null;
+        const b = st.open, at = b && b.kind === 'build' && !b.who ? tr.steps.lastIndexOf(b) : -1;
+        if (at >= 0) { tr.steps.splice(at, 0, step); b!.start = e.ts; } // the build starts once the plan is written
+        else push(step);
+        break;
+      }
       case 'planning-hold-released': push({ kind: 'note', label: 'Released', state: 'info', text: /base changed|recheck/.test(d) ? 'Main changed the implicated code; checking again.' : 'Hold released.', start: e.ts }); break;
       case 'failed': case 'stuck': {
         const isCounted = counted(e), stuck = e.event === 'stuck';

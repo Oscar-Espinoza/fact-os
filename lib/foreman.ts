@@ -1044,9 +1044,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         'that capability is a deliberate deferral, not a CONFLICT.')), head = git(['rev-parse', 'HEAD'], wt).out;
       writeFileSync(join(runDir, `${tag}-plan.prompt.md`), prompt);
       // Logged before the run starts (no await in between), so concurrent launches count it against the daily cap.
-      log(root, id, 'prompt', `planner model=${cfg.model || '-'} effort=${cfg.effort || '-'}`, undefined, { run: { phase: 'plan', tag, role: 'planner', provider: 'claude',
+      const planRun: RunRecord = { phase: 'plan', tag, role: 'planner', provider: 'claude',
         model: cfg.model ?? null, effort: cfg.effort ?? null, tier: f.tier ?? null, resumed: false, promptBytes: Buffer.byteLength(prompt),
-        ...(cfg.high ? { rule: 'planner: high effort (a sensitive spec, or an earlier failed attempt)' } : {}) } });
+        ...(cfg.high ? { rule: 'planner: high effort (a sensitive spec, or an earlier failed attempt)' } : {}) };
+      log(root, id, 'prompt', `planner model=${cfg.model || '-'} effort=${cfg.effort || '-'}`, undefined, { run: planRun });
       out(`plan ${id}: ${cfg.model ?? 'claude'} ${cfg.effort ?? ''}`.trim());
       const r = await claude('builder', prompt, `${tag}-plan.json`, { cfg, diagnose: true }); // diagnose: a read-only run, not builder work
       if (await stopped()) return 'stop';
@@ -1095,7 +1096,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const made = record({ verdict: 'FEASIBLE', effort: p.effort, split: p.split, text: p.plan });
       usePlan(made);
       await edit(id, (x) => { x.plan = summaryOf(made); });
-      log(root, id, 'planned', `FEASIBLE, effort ${p.effort}${planStep ? ` (${planStep.rule})` : ''}${split}`);
+      log(root, id, 'planned', `FEASIBLE, effort ${p.effort}${planStep ? ` (${planStep.rule})` : ''}${split}`, undefined, { run: planRun }); // run: who planned (the dashboard shows it)
       return 'go';
     };
     if (!skipBuild) {
