@@ -129,34 +129,76 @@ export function refsHold(refs: AtomRef[], rev: string, cwd: string, git: Git): s
   return null;
 }
 
-// The lines that define `symbol`: its declaration (or, failing that, a definition like `name(`, `name:` or `name =`), never one
-// inside a comment, through the end of its block. Null when the file does not define it. `complete` is false when the block's
-// end could not be established (an open template literal or bracket, or more than SECTION_MAX lines): callers then treat the
-// whole file as the definition rather than certify part of it.
+// Source with comments and the contents of strings, template literals and regex literals blanked (same length, newlines kept),
+// so structure is read from code alone. `ok` is false when the scan ends inside a literal or comment.
+export function codeMask(src: string): { text: string; ok: boolean; inLiteral: Set<number> } {
+  const inLiteral = new Set<number>(); // offsets of newlines inside a literal or comment
+  const out = src.split(''), blank = (i: number) => { if (out[i] !== '\n') out[i] = ' '; else inLiteral.add(i); };
+  let i = 0, prev = ''; // prev: the last significant code character, to tell a regex from a division
+  const stack: number[] = []; // template literals' `${` depths
+  let depth = 0;
+  while (i < src.length) {
+    const c = src[i]!, n = src[i + 1];
+    if (c === '/' && n === '/') { while (i < src.length && src[i] !== '\n') blank(i++); continue; }
+    if (c === '/' && n === '*') { const e = src.indexOf('*/', i + 2); if (e < 0) return { text: out.join(''), ok: false, inLiteral }; for (let k = i; k < e + 2; k++) blank(k); i = e + 2; continue; }
+    if (c === '"' || c === "'") {
+      let k = i + 1; while (k < src.length && src[k] !== c && src[k] !== '\n') k += src[k] === '\\' ? 2 : 1;
+      if (src[k] !== c) return { text: out.join(''), ok: false, inLiteral };
+      for (let j = i + 1; j < k; j++) blank(j); i = k + 1; prev = 'x'; continue;
+    }
+    if (c === '`' || (c === '}' && stack.length && stack.at(-1) === depth)) {
+      if (c === '}') stack.pop();
+      let k = i + 1;
+      while (k < src.length && src[k] !== '`' && !(src[k] === '$' && src[k + 1] === '{')) k += src[k] === '\\' ? 2 : 1;
+      if (k >= src.length) return { text: out.join(''), ok: false, inLiteral };
+      for (let j = i + 1; j < k; j++) blank(j);
+      if (src[k] === '$') { stack.push(depth); out[k] = ' '; i = k + 2; prev = '('; continue; } // `${` opens an expression
+      i = k + 1; prev = 'x'; continue;
+    }
+    if (c === '/' && (prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev))) {
+      let k = i + 1, cls = false;
+      while (k < src.length && src[k] !== '\n' && (cls || src[k] !== '/')) { if (src[k] === '[') cls = true; else if (src[k] === ']') cls = false; k += src[k] === '\\' ? 2 : 1; }
+      if (src[k] !== '/') return { text: out.join(''), ok: false, inLiteral };
+      for (let j = i + 1; j < k; j++) blank(j); i = k + 1; prev = 'x'; continue;
+    }
+    if (c === '{') depth++; else if (c === '}') depth--;
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return { text: out.join(''), ok: true, inLiteral };
+}
+
+// The lines that define `symbol`: its declaration (or, failing that, a definition like `name(`, `name:` or `name =`), read from
+// code only (never inside a comment or a string), through the end of its statement or block. Null when the file does not
+// define it. `complete` is false when that end cannot be established (the scan is unsure, a bracket stays open, or the body
+// runs past SECTION_MAX lines): callers then fingerprint the whole file rather than certify part of it.
 const SECTION_MAX = 300;
 export function symbolSection(src: string, symbol: string): string | null { return symbolDef(src, symbol)?.text ?? null; }
 export function symbolDef(src: string, symbol: string): { text: string; complete: boolean } | null {
-  // Comments blanked (line count kept), so a declaration inside one is never found.
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' ')).replace(/(^|[^:\\])\/\/.*$/gm, '$1');
-  const lines = code.split('\n'), orig = src.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
-  const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${sym}\\b`);
-  const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly )*${sym}\\s*(\\(|:|=|<)`);
-  let at = lines.findIndex((l) => decl.test(l));
+  const m = codeMask(src), code = m.text, lines = code.split('\n'), orig = src.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
+  const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${sym}\\b`);
+  const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly |get |set )*${sym}\\s*(\\(|:|=|<)`);
+  let at = lines.findIndex((l) => decl.test(l)), isDecl = at >= 0;
   if (at < 0) at = lines.findIndex((l) => def.test(l));
   if (at < 0) return null;
-  const indent = /^\s*/.exec(lines[at]!)![0].length;
-  let end = at, capped = false;
-  for (let i = at + 1; i < lines.length; i++) {
-    if (i - at >= SECTION_MAX) { capped = true; break; }
-    const l = lines[i]!;
-    if (!l.trim()) continue;
-    const ind = /^\s*/.exec(l)![0].length;
-    if (ind < indent || (ind === indent && !/^\s*[)}\]]/.test(l))) break;
-    end = i;
+  // Walk the code from the definition: it ends at a `;` (or `,` for a member) outside brackets, or where its block closes.
+  let off = lines.slice(0, at).reduce((n, l) => n + l.length + 1, 0), depth = 0, opened = false, endLine = -1;
+  for (let line = at; off < code.length && line - at < SECTION_MAX; off++) {
+    const c = code[off]!;
+    if (c === '\n') {
+      line++;
+      if (m.inLiteral.has(off)) continue; // inside a template literal or comment: not a statement boundary
+      // A statement without a semicolon ends at a line break outside brackets that does not continue it.
+      if (depth === 0 && opened) { endLine = line - 1; break; }
+      if (depth === 0 && line < lines.length && (/^\s*(export\s|import\s|const\s|let\s|var\s|function\s|class\s|interface\s|type\s|enum\s)/.test(lines[line]!) || !orig[line]!.trim()) && line > at && !/[=,(\[{:?+\-*&|]\s*$/.test(lines[line - 1]!)) { endLine = line - 1; break; }
+      continue;
+    }
+    if ('({['.includes(c)) { depth++; continue; }
+    if (')}]'.includes(c)) { depth--; if (depth < 0) break; if (depth === 0 && c === '}' && (isDecl ? /^\s*(export\s+)?(default\s+)?(declare\s+)?(abstract\s+)?(async\s+)?(function|class|interface|enum)\b/.test(lines[at]!) : true)) opened = true; continue; }
+    if (depth === 0 && (c === ';' || (!isDecl && c === ','))) { endLine = code.slice(0, off).split('\n').length - 1; break; }
   }
-  const body = lines.slice(at, end + 1).join('\n'), count = (re: RegExp) => (body.match(re) ?? []).length;
-  const balanced = count(/`/g) % 2 === 0 && count(/[{([]/g) === count(/[})\]]/g);
-  return { text: orig.slice(at, end + 1).join('\n'), complete: balanced && !capped };
+  const complete = m.ok && endLine >= at;
+  return { text: orig.slice(at, (complete ? endLine : at) + 1).join('\n'), complete };
 }
 
 // What each ref's verification covered: the defining section of a symbol, or the whole file. A change there means the advice
@@ -221,12 +263,17 @@ export function selectLessons(text: string, candidates: string[], spec: string, 
   // Entries: bullets (`-`, `*`, `1.`) with their continuation lines; a file without bullets is taken by paragraphs.
   const lines = text.split('\n'), bullets: { head: string; text: string; i: number; score: number }[] = [];
   const isItem = (l: string) => /^([-*]|\d+[.)])\s/.test(l), anyItem = lines.some(isItem); // indented sub-items stay with their parent
-  let head = '', open = false;
+  // A line continues the open entry when indented, or when it directly follows it (no blank line between); otherwise a list
+  // item or an unindented paragraph starts a new entry.
+  let head = '', open = false, gap = false;
   for (const l of lines) {
     if (/^#{1,4} /.test(l)) { head = l; open = false; continue; }
-    if (!l.trim()) { open = anyItem && open; if (!anyItem) open = false; continue; }
-    if (anyItem ? isItem(l) : !open) { bullets.push({ head, text: l, i: bullets.length, score: 0 }); open = true; continue; }
-    if (open && bullets.length && bullets.at(-1)!.head === head) bullets.at(-1)!.text += '\n' + l;
+    if (!l.trim()) { gap = true; continue; }
+    if (/^\s*<!--.*-->\s*$/.test(l)) continue; // an HTML comment is not a lesson
+    const cont = open && bullets.at(-1)!.head === head && !isItem(l) && (/^\s+\S/.test(l) || !gap);
+    if (cont) bullets.at(-1)!.text += (gap ? '\n\n' : '\n') + l;
+    else if (isItem(l) || !anyItem || gap || !open) { bullets.push({ head, text: l, i: bullets.length, score: 0 }); open = true; }
+    gap = false;
   }
   if (Buffer.byteLength(text) <= budget) return { text, included: bullets.length, total: bullets.length };
   if (!bullets.length) return { text: fullFile ? `(The lessons are in ${fullFile}; read them before you start.)` : '', included: 0, total: 0 };

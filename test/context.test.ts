@@ -99,7 +99,13 @@ test('parsePointer and parseAtomCheck: bounded, repository-relative, malformed i
 });
 
 test('recheck: an open template literal or an over-long body fingerprints the whole file; a declaration inside a comment is not one', () => {
-  assert.deepEqual(symbolDef('export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;\n', 'tenantSql'), { text: 'export const tenantSql = `', complete: false });
+  assert.deepEqual(symbolDef('export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;\n', 'tenantSql'), { text: 'export const tenantSql = `\nSELECT * FROM t WHERE tenant_id = $1\n`;', complete: true });
+  // Strings, comments and regexes never decide structure.
+  assert.match(symbolDef("export const tenantSql = '-- // audited query\\n' + `\nSELECT * FROM items WHERE tenant_id = $1\n`;\nexport const z = 1;\n", 'tenantSql')!.text, /tenant_id = \$1\n`;$/);
+  assert.deepEqual(symbolDef('export function tenantScoped(marker = "}") {\nreturn true;\n}\n', 'tenantScoped'), { text: 'export function tenantScoped(marker = "}") {\nreturn true;\n}', complete: true });
+  assert.deepEqual(symbolDef('export const OPEN = "/*";\nexport function tenantScoped() {\n  return true;\n}\nexport const CLOSE = "*/";\n', 'tenantScoped'), { text: 'export function tenantScoped() {\n  return true;\n}', complete: true });
+  assert.deepEqual(symbolDef('export const re = /[/]}/g;\nexport const n = 1;\n', 're'), { text: 'export const re = /[/]}/g;', complete: true });
+  assert.equal(symbolDef('export const s = "unterminated\n', 's')!.complete, false);
   const long = 'export function big() {\n' + '  x();\n'.repeat(400) + '}\n';
   assert.equal(symbolDef(long, 'big')!.complete, false);
   assert.equal(symbolDef('/*\nexport function ghost() {}\n*/\n// export const ghost2 = 1\n', 'ghost'), null);
@@ -131,4 +137,10 @@ test('selectLessons: indented sub-items stay with their parent lesson', () => {
   const text = '### Reuse\n- Reuse these helpers:\n  - `a` in `x/`\n  - `b` in `y/`\n- ' + 'z'.repeat(2000);
   const s = selectLessons(text, ['x/f.ts'], '', 1000, '/l.md');
   assert.equal(s.total, 2); assert.match(s.text, /- Reuse these helpers:\n  - `a` in `x\/`\n  - `b` in `y\/`/);
+});
+
+test('selectLessons: an unindented paragraph after a blank line is its own entry, not part of the lesson above it', () => {
+  const text = '### Reuse\n- Reuse `src/tenant.ts` for tenant isolation:\n  - `scoped()`\n\n' + 'Historical note. '.repeat(500);
+  const s = selectLessons(text, ['src/tenant.ts'], 'tenant isolation', 6000, '/l.md');
+  assert.equal(s.total, 2); assert.equal(s.included, 1); assert.match(s.text, /^### Reuse\n- Reuse `src\/tenant.ts` for tenant isolation:\n  - `scoped\(\)`\n\(1 more lesson/);
 });
