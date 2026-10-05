@@ -125,7 +125,7 @@ export function refsHold(refs: AtomRef[], rev: string, cwd: string, git: Git): s
     if (!e) return `${r.path} does not exist at ${rev.slice(0, 12)}`;
     if (!/^100(644|755) blob /.test(e)) return `${r.path} is not a regular file at ${rev.slice(0, 12)}`;
     const defined = r.symbol ? symbolDefined(git(['show', `${rev}:${r.path}`], cwd).out, r.symbol) : true;
-    if (defined === null) return `${r.path} could not be read with certainty to find ${r.symbol} at ${rev.slice(0, 12)}`;
+    if (defined === null) return `whether ${r.path} defines ${r.symbol} could not be established at ${rev.slice(0, 12)}`;
     if (!defined) return `${r.symbol} is not defined in ${r.path} at ${rev.slice(0, 12)}`;
   }
   return null;
@@ -173,15 +173,17 @@ export function codeMask(src: string): { text: string; ok: boolean; inLiteral: S
 
 // Whether `src` defines `symbol`: a declaration (or, failing that, a definition like `name(`, `name:` or `name =`) in code, never
 // inside a comment or a string. Only existence is decided here; what an atom was verified against is the whole file.
-// null: the scan could not read the file with certainty (a literal or comment it could not close), so existence is unknown.
+// null: unknown — the scan could not read the file with certainty, or the name appears only inside a destructuring pattern.
 export function symbolDefined(src: string, symbol: string): boolean | null {
   const m = codeMask(src);
   if (!m.ok) return null;
   const lines = m.text.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`), id = `(?<![\\w$])${sym}(?![\\w$])`;
   const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${id}`);
-  const destructured = new RegExp(`^\\s*(export\\s+)?(const|let|var)\\s*[{\\[][^=]*${id}`); // export const { a, b } = …
   const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly |get |set )*${id}\\s*(\\(|:|=|<)`);
-  return lines.some((l) => decl.test(l) || destructured.test(l) || def.test(l));
+  if (lines.some((l) => decl.test(l) || def.test(l))) return true;
+  // Inside a destructuring pattern a name may be a property key, an alias or a binding; telling them apart needs a parser.
+  const patterns = [...m.text.matchAll(/\b(?:const|let|var)\s*([{[][\s\S]*?[}\]])\s*=/g)].map((x) => x[1]!);
+  return patterns.some((pat) => new RegExp(id).test(pat)) ? null : false;
 }
 
 // What each ref's verification covered: the whole file. Any change to it sends the atom back to the curator before it is used

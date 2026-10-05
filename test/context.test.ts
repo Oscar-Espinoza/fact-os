@@ -145,7 +145,11 @@ test('fourth recheck: fingerprints are exact blob ids; an unsure scan is unknown
   } finally { rmSync(d, { recursive: true, force: true }); }
   assert.equal(symbolDefined('let value = 4;\nconst ratio = value++ / 2;\nexport const example = `\nexport function ghost() {}\n`;\n', 'ghost'), false);
   assert.equal(symbolDefined('const r = /unclosed\nexport function ghost() {}\n', 'ghost'), null);
-  assert.equal(symbolDefined('export const { tenantScoped } = { tenantScoped: () => true };\n', 'tenantScoped'), true);
+  // Destructuring: key, alias or binding is not decided by pattern matching — unknown.
+  assert.equal(symbolDefined('export const { tenantScoped } = { tenantScoped: () => true };\n', 'tenantScoped'), null);
+  assert.equal(symbolDefined('import { helpers } from "./h.ts";\nexport const { tenantScoped: localHelper } = helpers;\n', 'tenantScoped'), null);
+  assert.equal(symbolDefined('export const {\n  a = 1,\n  tenantScoped,\n} = x;\n', 'tenantScoped'), null);
+  assert.equal(symbolDefined('export const { a } = x;\n', 'tenantScoped'), false);
   assert.equal(symbolDefined('export function tenantScoped$() { return true; }\n', 'tenantScoped$'), true);
   assert.equal(symbolDefined('export function tenantScoped$() {}\n', 'tenantScoped'), false);
 });
