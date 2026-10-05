@@ -124,7 +124,9 @@ export function refsHold(refs: AtomRef[], rev: string, cwd: string, git: Git): s
     const e = git(['ls-tree', rev, '--', r.path], cwd).out.split('\n')[0] ?? '';
     if (!e) return `${r.path} does not exist at ${rev.slice(0, 12)}`;
     if (!/^100(644|755) blob /.test(e)) return `${r.path} is not a regular file at ${rev.slice(0, 12)}`;
-    if (r.symbol && !symbolDefined(git(['show', `${rev}:${r.path}`], cwd).out, r.symbol)) return `${r.symbol} is not defined in ${r.path} at ${rev.slice(0, 12)}`;
+    const defined = r.symbol ? symbolDefined(git(['show', `${rev}:${r.path}`], cwd).out, r.symbol) : true;
+    if (defined === null) return `${r.path} could not be read with certainty to find ${r.symbol} at ${rev.slice(0, 12)}`;
+    if (!defined) return `${r.symbol} is not defined in ${r.path} at ${rev.slice(0, 12)}`;
   }
   return null;
 }
@@ -155,7 +157,8 @@ export function codeMask(src: string): { text: string; ok: boolean; inLiteral: S
       if (src[k] === '$') { stack.push(depth); out[k] = ' '; i = k + 2; prev = '('; continue; } // `${` opens an expression
       i = k + 1; prev = 'x'; continue;
     }
-    if (c === '/' && (prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev) || /\b(return|yield|typeof|case|do|else|in|of|new|delete|void|throw|await)\s*$/.test(src.slice(Math.max(0, i - 12), i)))) {
+    const postfix = (prev === '+' || prev === '-') && /(\+\+|--)\s*$/.test(src.slice(Math.max(0, i - 4), i)); // value++ / 2
+    if (c === '/' && !postfix && (prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev) || /\b(return|yield|typeof|case|do|else|in|of|new|delete|void|throw|await)\s*$/.test(src.slice(Math.max(0, i - 12), i)))) {
       let k = i + 1, cls = false;
       while (k < src.length && src[k] !== '\n' && (cls || src[k] !== '/')) { if (src[k] === '[') cls = true; else if (src[k] === ']') cls = false; k += src[k] === '\\' ? 2 : 1; }
       if (src[k] !== '/') return { text: out.join(''), ok: false, inLiteral };
@@ -170,18 +173,24 @@ export function codeMask(src: string): { text: string; ok: boolean; inLiteral: S
 
 // Whether `src` defines `symbol`: a declaration (or, failing that, a definition like `name(`, `name:` or `name =`) in code, never
 // inside a comment or a string. Only existence is decided here; what an atom was verified against is the whole file.
-export function symbolDefined(src: string, symbol: string): boolean {
-  const lines = codeMask(src).text.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`);
-  const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${sym}\\b`);
-  const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly |get |set )*${sym}\\s*(\\(|:|=|<)`);
-  return lines.some((l) => decl.test(l) || def.test(l));
+// null: the scan could not read the file with certainty (a literal or comment it could not close), so existence is unknown.
+export function symbolDefined(src: string, symbol: string): boolean | null {
+  const m = codeMask(src);
+  if (!m.ok) return null;
+  const lines = m.text.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`), id = `(?<![\\w$])${sym}(?![\\w$])`;
+  const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${id}`);
+  const destructured = new RegExp(`^\\s*(export\\s+)?(const|let|var)\\s*[{\\[][^=]*${id}`); // export const { a, b } = …
+  const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly |get |set )*${id}\\s*(\\(|:|=|<)`);
+  return lines.some((l) => decl.test(l) || destructured.test(l) || def.test(l));
 }
 
 // What each ref's verification covered: the whole file. Any change to it sends the atom back to the curator before it is used
 // again; deciding that a change elsewhere in the file cannot matter would need a real parser, and a wrong guess would deliver
 // stale advice as verified.
+// The fingerprint is Git's own blob id: exact bytes, nothing decoded or trimmed ('' when the file cannot be read, never equal
+// to a real id).
 export function refPrints(refs: AtomRef[], rev: string, cwd: string, git: Git): string[] {
-  return refs.map((r) => createHash('sha256').update(git(['show', `${rev}:${r.path}`], cwd).out).digest('hex').slice(0, 16));
+  return refs.map((r) => { const b = git(['rev-parse', '--verify', '--quiet', `${rev}:${r.path}`], cwd); return b.code === 0 && /^[0-9a-f]{40,64}$/.test(b.out) ? b.out : ''; });
 }
 
 // Why a verified atom may not be used against `rev` now (null: usable): its refs no longer hold, its code changed since it was

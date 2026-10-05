@@ -129,3 +129,23 @@ test('selectLessons: an unindented paragraph after a blank line is its own entry
   const s = selectLessons(text, ['src/tenant.ts'], 'tenant isolation', 6000, '/l.md');
   assert.equal(s.total, 2); assert.equal(s.included, 1); assert.match(s.text, /^### Reuse\n- Reuse `src\/tenant.ts` for tenant isolation:\n  - `scoped\(\)`\n\(1 more lesson/);
 });
+
+test('fourth recheck: fingerprints are exact blob ids; an unsure scan is unknown, not evidence; destructured and $ names are found', () => {
+  const d = mkdtempSync(join(tmpdir(), 'ctx-'));
+  try {
+    const g = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: d });
+    writeFileSync(join(d, 'f.bin'), Buffer.from([0x80])); writeFileSync(join(d, 'e.txt'), 'fixture\n'); g('init', '-q'); g('add', '.'); g('commit', '-qm', 'x');
+    const refs = [{ path: 'f.bin' }, { path: 'e.txt' }], a = atom('A1', ['f'], { refs, verifiedAt: new Date().toISOString(), prints: refPrints(refs, 'HEAD', d, git) });
+    assert.ok(a.prints!.every((p) => /^[0-9a-f]{40}$/.test(p)));
+    writeFileSync(join(d, 'f.bin'), Buffer.from([0x81])); g('commit', '-qam', 'byte');
+    assert.equal(atomStale(a, 'HEAD', d, git), 'its file changed since it was verified');
+    const b = { ...a, prints: refPrints(refs, 'HEAD', d, git) };
+    writeFileSync(join(d, 'e.txt'), 'fixture'); g('commit', '-qam', 'no newline');
+    assert.equal(atomStale(b, 'HEAD', d, git), 'its file changed since it was verified');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+  assert.equal(symbolDefined('let value = 4;\nconst ratio = value++ / 2;\nexport const example = `\nexport function ghost() {}\n`;\n', 'ghost'), false);
+  assert.equal(symbolDefined('const r = /unclosed\nexport function ghost() {}\n', 'ghost'), null);
+  assert.equal(symbolDefined('export const { tenantScoped } = { tenantScoped: () => true };\n', 'tenantScoped'), true);
+  assert.equal(symbolDefined('export function tenantScoped$() { return true; }\n', 'tenantScoped$'), true);
+  assert.equal(symbolDefined('export function tenantScoped$() {}\n', 'tenantScoped'), false);
+});
