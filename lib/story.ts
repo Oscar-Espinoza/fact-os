@@ -18,7 +18,8 @@ export interface Story {
   current: Try | null; earlier: Try[]; archive: { label: string; tries: Try[] }[];
   problems: { active: { title: string; reasons: Reason[] } | null; earlier: { when: string; text: string }[] };
   nextTry: number | null;
-  status: Feature['status'];          // the feature status this story was built from (the page can tell when it is stale)
+  status: Feature['status'];          // the feature status this story was built from
+  version: string;                    // status|attempts it was built from (the page can tell when it is stale; updatedAt changes too often mid-run)
 }
 export interface StoryInput {
   feature: Feature; events: LogEvent[]; runs: StoryRun[]; maxAttempts: number; base: string;
@@ -59,8 +60,7 @@ export function reviewReasons(v: Verdict): Reason[] {
 export function reviewHeadline(v: Verdict): string {
   const failed = v.findings.filter((f) => f.ok !== true).length, n = v.findings.length;
   if (v.pass) return `Passed all ${n} checks.`;
-  // The evaluator's own summary only when the verdict is valid and it does not claim success for a rejection.
-  if (v.summary && !v.error && !/\b(all (the )?checks pass|ready to merge|approved|passes all)\b/i.test(v.summary)) return clip(v.summary, 170);
+  // A rejection's headline comes from its structured reasons, never from the evaluator's own prose (which could contradict it).
   const rs = reviewReasons(v), r = rs[0];
   const lead = r ? r.title.replace(/^Check failed: /, '') : 'see the review details';
   void failed; void n;
@@ -122,7 +122,7 @@ export function buildStory(inp: StoryInput): Story {
   // The artifact of a step that ended at `end`: the newest unused one of `roles` written during the step. The foreman writes
   // a run's output before logging the event that ends the step, so a later repair's output never belongs to it.
   const artifact = (roles: StoryRun['role'][], start: string | undefined, end: string, peek = false) => {
-    const s = start ? Date.parse(start) - 5e3 : -Infinity, e = Date.parse(end) + 5e3;
+    const s = start ? Date.parse(start) - 5e3 : -Infinity, e = Date.parse(end) + 500; // clock granularity only
     const hit = runs.filter((r) => roles.includes(r.role) && !used.has(r) && Date.parse(r.at) >= s && Date.parse(r.at) <= e).pop();
     if (hit && !peek) used.add(hit);
     return hit;
@@ -241,6 +241,7 @@ export function buildStory(inp: StoryInput): Story {
         else if (st.open) close(e.ts, 'failed', `${st.open.label === 'Build' ? 'The build' : 'This step'} did not finish: ${reason}.`);
         const what = stage === 'merge' ? 'Merging stopped' : stage === 'review' ? 'Review rejected' : stage === 'test' ? 'Checks failed' : stage === 'resolve' ? 'Combining changes failed' : 'Did not finish';
         if (!isCounted) { push({ kind: 'stop', label: 'Stopped', state: 'info', text: `Stopped without using a retry: ${reason}.`, start: e.ts, end: e.ts }); if (stuck) endTry(e.ts, 'stopped', `Stopped without using a retry: ${reason}.`); break; }
+        if (e.stop?.counted && e.stop.attempt) tr.n = e.stop.attempt; // the recorded attempt number wins over row counting
         const last = tr.n >= inp.maxAttempts || stuck;
         push({ kind: 'end', label: last ? 'Stuck' : 'Try ended', state: 'failed', text: last ? `No retries left: ${reason}.` : `Try ${tr.n} of ${inp.maxAttempts} used; it goes back to the queue for try ${tr.n + 1}.`, start: e.ts, end: e.ts });
         endTry(e.ts, stuck ? 'stuck' : 'failed', /^(the )?checks failed/.test(reason) ? `${reason.replace(/^the /, '').replace(/^./, (c) => c.toUpperCase())}.` : `${what}: ${reason}.`); break;
@@ -258,7 +259,7 @@ export function buildStory(inp: StoryInput): Story {
   const d = describe(inp, current, cur);
   d.problems.earlier.push(...orphans.reverse());
   if (f.status === 'merged' && current?.outcome !== 'merged') d.state = { word: 'Merged', tone: 'ok', why: `Merged into ${inp.base}${lateMerge ? ' outside a factory try' : ''}; the earlier tries are kept below as history.`, next: null };
-  return { title: inp.goal?.shortTitle || f.shortTitle || f.title, goal: f.goal ?? inp.goal?.goal ?? null, ...d, current, earlier, archive, status: f.status };
+  return { title: inp.goal?.shortTitle || f.shortTitle || f.title, goal: f.goal ?? inp.goal?.goal ?? null, ...d, current, earlier, archive, status: f.status, version: `${f.status}|${f.attempts || 0}` };
 }
 
 // The header: one state word, why, what happens next, whether a person must act, and the problems.
@@ -325,14 +326,13 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
     const title = titles[id] ?? id, d = e.detail || '', t = (text: string, badge: string, tone: StoryState['tone'], needsYou = false) => out.push({ ts: e.ts, id, title, text, badge, tone, needsYou });
     if (CYCLE_START[e.event] || (e.event === 'resumed' && e.attemptsReset)) { tryOf.delete(id); continue; }
     if (e.event === 'launch') { const n = (tryOf.get(id) ?? 0) + 1; if (!tryOf.has(`${id}#open`)) { tryOf.set(id, n); tryOf.set(`${id}#open`, 1); t(`Started try ${n}.`, 'Running', 'run'); } fixedInTry.delete(id); continue; }
-    const n = tryOf.get(id) ?? 1;
+    const n = e.stop?.counted && e.stop.attempt ? e.stop.attempt : tryOf.get(id) ?? 1; // a recorded attempt number wins
     if (e.event === 'review-fix') { fixedInTry.add(id); t('The review asked for changes; fixing them in the same session (no retry used).', 'Fixing', 'fix'); }
     else if (e.event === 'gate-fix') { fixedInTry.add(id); t('Checks failed; fixing them in the same session (no retry used).', 'Fixing', 'fix'); }
     else if (e.event === 'merged') { tryOf.delete(`${id}#open`); t(`Merged into ${base}${fixedInTry.has(id) ? ' after a same-session fix' : ''}.`, 'Merged', 'ok'); }
     else if (e.event === 'ready') { tryOf.delete(`${id}#open`); t('Passed review; ready to merge.', 'Ready', 'ok'); }
     else if (e.event === 'refresh-skipped' || (e.event === 'recovered' && /back to todo/.test(d)) || e.event === 'interrupted') {
-      tryOf.delete(`${id}#open`);
-      t(`Sent back to the queue on the same try (no retry used): ${e.event === 'interrupted' ? 'the factory stopped mid-step' : departure(d)}.`, 'Queued', 'queue');
+      t(`Sent back to the queue on the same try (no retry used): ${e.event === 'interrupted' ? 'the factory stopped mid-step' : departure(d)}.`, 'Queued', 'queue'); // the try stays open
     }
     else if (e.event === 'planning-hold' && !/base/.test(d)) t('On hold: the spec cannot be met as written; it needs a clarification.', 'On hold · needs you', 'hold', true);
     else if (e.event === 'failed' || e.event === 'stuck') {

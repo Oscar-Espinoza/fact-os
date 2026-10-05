@@ -22,9 +22,9 @@ test('sentences: Summary lines win, else a clean first sentence, else a pointer;
   assert.deepEqual(testFailure('FAIL src/a/b.test.ts > c\nError: timed out waiting'), { file: 'b.test.ts', error: 'Error: timed out waiting' });
 });
 
-test('reviewHeadline: the evaluator summary when present, else the first reason with a count; a pass counts its checks', () => {
+test('reviewHeadline: a rejection comes from its structured reasons (never the evaluator\'s prose); a pass counts its checks', () => {
   assert.equal(reviewHeadline(V({ pass: true, findings: [{ check: 'a', ok: true, evidence: 'e' }, { check: 'b', ok: true, evidence: 'e' }] })), 'Passed all 2 checks.');
-  assert.equal(reviewHeadline(V({ summary: 'Evidence logs are missing from the commit.', blocking: ['x'] })), 'Evidence logs are missing from the commit.');
+  assert.equal(reviewHeadline(V({ summary: 'Evidence logs are missing from the commit.', blocking: ['The README alone was committed.'] })), 'The README alone was committed.');
   assert.equal(reviewHeadline(V({ blocking: ['Required evidence is absent from the commit. Details.', 'Second.'], findings: [{ check: 'c', ok: false, evidence: 'e' }] })), 'Required evidence is absent from the commit (+2 more).');
 });
 
@@ -142,4 +142,18 @@ test('review fixes: a passing review stays passed when merging stops; a later re
   assert.match(s5.state.why!, /factory settings changed during the run/);
   const t = transitions([ev('launch'), ev('refresh-skipped', 'config.json changed on disk during the run; back to todo')], { a: 'A' }, 3, 'main');
   assert.equal(t[0]!.badge, 'Queued'); assert.match(t[0]!.text, /no retry used/);
+});
+
+test('recheck fixes: an interruption keeps the try (stop.attempt wins); a rejection never takes a success-sounding summary; output written after a step ends is not its own', () => {
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const evs = [ev('launch'), ev('failed', 'BLOCKING: x', { stop: { attempt: 1, counted: true } }), ev('launch'), ev('interrupted'), ev('launch'), ev('failed', 'BLOCKING: Duplicated helper.', { stop: { attempt: 2, counted: true } })];
+  const t = transitions(evs, { a: 'A' }, 3, 'main');
+  assert.equal(t[0]!.badge, 'Queued · try 3 of 3'); assert.match(t[0]!.text, /^Try 2 ended/);
+  const s = buildStory({ feature: F({ status: 'todo', attempts: 2, lastFeedback: 'BLOCKING: Duplicated helper.' }), events: evs, runs: [], maxAttempts: 3, base: 'main' });
+  assert.equal(s.state.word, 'Queued for try 3 of 3');
+  assert.equal(reviewHeadline(V({ summary: 'All checks passed.', blocking: ['A cross-tenant leak.'], findings: [{ check: 'tenant isolation', ok: false, evidence: 'e' }] })), 'A cross-tenant leak (+1 more).');
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const s2 = buildStory({ feature: F({ status: 'testing' }), events: [ev('launch'), ev('commit-fix', 'r'), ev('testing', 's')],
+    runs: [{ tag: '1.2', role: 'build', at: new Date(Date.parse(at(2)) + 2e3).toISOString(), text: 'The work is committed and clean.' }], maxAttempts: 3, base: 'main' });
+  assert.equal(s2.current!.steps[0]!.text, 'Builder finished; its output was not recorded for this step.');
 });
