@@ -367,3 +367,13 @@ test('verdict summary: kept when a plain string, dropped (never rejected) when m
   assert.deepEqual(testOutcome('test command `g` exited 1:\nFAIL src/a.test.ts > b\nAssertionError: expected 1'), { code: 1, file: 'a.test.ts', error: 'AssertionError: expected 1' });
   assert.match(FINISH_RULE, /starting "Summary:"/);
 });
+
+test('parseVerdict: criterion and issue kind are optional attribution; a bad value is dropped, never the finding or the blocker', () => {
+  const v = parseVerdict(JSON.stringify({ pass: false, cheating: [], notes: [], lesson: null, blocking: ['dup helper', 'no wiring'], blockingKinds: ['duplicated-helper', 'nonsense'],
+    findings: [{ check: 'a', ok: false, evidence: 'e', criterion: 2, kind: 'weak-test' }, { check: 'b', ok: false, evidence: 'e', criterion: -1, kind: 'made-up' },
+      { check: 'wiring', ok: false, evidence: 'e', criterion: 'extra:production wiring', kind: 'missing-wiring' }, { check: 'c', ok: true, evidence: 'e', criterion: 1, kind: 'weak-test' }] }));
+  assert.equal(v.error, undefined); assert.equal(v.findings.length, 4); assert.deepEqual(v.blocking, ['dup helper', 'no wiring']);
+  assert.deepEqual(v.findings.map((f) => [f.criterion ?? null, f.kind ?? null]), [[2, 'weak-test'], [null, null], ['extra:production wiring', 'missing-wiring'], [1, null]]);
+  assert.deepEqual(v.blockingKinds, ['duplicated-helper', null]);
+  assert.equal(parseVerdict(JSON.stringify({ pass: false, cheating: [], notes: [], lesson: null, blocking: ['x'], blockingKinds: ['a', 'b'], findings: [{ check: 'a', ok: false, evidence: 'e' }] })).blockingKinds, undefined);
+});

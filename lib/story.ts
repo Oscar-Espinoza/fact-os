@@ -7,7 +7,7 @@ import type { Feature, LogEvent, Verdict } from './types.ts';
 export type StepKind = 'build' | 'reused' | 'save' | 'resolve' | 'test' | 'diagnose' | 'review' | 'fix' | 'merge' | 'ready' | 'end' | 'stop' | 'hold' | 'note';
 export type StepState = 'done' | 'running' | 'needs-changes' | 'failed' | 'interrupted' | 'reused' | 'info';
 export interface Reason { title: string; detail?: string }
-export interface Step { kind: StepKind; label: string; state: StepState; text: string; note?: string; reasons?: Reason[]; start?: string; end?: string; tag?: string }
+export interface Step { kind: StepKind; label: string; state: StepState; text: string; note?: string; reasons?: Reason[]; start?: string; end?: string; tag?: string; who?: string }
 export type TryOutcome = 'running' | 'merged' | 'ready' | 'failed' | 'stuck' | 'held' | 'stopped' | 'interrupted';
 export interface Try { n: number; outcome: TryOutcome; summary: string; steps: Step[]; start?: string; end?: string }
 export interface Cycle { tries: Try[]; endedBy?: string }
@@ -25,6 +25,27 @@ export interface StoryInput {
   feature: Feature; events: LogEvent[]; runs: StoryRun[]; maxAttempts: number; base: string;
   manualMerge?: boolean; openTasks?: { title: string; mockable: boolean }[]; unmetDeps?: { id: string; title: string }[];
   goal?: { goal: string; shortTitle?: string } | null;
+}
+
+// ---- who ran it ----
+
+const MODEL_NAME: Record<string, string> = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku', fable: 'Fable' };
+// A model id as a person reads it: "sonnet" → Sonnet, "gpt-6.1-sol" → GPT-6.1 Sol, "claude-opus-5-5" → Opus 5.5.
+export function modelName(m: string | null | undefined): string {
+  if (!m) return 'an unrecorded model';
+  if (MODEL_NAME[m]) return MODEL_NAME[m]!;
+  const c = /^claude-([a-z]+)-(\d+)-(\d+)/.exec(m); if (c) return `${MODEL_NAME[c[1]!] ?? c[1]} ${c[2]}.${c[3]}`;
+  const g = /^gpt-([\d.]+)(?:-([a-z]+))?/.exec(m); if (g) return `GPT-${g[1]}${g[2] ? ` ${g[2][0]!.toUpperCase()}${g[2].slice(1)}` : ''}`;
+  return m;
+}
+// Who an invocation was, from its run record (or, for older logs, its prompt fingerprint).
+export function whoOf(e: LogEvent): { role: string; who: string } | null {
+  if (e.event !== 'prompt') return null;
+  const r = e.run, fp = /^(\w+) model=(\S+) effort=(\S+)/.exec(e.detail || '');
+  const role = r?.role ?? fp?.[1]; if (!role) return null;
+  const model = r ? r.model : fp![2] === '-' ? null : fp![2]!, effort = r ? r.effort : fp![3] === '-' ? null : fp![3]!;
+  const extras = [r?.fallback ? 'fallback' : '', r?.resumed ? 'same session' : ''].filter(Boolean);
+  return { role, who: `${modelName(model)}${effort ? ` · ${effort}` : ''}${extras.length ? ` (${extras.join(', ')})` : ''}` };
 }
 
 // ---- plain sentences ----
@@ -116,6 +137,7 @@ const CYCLE_START: Record<string, string> = { retrying: 'before a person retried
 export function buildStory(inp: StoryInput): Story {
   const f = inp.feature, runs = [...inp.runs].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), used = new Set<StoryRun>();
   const cycles: Cycle[] = [{ tries: [] }];
+  let pendingWho: string | null = null;
   let tr: Try | null = null, pendingNote: string | null = null, testsInTry = 0, reviewsInTry = 0, envRetest = false, lateMerge: string | null = null;
   const cyc = () => cycles[cycles.length - 1]!, orphans: { when: string; text: string }[] = []; // failures logged outside any recorded try
   const st = { open: null as Step | null }; // the running step (a holder: closures reassign it)
@@ -171,6 +193,15 @@ export function buildStory(inp: StoryInput): Story {
       else lateMerge = e.ts;
       continue;
     }
+    if (tr && e.event === 'prompt') {
+      const w = whoOf(e), s = st.open;
+      if (w && s) {
+        const fits = w.role === 'builder' ? ['build', 'fix', 'save', 'reused'].includes(s.kind) : w.role === 'resolver' ? s.kind === 'resolve' : w.role === 'evaluator' ? s.kind === 'review' : false;
+        if (fits) s.who = `${w.role === 'evaluator' ? 'Reviewed by' : w.role === 'resolver' ? 'Combined by' : 'Built by'} ${w.who}`;
+        if (w.role === 'diagnoser') pendingWho = `Diagnosed by ${w.who}`;
+      }
+      continue;
+    }
     if (!tr) { if (e.event === 'failed' || e.event === 'stuck') orphans.push({ when: e.ts, text: `A failure whose try was not recorded: ${reasonOf(e.detail)}.` }); continue; }
     switch (e.event) {
       case 'build-skipped': if (st.open && st.open.kind === 'build') { st.open.kind = 'reused'; st.open.label = 'Build'; close(e.ts, 'reused', /held after an environmental/.test(d) ? 'Reused the build held after an environment fault.' : /revalidating/.test(d) ? 'Reused the build that already passed review; checking it again on the newer main.' : 'Reused the build made before the factory stopped.'); } break;
@@ -195,7 +226,8 @@ export function buildStory(inp: StoryInput): Story {
       case 'diagnosis': {
         if (st.open?.kind === 'test') close(e.ts, 'failed', testFailText(undefined, ''));
         const m = /^(code|test|environment): (.*)$/.exec(d);
-        push({ kind: 'diagnose', label: 'Diagnose', state: m ? 'done' : 'info', text: m ? `Found a ${m[1]} problem: ${sentence(m[2]!, 150)}` : 'The diagnosis did not produce a usable answer.', start: e.ts, end: e.ts });
+        push({ kind: 'diagnose', label: 'Diagnose', state: m ? 'done' : 'info', text: m ? `Found a ${m[1]} problem: ${sentence(m[2]!, 150)}` : 'The diagnosis did not produce a usable answer.', start: e.ts, end: e.ts, ...(pendingWho ? { who: pendingWho } : {}) });
+        pendingWho = null;
         st.open = null; break;
       }
       case 'env-rerun': if (st.open?.kind === 'test') close(e.ts, 'failed', testFailText(e)); envRetest = true; break;
@@ -211,6 +243,7 @@ export function buildStory(inp: StoryInput): Story {
       case 'merge-failed': case 'merge-hook-failed': case 'merge-skipped':
         if (st.open?.kind === 'review') closeReview(e.ts, 'done', '');
         push({ kind: 'merge', label: 'Merge', state: 'failed', text: e.event === 'merge-hook-failed' ? 'The merge check failed; the work went back to the queue.' : `The merge could not finish: ${reasonOf(d)}.`, start: e.ts, end: e.ts }); st.open = null; break;
+      case 'codex-fallback': if (st.open) st.open.note = `${st.open.note ? st.open.note + ' ' : ''}Codex was unavailable; a Claude model stood in.`; break;
       case 'interrupted': if (st.open) close(e.ts, 'interrupted', `${st.open.text.replace(/\.$/, '')} (interrupted).`);
         push({ kind: 'stop', label: 'Sent back', state: 'info', text: 'The factory stopped mid-step; the feature went back to the queue on the same try (no retry used).', start: e.ts, end: e.ts }); break;
       case 'refresh-skipped': case 'recovered':

@@ -81,3 +81,4 @@
   .b-issue.none{display:none}
 }
 @media (max-width:700px){.b-grid{grid-template-columns:minmax(0,1fr)}.b-time{min-width:0}}
+.b-who{color:var(--muted);font-size:11.5px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

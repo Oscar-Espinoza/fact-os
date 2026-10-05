@@ -10,7 +10,7 @@ import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, 
 import { escalates, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { testFailure } from './story.ts';
-import { IN_FLIGHT, type BaseDefect, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
+import { IN_FLIGHT, ISSUE_KINDS, type IssueKind, type BaseDefect, type RunPhase, type RunRecord, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
@@ -56,7 +56,10 @@ export function parseVerdict(text: unknown): Verdict {
     if (!nonempty(f.check)) return fail(`${at}.check must be a nonempty string`);
     if (typeof f.ok !== 'boolean') return fail(`${at}.ok must be a boolean`);
     if (!nonempty(f.evidence)) return fail(`${at}.evidence must be a nonempty string`);
-    findings.push({ check: f.check, ok: f.ok, evidence: f.evidence });
+    // Optional attribution: a malformed criterion or kind is dropped; it never removes or invalidates the finding.
+    const criterion = Number.isInteger(f.criterion) && (f.criterion as number) > 0 ? f.criterion as number : typeof f.criterion === 'string' && /^extra:[\w .-]{1,60}$/.test(f.criterion) ? f.criterion : undefined;
+    const kind = !f.ok && typeof f.kind === 'string' && (ISSUE_KINDS as readonly string[]).includes(f.kind) ? f.kind as IssueKind : undefined;
+    findings.push({ check: f.check, ok: f.ok, evidence: f.evidence, ...(criterion !== undefined ? { criterion } : {}), ...(kind ? { kind } : {}) });
   }
   const lists = { cheating: [] as string[], blocking: [] as string[], notes: [] as string[] };
   for (const field of ['cheating', 'blocking', 'notes'] as const) {
@@ -87,12 +90,13 @@ export function parseVerdict(text: unknown): Verdict {
   const lesson = typeof v.lesson === 'string' && v.lesson.trim() ? v.lesson.trim() : null;
   // Display only: a missing or malformed summary is dropped, never a reason to reject the verdict.
   const summary = typeof v.summary === 'string' && v.summary.trim() && v.summary.length <= 400 ? v.summary.trim().replace(/\s+/g, ' ') : null;
+  const bk = Array.isArray(v.blockingKinds) && v.blockingKinds.length === blocking.length ? v.blockingKinds.map((k: unknown) => (typeof k === 'string' && (ISSUE_KINDS as readonly string[]).includes(k) ? k as IssueKind : null)) : null;
   // A blocking problem fails the feature even when every acceptance check is ok: the evaluator used to find real defects,
   // write them into a note or the lesson, and pass anyway.
   // A defect on base also prevents a merge, but is not a contradiction of pass:true by itself (see baseOnly).
   const pass = v.pass && findings.length > 0 && findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0 && baseDefects.length === 0;
   const contradicted = v.pass && !(findings.every((f) => f.ok === true) && cheating.length === 0 && blocking.length === 0 && baseDefects.length === 0);
-  return { pass, findings, cheating, blocking, notes, lesson, ...(summary ? { summary } : {}), ...(baseDefects.length ? { baseDefects } : {}), ...(contradicted ? { error: `pass:true contradicted by findings, cheating${baseDefects.length ? ', blocking or baseDefects' : ' or blocking'}` } : {}) };
+  return { pass, findings, cheating, blocking, notes, lesson, ...(summary ? { summary } : {}), ...(bk && bk.some(Boolean) ? { blockingKinds: bk } : {}), ...(baseDefects.length ? { baseDefects } : {}), ...(contradicted ? { error: `pass:true contradicted by findings, cheating${baseDefects.length ? ', blocking or baseDefects' : ' or blocking'}` } : {}) };
 }
 
 // A rejection whose only failing content is defects reproduced on base: no cheating or blocking entry, and every failed finding
@@ -370,7 +374,9 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     'is the feature\'s. ' +
     'Answer with ONLY a JSON object: {"pass": boolean, "findings": [{"check": string, "ok": boolean, "evidence": string}], ' +
     '"cheating": string[], "blocking": string[], "notes": string[], "lesson": string|null, "summary": string, "baseDefects"?: [...]}. "summary" is one plain ' +
-    'sentence on the decisive outcome, for a person skimming (no paths or code). One finding per acceptance check, plus one ' +
+    'sentence on the decisive outcome, for a person skimming (no paths or code). Each finding may carry "criterion" (the 1-based number of the ' +
+    'acceptance check it judges, as listed above, or "extra:<name>" for other checks) and, when not ok, "kind" (one of ' + ISSUE_KINDS.join(', ') + '); ' +
+    'add "blockingKinds" (one kind per blocking entry, same order) when you can. One finding per acceptance check, plus one ' +
     '"production wiring" finding; "pass" only if every finding is ok and cheating and blocking are empty. Evidence names files, ' +
     'lines, the tests you ran and what the mutation check showed.',
     edits.length ? `\nExisting tests this branch changes (tests that already exist on ${config.base}). Justify each change from the acceptance ` +
@@ -754,7 +760,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         const fcfg: RoleConfig = { permissionMode: cfg.permissionMode, ...config.codex.fallback, provider: 'claude' };
         log(root, id, 'codex-fallback', `${why}; ${[fcfg.model, fcfg.effort].filter(Boolean).join(' ') || 'claude'} instead`);
         out(`codex ${id}: ${why.split('\n')[0]}; falling back to ${fcfg.model ?? 'claude'}`);
-        recordPrompt(role, prompt, null, fcfg);
+        recordPrompt(role, prompt, null, fcfg, role === 'evaluator' ? 'review' : 'diagnose');
         return { ...await claude(role, prompt, file, { cfg: fcfg }), cleaned };
       };
       const cooling = codexCooling();
@@ -785,10 +791,13 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     // The per-model notes (notes.ts) for the model this role launches with; read once per prompt, so the text in the prompt
     // and the `notes=` in its fingerprint are the same version.
     const notesFor = (role: Role) => readNotes(root, roleCfg(role).model, role);
-    const recordPrompt = (role: Role, prompt: string, notes: string | null, cfg?: RoleConfig) => {
+    const recordPrompt = (role: Role, prompt: string, notes: string | null, cfg?: RoleConfig, phase?: RunPhase, resumed = false) => {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
-      log(root, id, 'prompt', promptFingerprint(role, cfg ?? roleCfg(role), role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
-        profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes, cfg ? null : tierApplies(config, profile, role, f)));
+      const used = cfg ?? roleCfg(role), tier = cfg ? null : tierApplies(config, profile, role, f);
+      const run: RunRecord = { phase: phase ?? (role === 'evaluator' ? 'review' : role === 'resolver' ? 'resolve' : 'build'), tag, role, provider: used.provider ?? 'claude',
+        model: used.model ?? null, effort: used.effort ?? null, tier: tier ?? null, resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}) };
+      log(root, id, 'prompt', promptFingerprint(role, used, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
+        profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes, tier), undefined, { run });
     };
     // A conflicted refresh resolved at once by a resolver run (config.resolver), in this same pass: the feature keeps its slot
     // and its claims, and goes on to test and evaluation. Returns the note for the evaluator, or null when the feature went
@@ -801,7 +810,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       out(`resolve ${id}: ${rec.files.join(', ')}`);
       const rn = notesFor('resolver');
       const rp = resolverPrompt(root, config, f, branch, pending?.text || cur.lastFeedback || '', notesBlock(roleCfg('resolver').model, 'resolver', rn), mockTasks);
-      recordPrompt('resolver', rp, rn);
+      recordPrompt('resolver', rp, rn, undefined, 'resolve');
       const r = await claude('resolver', rp, `${tag}-resolve.json`);
       if (await stopped()) return null;
       const tip = git(['rev-parse', branch], wt).out, has = (c: string) => git(['merge-base', '--is-ancestor', c, tip], wt).code === 0;
@@ -907,7 +916,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     if (!skipBuild) {
     const bn = notesFor('builder');
     const bp = builderPrompt(root, config, f, branch, mockTasks, hotHeld, notesBlock(roleCfg('builder').model, 'builder', bn));
-    recordPrompt('builder', bp, bn);
+    recordPrompt('builder', bp, bn, undefined, 'build');
     const b = await claude('builder', bp, `${tag}-build.json`);
     if (await stopped()) return;
     if (!b.ok) return fail(`builder failed: ${b.error}`);
@@ -945,7 +954,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         log(root, id, 'commit-fix', 'resuming the builder to commit work it left uncommitted');
         out(`fix ${id}: work left uncommitted; resuming the builder to commit it`);
         const cfp = commitFixPrompt(config, cp.text);
-        recordPrompt('builder', cfp, builderNotes);
+        recordPrompt('builder', cfp, builderNotes, undefined, 'commit', true);
         const r = await claude('builder', cfp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
         if (await stopped()) return false;
         if (!r.ok) { await fail(`builder failed: ${r.error}`); return false; }
@@ -971,7 +980,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       log(root, id, 'keep-fix', 'resuming the builder to restore or declare lines its merge resolution lost');
       out(`fix ${id}: the merge resolution lost lines; resuming the builder`);
       const kp = keepFixPrompt(config, rc.lost);
-      recordPrompt('builder', kp, builderNotes);
+      recordPrompt('builder', kp, builderNotes, undefined, 'fix-keep', true);
       const r = await claude('builder', kp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
       if (await stopped()) return;
       if (!r.ok) return fail(`builder failed: ${r.error}`);
@@ -1006,7 +1015,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       log(root, id, 'progress-fix', `resuming the builder: the branch still has the content the evaluator rejected (${f.rejected!.sha.slice(0, 12)})`);
       out(`fix ${id}: no change since the rejected commit; resuming the builder`);
       const pp = progressFixPrompt(config, rejection);
-      recordPrompt('builder', pp, builderNotes);
+      recordPrompt('builder', pp, builderNotes, undefined, 'fix-progress', true);
       const r = await claude('builder', pp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
       if (await stopped()) return;
       if (!r.ok) return fail(`builder failed: ${r.error}`);
@@ -1023,7 +1032,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       log(root, id, 'gate-fix', d ? `resuming the builder with a ${d.fault} diagnosis` : 'resuming the builder after a test-gate failure', undefined, { test: testOutcome(failure) });
       out(`fix ${id}: the test gate failed; resuming the builder${d ? ' with the diagnosis' : ''}`);
       const fp = gateFixPrompt(config, failure, d, config.diagnoser?.model);
-      recordPrompt('builder', fp, builderNotes);
+      recordPrompt('builder', fp, builderNotes, undefined, 'fix-gate', true);
       const r = await claude('builder', fp, `${tag}-build.json`, { extra: ['--resume', builderSession!] });
       if (await stopped()) return 'done';
       if (!r.ok) { await fail(`builder failed: ${r.error}`); return 'done'; }
@@ -1039,6 +1048,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const mb = git(['merge-base', config.base, head], wt).out;
       const prompt = diagnosisPrompt(config, f, branch, failure, git(['diff', '--stat=160', `${mb}..${head}`], wt).out, testEdits(wt, mb, head), mockTasks);
       writeFileSync(join(runDir, `${tag}-diagnose.prompt.md`), prompt);
+      log(root, id, 'prompt', `diagnoser model=${dcfg.model || '-'} effort=${dcfg.effort || '-'}`, undefined, { run: { phase: 'diagnose', tag, role: 'diagnoser', provider: dcfg.provider ?? 'claude',
+        model: dcfg.model ?? null, effort: dcfg.effort ?? null, tier: null, resumed: false, promptBytes: Buffer.byteLength(prompt) } });
       const r = await agent('builder', prompt, `${tag}-diagnose.json`, { cfg: dcfg });
       if (await stopped()) return 'stopped';
       if (r.cleaned || git(['rev-parse', 'HEAD'], wt).out !== head || git(['status', '--porcelain'], wt).out) { // read-only, or nothing
@@ -1141,7 +1152,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if (edits.length) log(root, id, 'test-edits', edits.join('; '));
       const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks);
       const epPinned = `${ep}\nFor "baseDefects": the base commit of this evaluation is ${evalBase} and the feature commit is ${sha}; reproduce on exactly those and report them as "baseSha" and "featureSha".`;
-      recordPrompt('evaluator', epPinned, en);
+      recordPrompt('evaluator', epPinned, en, undefined, 'review');
       const e = await agent('evaluator', epPinned, `${tag}-eval.json`);
       if (await stopped()) return;
       const v0: Verdict = e.ok ? parseVerdict(e.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${e.error}` };
@@ -1182,7 +1193,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         log(root, id, 'review-fix', 'resuming the builder with the evaluator\'s findings');
         out(`fix ${id}: the evaluator rejected it; resuming the builder`);
         const rp = reviewFixPrompt(config, feedbackFromVerdict(v));
-        recordPrompt('builder', rp, builderNotes);
+        recordPrompt('builder', rp, builderNotes, undefined, 'fix-review', true);
         const r = await claude('builder', rp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
         if (await stopped()) return;
         if (!r.ok) return fail(`builder failed: ${r.error}`);

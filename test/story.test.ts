@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStory, builderText, firstSentence, queueNote, reasonOf, reviewHeadline, testFailure, transitions, type StoryRun } from '../lib/story.ts';
+import { buildStory, builderText, firstSentence, modelName, queueNote, reasonOf, reviewHeadline, testFailure, transitions, type StoryRun } from '../lib/story.ts';
 import type { Feature, LogEvent, Verdict } from '../lib/types.ts';
 
 const F = (o: Partial<Feature> = {}): Feature => ({ id: 'a', title: 'Fix the store restore test', description: 'd', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
@@ -163,4 +163,15 @@ test('transitions: a base-defect hold and its release keep the same try in the f
   const t = transitions([ev('launch'), ev('failed', 'BASE', { cause: 'base-defect', stop: { attempt: 1, counted: false } }), ev('planning-hold-released', 'recheck'), ev('launch')], { a: 'A' }, 3, 'main');
   assert.ok(!t.some((x) => /Started try 2/.test(x.text)));
   assert.equal(t[0]!.text, 'Resumed try 1.');
+});
+
+test('who ran each step: the run record names the model and effort; older fingerprints still work; a fallback and a resumed session are said', () => {
+  clock = Date.parse('2026-10-04T20:00:00Z');
+  const run = (role: string, model: string, effort: string, o = {}) => ({ run: { phase: 'build' as const, tag: '1', role, provider: 'claude', model, effort, tier: null, resumed: false, promptBytes: 10, ...o } });
+  const events = [ev('launch'), ev('prompt', 'builder model=sonnet effort=high', run('builder', 'sonnet', 'high')), ev('testing', 'sha1'), ev('evaluating'),
+    ev('prompt', 'evaluator model=gpt-6.1-sol effort=xhigh'), ev('review-fix', 'resuming'), ev('prompt', 'builder', run('builder', 'opus', 'high', { resumed: true, fallback: true })),
+    ev('testing', 'sha2'), ev('evaluating'), ev('merged', 'task/a')];
+  const s = buildStory({ feature: F({ status: 'merged' }), events, runs: [], maxAttempts: 3, base: 'main' });
+  assert.deepEqual(s.current!.steps.map((x) => x.who ?? null), ['Built by Sonnet · high', null, 'Reviewed by GPT-6.1 Sol · xhigh', 'Built by Opus · high (fallback, same session)', null, null, null]);
+  assert.equal(modelName('claude-opus-5-5'), 'Opus 5.5'); assert.equal(modelName(null), 'an unrecorded model');
 });

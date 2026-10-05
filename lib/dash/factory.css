@@ -160,3 +160,4 @@ a.fx-bay:hover{filter:brightness(1.07)}
   .jf-row{grid-template-columns:56px minmax(0,1fr)}
   .jf-row .jb{grid-column:2;justify-self:start}
 }
+.fx .fx-who{display:block;color:#93a1b5;font-size:11px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

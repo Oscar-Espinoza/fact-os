@@ -199,7 +199,11 @@ export interface HumanFile { tasks: HumanTask[] }
 export interface StateFiles { features: FeaturesFile; human: HumanFile }
 export type StateName = keyof StateFiles;
 
-export interface Finding { check: string; ok: boolean; evidence: string }
+// Issue kinds a reviewer may tag (what is wrong, not why it happened: causes are the observer's hypotheses).
+export const ISSUE_KINDS = ['duplicated-helper', 'missing-wiring', 'evidence-missing', 'contract-mismatch', 'weak-test', 'defect-money-auth-tenant', 'defect-state-concurrency', 'scope', 'other'] as const;
+export type IssueKind = typeof ISSUE_KINDS[number];
+// `criterion`: the 1-based index of the acceptance item it judges (as listed in the reviewed spec) or `extra:<name>`; `kind` on a failed finding.
+export interface Finding { check: string; ok: boolean; evidence: string; criterion?: number | string; kind?: IssueKind }
 // A failure the evaluator reproduced on the base commit as well, with the same signature: not this feature's to fix.
 export interface BaseDefect { check: string; command: string; signature: string; baseSha: string; featureSha: string; evidence: string; paths?: string[];
   setup?: string; baseOutput?: string; featureOutput?: string } // the reproduction: equivalent setup, and each run's failing output
@@ -207,8 +211,15 @@ export interface Verdict {
   pass: boolean; findings: Finding[]; cheating: string[]; blocking: string[]; notes: string[]; lesson: string | null; error?: string;
   baseDefects?: BaseDefect[]; // failures reproduced on base too; each names the failed finding (check) it explains
   summary?: string;           // optional: one plain sentence on the decisive outcome (display only; never decides pass or fail)
+  blockingKinds?: (IssueKind | null)[]; // optional, aligned with `blocking`: each entry's issue kind (a bad value is dropped, never the blocker)
   diagnostic?: string; // bounded unvalidated original output, only on JSON/root/schema rejection
 }
+
+// One agent invocation, as the foreman launched it (the run ledger). `model`/`effort` are what was requested; the run artifact
+// holds what the provider reports. `phase` tells a first build from each kind of repair, a review and a diagnosis.
+export type RunPhase = 'build' | 'commit' | 'fix-gate' | 'fix-review' | 'fix-keep' | 'fix-progress' | 'resolve' | 'review' | 'diagnose';
+export interface RunRecord { phase: RunPhase; tag: string; role: string; provider: string; model: string | null; effort: string | null; tier: string | null;
+  resumed: boolean; fallback?: boolean; promptBytes: number; rule?: string }
 
 // log.jsonl
 export interface LogEvent {
@@ -219,6 +230,7 @@ export interface LogEvent {
   sha?: string;                      // the commit that cause was diagnosed on
   inputs?: string;                   // launch event: holdInputs of the launched spec (a planning hold must match it)
   test?: { code: number | null; file: string | null; error: string | null }; // gate-fix / env-rerun / failed: the failed gate's outcome
+  run?: RunRecord;                   // prompt event: who ran this invocation, in which phase, with what (the run ledger)
   // Foreman-generated whole-file SHA-256 chain, published under the checkout lock.
   lessonAppend?: { file: string; before: string; after: string };
 }

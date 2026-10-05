@@ -12,7 +12,7 @@ import { act, ACTIONS, type Action } from './actions.ts';
 import { observerPaths, observerConfig, recurringTests, hotFiles, unpricedRun, type ObserverState, type Era } from './observe.ts';
 import { promptSummary, type PromptSummary } from './promptreview.ts';
 import { readNotes } from './notes.ts';
-import { buildStory, transitions, queueNote, type Story, type StoryRun, type Transition } from './story.ts';
+import { buildStory, transitions, queueNote, whoOf, type Story, type StoryRun, type Transition } from './story.ts';
 import { profileNames, profileLabel, roleTable, validProfile, type RoleRow } from './profiles.ts';
 import { IN_FLIGHT, type ActivityEvent, type Config, type Control, type Diagnosis, type Feature, type Finding, type HumanTask, type LogEvent, type MergeMode, type RoleConfig } from './types.ts';
 
@@ -23,6 +23,7 @@ export interface ProjectState {
   ready: string[]; waiting: string[]; activity: ActivityEvent[]; events: LogEvent[];
   transitions: Transition[];           // the last meaningful changes, one plain line each (story.ts)
   queueNotes: Record<string, string>;  // todo feature id → why it is queued or waiting, in one line
+  running: Record<string, string>;     // in-flight feature id → who is working on it now ("Built by Sonnet · high")
   config?: Pick<Config, 'base' | 'maxParallel' | 'maxAttempts' | 'groupBy'> & { builder: RoleConfig; evaluator: RoleConfig };
   foreman: { running: boolean; since: string | null };
   stageSince: Record<string, string>;  // in-flight feature id → ISO start of its current stage
@@ -268,7 +269,7 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[], events: 
 const projectViewFile = (dir: string) => join(paths(dir).dir, 'project-view.html');
 
 function projectState(dir: string): ProjectState {
-  const base = { path: dir, name: basename(dir), features: [], tasks: [], ready: [], waiting: [], activity: [], events: [], transitions: [] as Transition[], queueNotes: {} as Record<string, string>,
+  const base = { path: dir, name: basename(dir), features: [], tasks: [], ready: [], waiting: [], activity: [], events: [], transitions: [] as Transition[], queueNotes: {} as Record<string, string>, running: {} as Record<string, string>,
     foreman: foreman(dir), stageSince: {}, estimates: { build: null, test: null, eval: null }, hasProjectView: existsSync(projectViewFile(dir)),
     stats: { mergedAt: [], costToday: 0, costYesterday: 0 }, observer: null as ObserverSummary | null, ...(repoUrl(dir) ? { repoUrl: repoUrl(dir) } : {}) };
   try {
@@ -277,6 +278,10 @@ function projectState(dir: string): ProjectState {
     return { ...base, merge: config.merge, branchPrefix: config.branchPrefix, features, tasks, ready: a.ready, waiting: a.waiting,
       activity: tailLines(paths(dir).activity, 200).map(tryJson).filter(Boolean) as ActivityEvent[], events: events.slice(-80),
       transitions: transitions(events, Object.fromEntries(features.map((f) => [f.id, f.shortTitle || f.title])), config.maxAttempts, config.base, 12),
+      running: Object.fromEntries(features.filter((f) => IN_FLIGHT.includes(f.status)).flatMap((f) => {
+        const e = [...events].reverse().find((x) => x.feature === f.id && x.event === 'prompt'), w = e && whoOf(e);
+        return w ? [[f.id, `${w.role === 'evaluator' ? 'Reviewed by' : w.role === 'resolver' ? 'Combined by' : w.role === 'diagnoser' ? 'Diagnosed by' : 'Built by'} ${w.who}`]] : [];
+      })),
       queueNotes: Object.fromEntries(features.flatMap((f) => {
         const unmet = (f.deps || []).map((d) => features.find((x) => x.id === d)).filter((x): x is Feature => !!x && x.status !== 'merged').map((x) => ({ title: x.shortTitle || x.title }));
         const task = tasks.find((t) => t.status === 'open' && !t.mockable && (t.unblocks || []).includes(f.id));

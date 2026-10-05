@@ -182,3 +182,4 @@ details.d-sm>summary{font-size:12px;color:var(--dim)}
 @media (prefers-reduced-motion:reduce){#detail *{animation:none!important}}
 
 #detail .d-stale{color:var(--amber);font-size:13px;margin:6px 0 0}
+#detail .d-who{display:block;color:var(--dim);font-size:12px;font-family:var(--mono);margin-top:2px}
