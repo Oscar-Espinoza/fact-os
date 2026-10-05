@@ -1,4 +1,6 @@
 // Dashboard: one page across every project under --root, bound to 127.0.0.1.
+import { readAtoms } from './context.ts';
+import type { Scorecard } from './scorecard.ts';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readdirSync, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
@@ -49,6 +51,9 @@ export interface ObserverSummary {
   decisions: Diagnosis[]; causes24h: { cause: string; n: number }[]; recurring: { test: string; features: string[] }[];
   improvements: { id: string; title: string; status: string }[]; sentBack24h: number; bounces24h: number; hotFiles: { file: string; n: number }[]; improveAt?: string; agentNotes?: string; agents: Era[]; prompts: PromptSummary; proposals: { id: string; title: string }[]; holds: { id: string; cause: string; confidence: string; evidence: string[] }[];
   conflicts24h: Conflict[]; titles: Record<string, string>; // titles: feature id → title, for every id the view shows
+  scorecard?: Scorecard;
+  // What the factory learned and changed: context pointers by status, and its latest learning events (pointers, notes, escalations).
+  learning: { atoms: Record<string, number>; recent: { ts: string; text: string }[] };
 }
 // One merge conflict followed to its outcome (see conflictTimeline). `resolving`: the resolver is working on it right now.
 export interface Conflict {
@@ -262,8 +267,23 @@ function observer(dir: string, features: Feature[], tasks: HumanTask[], events: 
       ...(o.improveAt ? { improveAt: o.improveAt } : {}), agents: Array.isArray(o.agents) ? o.agents : [], prompts: promptSummary(o, (model, role) => readNotes(dir, model, role) ?? ''), ...(o.agentNotes ? { agentNotes: o.agentNotes } : {}),
       proposals: tasks.filter((t) => t.status === 'open' && t.id.startsWith('observer-')).map((t) => ({ id: t.id, title: t.title })),
       holds: features.filter((f) => f.status === 'todo' && f.planningHold).map((f) => ({ id: f.id, cause: f.planningHold!.cause, confidence: f.planningHold!.confidence, evidence: f.planningHold!.evidence })),
-      conflicts24h: conflictTimeline(events.filter((e) => Date.parse(e.ts) >= since - 3600e3), Date.now(), titles), titles };
+      conflicts24h: conflictTimeline(events.filter((e) => Date.parse(e.ts) >= since - 3600e3), Date.now(), titles), titles,
+      ...(o.scorecard ? { scorecard: o.scorecard } : {}), learning: learningOf(dir, events) };
   } catch { return null; }
+}
+
+// Learning, as a person reads it: verified pointers added or retired, notes rewritten, a fresh try escalated by the ladder.
+function learningOf(dir: string, events: LogEvent[]): ObserverSummary['learning'] {
+  const atoms: Record<string, number> = {};
+  for (const a of readAtoms(paths(dir).dir).atoms) atoms[a.status] = (atoms[a.status] ?? 0) + 1;
+  const text = (e: LogEvent): string | null => {
+    if (e.event === 'observer-atom') { const m = /^(A\w+) (verified|retired|quarantined|proposed)(?: from \S+)?: (.*)$/.exec(e.detail || '');
+      return m ? ({ verified: 'Added a verified pointer', retired: 'Retired a pointer', quarantined: 'Paused a pointer (its code changed)', proposed: 'Proposed a pointer' } as Record<string, string>)[m[2]!]! + `: ${m[3]}` : null; }
+    if (e.event === 'observer-notes') return `Updated prompt notes for ${e.detail}`;
+    if (e.event === 'prompt' && e.run?.rule?.includes('→')) return `${e.feature}: fresh try escalated, ${e.run.rule.replace(/^ladder: /, '')}`;
+    return null;
+  };
+  return { atoms, recent: events.flatMap((e) => { const t = text(e); return t ? [{ ts: e.ts, text: t }] : []; }).slice(-8).reverse() };
 }
 
 const projectViewFile = (dir: string) => join(paths(dir).dir, 'project-view.html');

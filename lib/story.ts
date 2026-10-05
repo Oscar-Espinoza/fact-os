@@ -44,7 +44,7 @@ export function whoOf(e: LogEvent): { role: string; who: string } | null {
   const r = e.run, fp = /^(\w+) model=(\S+) effort=(\S+)/.exec(e.detail || '');
   const role = r?.role ?? fp?.[1]; if (!role) return null;
   const model = r ? r.model : fp![2] === '-' ? null : fp![2]!, effort = r ? r.effort : fp![3] === '-' ? null : fp![3]!;
-  const extras = [r?.fallback ? 'fallback' : '', r?.resumed ? 'same session' : ''].filter(Boolean);
+  const extras = [r?.fallback ? 'fallback' : '', r?.resumed ? 'same session' : '', r?.rule?.includes('→') ? 'escalated after earlier failures' : ''].filter(Boolean);
   return { role, who: `${modelName(model)}${effort ? ` · ${effort}` : ''}${extras.length ? ` (${extras.join(', ')})` : ''}` };
 }
 

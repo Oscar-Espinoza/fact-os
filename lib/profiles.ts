@@ -1,7 +1,7 @@
 // Model profiles: which model and effort each role runs with, switched at runtime in control.json (`profile`). "opus", the
 // main mode, is each role's own config; any other profile overrides model/effort for the roles it names (permissionMode
 // always stays the role's). Pure: no I/O, so the foreman, the observer, the CLI and the dashboard resolve roles alike.
-import { PROFILE_ROLES, TIERS, TIER_ROLES, type Config, type Feature, type Profile, type ProfileEntry, type ProfileRole, type RoleConfig, type Tier, type TierEntry } from './types.ts';
+import { PROFILE_ROLES, TIERS, TIER_ROLES, type Config, type Feature, type LogEvent, type Profile, type ProfileEntry, type ProfileRole, type RoleConfig, type Tier, type TierEntry } from './types.ts';
 
 export const OPUS = 'opus';
 // Fable thinks (evaluation, the observer's improver, lessons curation); Sonnet writes the code (builder, merge resolver).
@@ -108,6 +108,34 @@ export function resolveRole(config: Config, profile: string | null, role: Profil
   return { ...r, ...(t?.model ? { model: t.model } : {}), ...(t?.effort ? { effort: t.effort } : {}), ...(t?.provider ? { provider: t.provider } : {}) };
 }
 
+// ---- retry ladder ----
+
+// Counted failures a fresh try may escalate for: the builder's own code failed its checks or its review, in the current cycle
+// (a person's retry, the observer's, a requirements update or a split starts a new one). Uncounted stops (environment, base
+// defects, interruptions), merge handling and inline repairs never count. Capped by the feature's spent attempts.
+const LADDER_FAILURE = /^(FAILED |CHEATING:|BLOCKING:|test command `)/m; // "Evaluator: …" is the review run failing, not the build
+const CYCLE_RESET = new Set(['retrying', 'observer-retry', 'acceptance-changed', 'superseded']);
+export function ladderFailures(events: Pick<LogEvent, 'feature' | 'event' | 'detail' | 'stop' | 'attemptsReset' | 'cause'>[], id: string, attempts: number): number {
+  let n = 0;
+  for (const e of events) {
+    if (e.feature !== id) continue;
+    if (CYCLE_RESET.has(e.event) || (e.event === 'resumed' && e.attemptsReset)) n = 0;
+    else if (e.event === 'failed' && e.stop?.counted && e.cause !== 'environment' && e.cause !== 'base-defect' && LADDER_FAILURE.test(e.detail || '')) n++;
+  }
+  return Math.min(n, Math.max(0, attempts));
+}
+// The builder config a fresh try uses after `failures` counted failures: `steps` rungs up the profile's ladder from where the
+// profile and tier put it. Null when the profile has no ladder, nothing failed, or the starting config is not a rung.
+export function ladderStep(config: Config, profile: string | null, base: RoleConfig, failures: number): { cfg: RoleConfig; rule: string } | null {
+  const ladder = profile == null || profile === OPUS ? undefined : profiles(config)[profile]?.ladder;
+  if (!ladder?.length || failures <= 0) return null;
+  const at = ladder.findIndex((r) => r.model === base.model && r.effort === base.effort);
+  if (at < 0) return null;
+  const to = Math.min(at + failures, ladder.length - 1), r = ladder[to]!, n = `${failures} counted failure${failures === 1 ? '' : 's'} this cycle`;
+  return to === at ? { cfg: base, rule: `ladder: ${n}; already on the top rung (${r.model} ${r.effort}), no further approved escalation` }
+    : { cfg: { ...base, model: r.model, effort: r.effort }, rule: `ladder: ${n} → ${r.model} ${r.effort} (from ${base.model} ${base.effort})` };
+}
+
 export interface RoleRow { role: ProfileRole; model: string | null; effort: string | null; effortHigh?: string; fromProfile: boolean }
 // Every role as `profile` resolves it, for the dashboard tooltip, /api/state and `fact-os profile`. `agent`: the observer's
 // agent config (what `observe --agent` would use).
@@ -122,6 +150,17 @@ export function roleTable(config: Config, profile: string | null, agent: RoleCon
 // Codex runs only the read-only roles: a provider is "claude" or, for the evaluator, "codex".
 const providerProblems = (path: string, role: string, v: unknown): string[] =>
   v === 'claude' || (v === 'codex' && role === 'evaluator') ? [] : [`${path}.provider must be "claude"${role === 'evaluator' ? ' or "codex"' : ' (only the evaluator can use "codex")'}`];
+function ladderProblems(path: string, raw: unknown): string[] {
+  if (!Array.isArray(raw) || raw.length < 2) return [`${path} must be an array of at least two {model, effort} rungs, weakest first`];
+  const out: string[] = [], seen = new Set<string>();
+  raw.forEach((r, i) => {
+    if (!isObj(r) || typeof r.model !== 'string' || !r.model.trim() || typeof r.effort !== 'string' || !r.effort.trim() || Object.keys(r).some((k) => k !== 'model' && k !== 'effort'))
+      return void out.push(`${path}[${i}] must be {model, effort} with non-empty strings`);
+    if (seen.has(`${r.model} ${r.effort}`)) out.push(`${path}[${i}] repeats ${r.model} ${r.effort}`);
+    seen.add(`${r.model} ${r.effort}`);
+  });
+  return out;
+}
 function tierProblems(path: string, raw: unknown): string[] {
   if (!isObj(raw)) return [`${path} must be an object of {tier: {role: {model?, effort?, provider?}}}`];
   const out: string[] = [];
@@ -150,6 +189,7 @@ export function profileProblems(raw: unknown): string[] {
     if (!isObj(p)) { out.push(`config.profiles.${name} must be an object of roles`); continue; }
     for (const [role, e] of Object.entries(p)) {
       if (role === 'tiers') { out.push(...tierProblems(`config.profiles.${name}.tiers`, e)); continue; }
+      if (role === 'ladder') { out.push(...ladderProblems(`config.profiles.${name}.ladder`, e)); continue; }
       if (!(PROFILE_ROLES as string[]).includes(role)) { out.push(`config.profiles.${name}.${role}: unknown role (roles: ${PROFILE_ROLES.join(', ')})`); continue; }
       if (!isObj(e)) { out.push(`config.profiles.${name}.${role} must be an object {model?, effort?, effortHigh?}`); continue; }
       for (const [k, v] of Object.entries(e)) {

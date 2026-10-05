@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
-import { DEFAULT_PROFILES, profiles, profileNames, validProfile, normalizeProfile, resolveRole, isRisky, escalates, roleTable, profileProblems, profileLabel, riskFamilies, tierApplies } from '../lib/profiles.ts';
+import { DEFAULT_PROFILES, profiles, profileNames, validProfile, normalizeProfile, resolveRole, isRisky, escalates, roleTable, profileProblems, profileLabel, riskFamilies, tierApplies, ladderFailures, ladderStep } from '../lib/profiles.ts';
 import { promptFingerprint } from '../lib/foreman.ts';
 import type { Config, Tier } from '../lib/types.ts';
 
@@ -151,4 +151,24 @@ test('I03: profileProblems checks tiers, providers and their roles', () => {
 test('I03: a tier that changed a role shows in its prompt fingerprint', () => {
   assert.match(promptFingerprint('builder', { model: 'opus', effort: 'high' }, null, '', 'opus-sonnet', null, null, 'risky'), / tier=risky$/);
   assert.doesNotMatch(promptFingerprint('builder', { model: 'opus', effort: 'high' }, null, '', 'opus-sonnet'), /tier=/);
+});
+
+test('retry ladder: counted build/review failures in the current cycle climb approved rungs from where profile and tier put the builder; never down, never off-ladder', () => {
+  const config = { ...DEFAULT_CONFIG, profiles: { p: { builder: { model: 'sonnet', effort: 'medium' }, tiers: { risky: { builder: { model: 'opus', effort: 'high' } } },
+    ladder: [{ model: 'sonnet', effort: 'medium' }, { model: 'sonnet', effort: 'high' }, { model: 'opus', effort: 'high' }] } } } as unknown as Config;
+  const ev = (event: string, detail = '', o = {}) => ({ feature: 'a', event, detail, ...o });
+  const counted = { stop: { attempt: 1, counted: true } };
+  const events = [ev('failed', 'FAILED tenant check: x', counted), ev('failed', 'prepare `x` failed', counted), ev('failed', 'Evaluator: invalid JSON', counted),
+    ev('failed', 'test command `t` failed', { ...counted, cause: 'environment' }), ev('failed', 'BLOCKING: dup', { stop: { attempt: 2, counted: false } })];
+  assert.equal(ladderFailures(events, 'a', 3), 1);
+  assert.equal(ladderFailures([...events, ev('retrying'), ev('failed', 'BLOCKING: y', counted)], 'a', 3), 1);
+  assert.equal(ladderFailures([ev('failed', 'FAILED a', counted), ev('failed', 'CHEATING: b', counted)], 'a', 1), 1); // capped by attempts
+  const base = resolveRole(config, 'p', 'builder', { feature: { title: 't', description: '' } });
+  assert.deepEqual(ladderStep(config, 'p', base, 1), { cfg: { ...base, model: 'sonnet', effort: 'high' }, rule: 'ladder: 1 counted failure this cycle → sonnet high (from sonnet medium)' });
+  assert.equal(ladderStep(config, 'p', base, 5)!.cfg.model, 'opus');
+  const risky = resolveRole(config, 'p', 'builder', { feature: { title: 't', description: '', tier: 'risky' } });
+  assert.match(ladderStep(config, 'p', risky, 2)!.rule, /already on the top rung/); assert.equal(ladderStep(config, 'p', risky, 2)!.cfg.model, 'opus');
+  assert.equal(ladderStep(config, 'p', { model: 'haiku', effort: 'low' }, 2), null); assert.equal(ladderStep(config, 'p', base, 0), null);
+  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'a', effort: 'b' }] } }), ['config.profiles.p.ladder must be an array of at least two {model, effort} rungs, weakest first']);
+  assert.deepEqual(profileProblems({ p: { ladder: [{ model: 'a', effort: 'b' }, { model: 'a', effort: 'b', x: 1 }] } }), ['config.profiles.p.ladder[1] must be {model, effort} with non-empty strings']);
 });

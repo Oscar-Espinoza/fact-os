@@ -419,3 +419,34 @@ Oscar: the task view was "a bunch of logs and states" with a giant raw descripti
 - Sentences at the source: builders end their reply with a `Summary:` line; evaluators may add a `summary` (display only);
   gate failures log their failing test and error. New features carry `goal`/`shortTitle` from intake; older ones get a
   cached goal from the observer (a small model, a few per pass, `observer.goals`).
+
+## I10 — model accountability and context that learns (2026-10-05)
+
+Asked for: which model does which task; why a build failed and what its prompt lacked; Sonnet against Opus by effort; the
+factory acting on that itself, without long documents in the prompt. Studied OpenRig (openrig.dev) for structure:
+attributed judgments, fixed exit reasons, small context atoms composed by situation, recaps across handovers, audited
+model changes. Designed with Codex, which corrected the first measurement (85 decided observations across repeated
+features, risky tiers backfilled from today: no model ranking yet).
+
+- Run ledger: every prompt event carries a run record (phase, role, provider, model, effort, recorded tier, resumed,
+  fallback, prompt bytes, routing rule, and for a fresh build what its Map held). Task steps say "Built by Sonnet · high",
+  "Reviewed by GPT-6.1 Sol · xhigh"; active cards show who is working now.
+- Reviews may tag each finding with its acceptance item (`criterion`) and an issue kind, and each blocker with a kind;
+  malformed tags are dropped, never the finding. Issue kinds say what is wrong; causes stay the observer's hypotheses.
+- Builder exit block (touched, unsure, blocked), recorded beside the declared touches, the candidate map and the actual
+  diff. A reported blocker is logged and shown as unverified; it never places a hold.
+- Candidate map (no model): declared touches, files the spec names, files matching its identifiers or its title's word
+  pairs, and what the top files export; at most eight lines, a prediction, never a scope.
+- Context atoms: a prompt review may propose a one-line pointer with refs and a scope; deterministic checks keep it only
+  when its refs exist on base; the curator verifies it against the code; the observer quarantines it when its code changes
+  and revalidates it after 30 days. A fresh build gets only atoms whose scope covers its candidate files, whole, within
+  `contextMaxBytes`; included and deferred ids are recorded.
+- Recap: feedback over `recapMaxBytes` keeps every failure line (bounded) and points to the full text, readable by the
+  builder (`--add-dir` on its run directory; edits there stay denied).
+- Retry ladder (`profiles.<p>.ladder`): counted build/review failures in a cycle move a fresh try up approved rungs;
+  environment, base-defect, evaluator-run and merge stops never do. Automatic changes to routing defaults are deferred
+  until a prospective comparison.
+- Scorecard (observer, last 14 days): build episodes by builder model, effort and recorded tier, with first-review and
+  final acceptance, merges, repairs, issue kinds and median cost as fractions with feature counts; "too few to judge"
+  below eight features; it says when no comparison is fair. The observer's Models section also lists what the factory
+  learned (pointers, notes, escalations).

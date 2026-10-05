@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { childEnv, paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
 import { analyze, mockTasksFor, validate, type MockTask } from './ready.ts';
 import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, declaredNote, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
-import { escalates, resolveRole, tierApplies } from './profiles.ts';
+import { escalates, ladderFailures, ladderStep, resolveRole, tierApplies } from './profiles.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { testFailure } from './story.ts';
 import { candidateMap, pickAtoms, readAtoms, recap, refsHold, renderContext } from './context.ts';
@@ -752,7 +752,10 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
     const onSpawn = (pid: number) => edit(id, (x) => { Object.assign(x, { pid, pidStart: procStart(pid) ?? undefined, foremanPid: process.pid }); }).catch(() => {}); // lets a later foreman see the child is alive
     const fail = failer(id);
     const stopped = async () => { if (!stopping) return false; await set(id, { status: 'todo', pendingLesson: undefined }); log(root, id, 'interrupted'); return true; };
-    const roleCfg = (role: Role) => resolveRole(config, profile, role, { feature: f });
+    // A fresh try after counted implementation/review failures climbs the profile's ladder (resolved once, at launch; repairs in
+    // this pass keep the same builder).
+    const ladder = ladderStep(config, profile, resolveRole(config, profile, 'builder', { feature: f }), ladderFailures(readLogEvents(P.log), id, f.attempts || 0));
+    const roleCfg = (role: Role) => (role === 'builder' && ladder ? ladder.cfg : resolveRole(config, profile, role, { feature: f }));
     const claude = async (role: Role, prompt: string, file: string, opts: { extra?: string[]; cfg?: RoleConfig } = {}): Promise<ClaudeResult> => {
       const r = await exec(envVar('CLAUDE') || 'claude', [...claudeArgs(config, opts.cfg ?? roleCfg(role), root), ...(role === 'builder' ? ['--add-dir', runDir] : []), ...(opts.extra ?? [])],
         { cwd: wt, env, input: prompt, children, timeoutMin: config.timeoutMin, onSpawn });
@@ -827,7 +830,7 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       writeFileSync(join(runDir, `${tag}-${RUN_FILE[role]}.prompt.md`), prompt);
       const used = cfg ?? roleCfg(role), tier = cfg ? null : tierApplies(config, profile, role, f);
       const run: RunRecord = { phase: phase ?? (role === 'evaluator' ? 'review' : role === 'resolver' ? 'resolve' : 'build'), tag, role, provider: used.provider ?? 'claude',
-        model: used.model ?? null, effort: used.effort ?? null, tier: tier ?? null, resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}), ...(context ? { context } : {}) };
+        model: used.model ?? null, effort: used.effort ?? null, tier: tier ?? null, resumed, promptBytes: Buffer.byteLength(prompt), ...(cfg ? { fallback: true } : {}), ...(context ? { context } : {}), ...(role === 'builder' && !cfg && ladder ? { rule: ladder.rule } : {}) };
       log(root, id, 'prompt', promptFingerprint(role, used, role === 'builder' ? readIf(resolve(root, config.lessonsFile)) : null, briefs(root, config),
         profile, role === 'builder' && escalates(config, profile, f) ? resolveRole(config, profile, 'builder').effort ?? '' : null, notes, tier), undefined, { run });
     };

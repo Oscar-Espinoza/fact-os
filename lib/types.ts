@@ -32,7 +32,10 @@ export type Tier = 'normal' | 'multi' | 'hard' | 'risky' | 'investigate';
 export const TIERS: Tier[] = ['normal', 'multi', 'hard', 'risky', 'investigate'];
 export const TIER_ROLES = ['builder', 'resolver', 'evaluator'] as const;
 export type TierEntry = Pick<ProfileEntry, 'model' | 'effort' | 'provider'>;
-export type Profile = Partial<Record<ProfileRole, ProfileEntry>> & { tiers?: Partial<Record<Tier, Partial<Record<typeof TIER_ROLES[number], TierEntry>>>> };
+// ladder: the builder's approved escalation rungs, weakest first. Each counted implementation or review failure in a cycle moves a
+// fresh try one rung up from where the feature's profile and tier put it (never down; off the ladder, nothing changes).
+export interface Rung { model: string; effort: string }
+export type Profile = Partial<Record<ProfileRole, ProfileEntry>> & { tiers?: Partial<Record<Tier, Partial<Record<typeof TIER_ROLES[number], TierEntry>>>>; ladder?: Rung[] };
 
 export interface Config {
   base: string;

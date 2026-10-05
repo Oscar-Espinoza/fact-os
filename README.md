@@ -97,7 +97,12 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   resume the builder's session that many times per pass, then the gate and a fresh evaluator run on the new commit).
   `progressFixes` (1; when a build leaves exactly the content an evaluator rejected — same tree, same acceptance, test
   command, base, mock allowance and evaluator instructions — resume the builder's session that many times per pass;
-  still unchanged, a counted failure without running the gate or the evaluator again). Every builder prompt asks it
+  still unchanged, a counted failure without running the gate or the evaluator again).
+  `contextMaxBytes` (1200; verified context pointers a fresh build may carry, chosen by the files its candidate map predicts;
+  0 = none) and `recapMaxBytes` (4000; longer previous-attempt feedback reaches a fresh try as one line per failure plus
+  the full text in a file it can read). A profile may set `ladder`, its builder's approved rungs weakest first
+  (`[{"model": "sonnet", "effort": "medium"}, …]`): each counted build or review failure in a cycle moves a fresh try
+  one rung up from where the profile and tier put it, never down. Every builder prompt asks it
   to wait for every command acceptance needs, and commit the evidence, before its final reply.
   A diagnoser `environment` fault reruns the gate once on the same build; if it fails the same way the pass stops
   without spending an attempt and the build is revalidated after `setupRetryDelaysSec` (one more episode after the

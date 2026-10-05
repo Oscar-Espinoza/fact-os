@@ -6,6 +6,7 @@
 // the repo, and the lessons builders read are kept short by curating them (the full text goes to an archive). It also reviews
 // each failed pass (promptreview.ts) to learn whether the prompt or the model was at fault, and keeps per-model prompt notes
 // from that. The observer itself never changes code: every code change goes through the factory's own checks.
+import { loadEpisodes, scorecard, type Scorecard } from './scorecard.ts';
 import { ATOM_REVALIDATE_DAYS, readAtoms, refsHold, writeAtoms, type Atom, type AtomStatus } from './context.ts';
 import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -294,6 +295,7 @@ export function runCosts(runsDir: string): RunCost[] {
 // ---- state ----
 
 export interface ObserverState extends PromptState {
+  scorecard?: Scorecard;             // builder outcomes by model, effort and recorded tier, last 14 days (lib/scorecard.ts)
   offset: number;                               // bytes of log.jsonl already read
   retried: Record<string, string[]>;            // feature → signatures it was sent back for
   diagnoses: Diagnosis[];                       // newest last, capped
@@ -470,6 +472,7 @@ export async function observeOnce(root: string, opts: ObserveOptions = {}): Prom
   }
   state.promptRates = promptRates(passes);
   state.promptRatesUnit = PROMPT_RATES_UNIT;
+  try { state.scorecard = scorecard(loadEpisodes(P.runs, all.events, Date.now() - 14 * DAY)); } catch (e) { out(`observer: scorecard failed: ${firstLine(String((e as Error).message ?? e))}`); }
   if (cfg.agent && !stopping()) await step('context atoms', () => atomsPass(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), out, children, stopping));
   if (cfg.agent && cfg.goals && !stopping()) await step('feature goals', () => goalsPass(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), state, out, children, stopping));
   if (cfg.agent && !stopping()) await step('lesson curation', () => curateLessons(root, config, resolveRole(config, profile, 'curator', { agent: cfg.agent }), cfg, state, out, children, stopping));
