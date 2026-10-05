@@ -211,7 +211,9 @@ conflicts and test failures cannot trigger automatic retries. Full run artifacts
 A valid `pass: true` with a failed finding or nonempty `cheating`/`blocking` also counts as a fail.
 The evaluator must run the feature's changed test files, mutate one guard per money/auth/tenant/state check, and check
 production wiring; its diff lists any file it could not include instead of cutting silently (`evaluatorDiffExclude` lists
-generated paths by name only).
+generated paths by name only). A diff over `evaluatorInlineDiffBytes` (12000) is not inlined: the evaluator gets each
+changed file's status and line counts with the `git diff <base>...<sha> -- <path>` command to read it, and must read every
+one (inlined anyway when its permission mode cannot run git: only `auto`/`bypassPermissions` can).
 
 ## Safety limits
 

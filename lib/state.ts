@@ -11,7 +11,7 @@ export const DEFAULT_CONFIG: Config = {
   builder: { model: 'opus', effort: 'medium', permissionMode: 'auto' },
   evaluator: { model: 'opus', effort: 'high', permissionMode: 'auto' },
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
-  groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], claims: null, conflictBrief: false, resolver: null,
+  groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], evaluatorInlineDiffBytes: 12000, claims: null, conflictBrief: false, resolver: null,
   gateFixes: 0, commitFixes: 0, keepFixes: 1, progressFixes: 1, reviewFixes: 0, contextMaxBytes: 1200, lessonsMaxBytes: 6000, recapMaxBytes: 4000, setupRetryDelaysSec: [30, 120], diagnoser: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
   planner: { enabled: true, model: 'opus', effort: 'medium', effortHigh: 'high', maxPerDay: 50, skipBelow: null, splitWords: 750 },
 };
@@ -231,7 +231,7 @@ function configProblems(raw: unknown): string[] {
     'an array of at most 10 positive delays in seconds (each <= 86400)');
   for (const key of ['refreshBeforeTest', 'conflictBrief']) field(c, 'config', key, (x) => typeof x === 'boolean', 'a boolean');
   field(c, 'config', 'merge', (x) => x === 'auto' || x === 'manual', '"auto" or "manual"');
-  for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes', 'commitFixes', 'keepFixes', 'progressFixes', 'reviewFixes', 'contextMaxBytes']) field(c, 'config', key, uint, 'a safe integer >= 0');
+  for (const key of ['maxParallel', 'maxRefreshes', 'gateFixes', 'commitFixes', 'keepFixes', 'progressFixes', 'reviewFixes', 'contextMaxBytes', 'evaluatorInlineDiffBytes']) field(c, 'config', key, uint, 'a safe integer >= 0');
   // 0 turns the budget off; a positive one must leave room for the file reference it always keeps.
   for (const key of ['lessonsMaxBytes', 'recapMaxBytes']) field(c, 'config', key, (v: unknown) => uint(v) && (v === 0 || (v as number) >= 1000), '0 or a safe integer >= 1000');
   field(c, 'config', 'maxAttempts', (x) => uint(x) && (x as number) >= 1, 'a safe integer >= 1');

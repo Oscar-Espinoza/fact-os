@@ -390,7 +390,12 @@ Each tick:
      test output and the diff `base...<sha>` (`--text --no-ext-diff --no-textconv`), built as: `git diff --stat`; files
      matching `evaluatorDiffExclude` pathspecs (generated files, fixtures) listed by name only; then whole files' diffs in
      order while they fit in 150,000 characters, with every file that did not fit listed under "NOT SHOWN" (never a silent
-     cut). It must run each test file the feature adds or changes, check one mutation per money/permission/tenant/state
+     cut). A diff over `evaluatorInlineDiffBytes` (default 12,000 bytes, excluded files not counted) is not inlined when
+     the evaluator can run git (Claude `permissionMode` `auto` or `bypassPermissions`; Codex's workspace-write sandbox reads
+     the repo, but its Claude fallback decides): instead each changed file with its status (A/M/D/R), `+added -removed`
+     counts and the exact `git diff --no-ext-diff <merge-base sha>...<sha> -- <path>` to read it, excluded files by name,
+     and the instruction that it must read every changed file's diff (whole file for added ones) and the tests it relies
+     on, and that skipping one fails its job. Otherwise (small, or no git access) the diff is inlined as above. It must run each test file the feature adds or changes, check one mutation per money/permission/tenant/state
      check in a scratch worktree, and check production wiring (no path that only works with a fake or a development
      setting; every new state has a production writer). It answers with a JSON object
      `{ "pass": boolean, "findings": [{ "check": string, "ok": boolean, "evidence": string }], "cheating": string[],

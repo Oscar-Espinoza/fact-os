@@ -335,6 +335,43 @@ export function evaluatorDiff(stat: string, files: { path: string; diff: string 
     out.join('\n')].filter(Boolean).join('\n\n');
 }
 
+// Pairs `git diff --name-status` with `--numstat` lines (same order, same rename detection) for evaluatorDiffCommands.
+export function diffFileList(nameStatus: string, numstat: string): { status: string; paths: string[]; added: number | null; removed: number | null }[] {
+  const nums = numstat.split('\n').filter(Boolean).map((l) => l.split('\t'));
+  return nameStatus.split('\n').filter(Boolean).map((l, i) => {
+    const [status = '?', ...paths] = l.split('\t'), n = nums[i];
+    const num = (x: string | undefined) => x == null || x === '-' ? null : Number(x);
+    return { status, paths, added: num(n?.[0]), removed: n?.[0] === '-' ? null : num(n?.[1]) };
+  });
+}
+
+// Whether an evaluator launched with `cfg` can run `git diff` in its worktree itself. Codex's workspace-write sandbox reads the
+// repository, but a Codex evaluator can fall back to Claude with the role's permissionMode, so the Claude side decides: only
+// `auto` and `bypassPermissions` run Bash unattended under `claude -p` (plan/default/acceptEdits/dontAsk would deny it).
+export const evaluatorRunsGit = (cfg: RoleConfig): boolean => cfg.permissionMode === 'auto' || cfg.permissionMode === 'bypassPermissions';
+
+const shq = (p: string): string => /^[\w./@+-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`;
+// The evaluator's view of a large diff, read by the evaluator itself: each changed file with its status (A/M/D/R/...) and
+// added/removed line counts, the exact `git diff <base>...<head> -- <path>` to read it with, and the duty to read every one.
+// `files` is git's --name-status (paths after the status; a rename has old and new) paired with --numstat counts (null: binary).
+export function evaluatorDiffCommands(files: { status: string; paths: string[]; added: number | null; removed: number | null }[],
+  excluded: string[], base: string, head: string): string {
+  const cmd = (paths: string[]) => `git diff --no-ext-diff ${paths.length > 1 ? '-M ' : ''}${base}...${head} -- ${paths.map(shq).join(' ')}`;
+  const counts = (f: typeof files[number]) => f.added == null ? 'binary' : `+${f.added} -${f.removed}`;
+  const shown = files.filter((f) => !excluded.includes(f.paths.at(-1)!)), hidden = files.filter((f) => excluded.includes(f.paths.at(-1)!));
+  const total = files.reduce((s, f) => [s[0]! + (f.added ?? 0), s[1]! + (f.removed ?? 0)], [0, 0]);
+  return [`The diff is too large to include here: read it in this worktree. ${base} is the merge base with the base branch and ${head} ` +
+    `is the commit under review. ${files.length} files changed, ${total[0]} insertions(+), ${total[1]} deletions(-).`,
+  `Changed files (status, +added -removed, path), each followed by the command that shows its diff:\n${shown.map((f) =>
+    `${f.status[0]} ${counts(f)} ${f.paths.join(' -> ')}\n    ${cmd(f.paths)}`).join('\n')}`,
+  hidden.length ? `Generated or excluded files (read them only if a check depends on them):\n${hidden.map((f) =>
+    `${f.status[0]} ${counts(f)} ${f.paths.join(' -> ')}`).join('\n')}` : '',
+  'You MUST read the diff of every changed file listed above (for an added file, read the whole file) before you judge, and read ' +
+  'the tests your findings rely on. Run the commands above (one per file, or several paths in one command); do not judge from ' +
+  'file names or counts. Skipping a changed file is a failure of your job: a defect in a file you did not read is still yours to find.',
+  ].filter(Boolean).join('\n\n');
+}
+
 const TEST_FILE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 const HOLD_RECHECK_MS = 60_000;
 // The fixed role instructions (every prompt function and the rules they embed), by version: part of a planning hold's inputs,
@@ -343,7 +380,7 @@ let templateVersion = '';
 const TEMPLATE_VERSION_OF = (): string => templateVersion ||= createHash('sha256').update([builderPrompt, evaluatorPrompt, resolverPrompt, gateFixPrompt, commitFixPrompt,
   keepFixPrompt, reviewFixPrompt, progressFixPrompt, diagnosisPrompt, keepFeedback].map(String).join('\n') + FINISH_RULE + DROP_PROTOCOL).digest('hex').slice(0, 12);
 // The evaluator's fixed instructions, by version: a change of them is a change of validation inputs (the no-progress guard).
-const EVALUATOR_VERSION = createHash('sha256').update(String(evaluatorPrompt)).digest('hex').slice(0, 12);
+const EVALUATOR_VERSION = createHash('sha256').update(String(evaluatorPrompt) + String(evaluatorDiffCommands)).digest('hex').slice(0, 12);
 
 // A failed gate's outcome for the dashboard: exit code, failing test file and error line, when its output names them.
 export const testOutcome = (failure: string): { code: number | null; file: string | null; error: string | null } =>
@@ -363,7 +400,7 @@ export function failureId(output: string): string {
   return [...keep].some((l) => /\b\w*Error\b:|AssertionError|\bExpected\b|\bReceived\b/i.test(l)) ? [...keep].sort().join('\n') : '';
 }
 
-export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = [], plan = ''): string {
+export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string | { commands: string }, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = [], plan = ''): string {
   const onMock = mockTasks.length > 0;
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
     'You did not write this code. Judge it skeptically. You may read files and run commands; do not modify or commit anything in this',
@@ -393,7 +430,7 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
     `Test command \`${config.test}\` exited ${test.code}. Output tail:\n\`\`\`\n${test.tail}\n\`\`\``, '',
     resolved ? `This branch resolved a merge conflict with ${config.base} in this pass. Also verify that the features merged into ` +
       `${config.base} it conflicted with still behave as their acceptance checks say (a failure there fails this feature):\n${resolved}\n` : '',
-    `Diff ${config.base}...${branch}:\n\`\`\`diff\n${diff}\n\`\`\``, '',
+    typeof diff === 'string' ? `Diff ${config.base}...${branch}:\n\`\`\`diff\n${diff}\n\`\`\`` : `Diff ${config.base}...${branch} (not inlined):\n${diff.commands}`, '',
     `A failure that also happens on ${config.base} without this branch is not this feature's to fix. Only when you reproduced it on the base ` +
     'commit too (same command, equivalent isolated setup, same failure signature) report it under "baseDefects": {"check": the failed ' +
     'finding it explains, "command", "signature" (the normalized failure), "baseSha" (the base commit you ran), "evidence" (both runs), ' +
@@ -1366,11 +1403,17 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const names = d('--name-only', range).split('\n').filter(Boolean);
       const excluded = (config.evaluatorDiffExclude || []).length
         ? d('--name-only', range, '--', ...config.evaluatorDiffExclude.map((p) => `:(glob)${p}`)).split('\n').filter(Boolean) : [];
-      const diff = evaluatorDiff(d('--stat=160', range), names.map((p) => ({ path: p, diff: excluded.includes(p) ? '' : d(range, '--', p) })), excluded);
+      const evalBase = git(['merge-base', config.base, sha], wt).out, holdInputsAtEval = holdInputs(root, config, f); // pinned before the paid run
+      const perFile = names.map((p) => ({ path: p, diff: excluded.includes(p) ? '' : d(range, '--', p) }));
+      // A diff over evaluatorInlineDiffBytes is read by the evaluator itself (file list, counts, one git diff per file), when its
+      // permissions let it run git; a small one, or one it could not read, is inlined as before.
+      const diffBytes = perFile.reduce((n, x) => n + Buffer.byteLength(x.diff), 0);
+      const diff: string | { commands: string } = diffBytes > (config.evaluatorInlineDiffBytes ?? 12000) && evalBase && evaluatorRunsGit(roleCfg('evaluator'))
+        ? { commands: evaluatorDiffCommands(diffFileList(d('--name-status', range), d('--numstat', range)), excluded, evalBase, sha) }
+        : evaluatorDiff(d('--stat=160', range), perFile, excluded);
       const en = notesFor('evaluator');
       const inputsAtEval = validationInputs(); // what this evaluation is given: a rejection is bound to it, not to state after the paid run
-      const evalBase = git(['merge-base', config.base, sha], wt).out, holdInputsAtEval = holdInputs(root, config, f); // pinned before the paid run
-      const edits = testEdits(wt, git(['merge-base', config.base, sha], wt).out, sha);
+      const edits = testEdits(wt, evalBase, sha);
       if (edits.length) log(root, id, 'test-edits', edits.join('; '));
       const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks, evalPlan);
       const epPinned = `${ep}\nFor "baseDefects": the base commit of this evaluation is ${evalBase} and the feature commit is ${sha}; reproduce on exactly those and report them as "baseSha" and "featureSha".`;

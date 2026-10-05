@@ -79,7 +79,7 @@ test('config: known strings, arrays, flags and nullable commands have runtime sh
   for (const [key, value] of [
     ['base', ' '], ['worktreesDir', 42], ['lessonsFile', null], ['branchPrefix', false], ['test', ''],
     ['merge', 'automatic'], ['refreshBeforeTest', 'false'], ['conflictBrief', 1],
-    ['briefFiles', 'README.md'], ['briefFiles', ['README.md', 3]], ['evaluatorDiffExclude', [null]],
+    ['briefFiles', 'README.md'], ['briefFiles', ['README.md', 3]], ['evaluatorDiffExclude', [null]], ['evaluatorInlineDiffBytes', -1], ['evaluatorInlineDiffBytes', '12000'],
     ['prepare', 3], ['postMerge', false], ['mergeHook', []], ['groupBy', {}], ['restoreFrom', true],
   ] as const) {
     s.set({ [key]: value });

@@ -50,6 +50,7 @@ export interface Config {
   groupBy: string | null;             // null or "idPrefix:<n>"
   restoreFrom: string | null;         // null or a ref with "{id}", e.g. "archive/task/{id}": earlier work for a branch with none
   evaluatorDiffExclude: string[];     // pathspecs listed by name only in the evaluator's diff (generated files, fixtures)
+  evaluatorInlineDiffBytes?: number; // safe integer >= 0 (default 12000): a larger diff is not inlined; the evaluator gets the file list and git diff commands (when it can run git)
   claims: Partial<ClaimsConfig> | null; // null = schedule by group only; set = also never run two features that share a hot file
   conflictBrief: boolean;             // a conflicting refresh's feedback carries both sides' context; resolutions get the keep-lines check
   resolver: RoleConfig | null;        // null = the builder resolves on its next build; set = a resolver run resolves at once, same pass

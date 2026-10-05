@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTag, promptFingerprint, evaluatorDiff, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
+import { runTag, promptFingerprint, evaluatorDiff, evaluatorDiffCommands, diffFileList, evaluatorRunsGit, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
 import { finalReply, transcriptLines, transcriptPath, parseExit, parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
@@ -277,6 +277,24 @@ test('evaluatorDiff keeps whole files in order while they fit and names what it 
   assert.match(out, /NOT SHOWN because the diff is too long[^\n]*\n- migrations\/0001\.sql/);
   assert.ok(out.includes('A'.repeat(60)) && out.includes('C'.repeat(30)) && !out.includes('B'.repeat(60)));
   assert.doesNotMatch(evaluatorDiff('s', [{ path: 'a', diff: 'x' }], []), /NOT SHOWN|excluded/);
+});
+
+test('evaluatorDiffCommands: status, counts and one git diff per file; excluded files by name; the duty to read them all', () => {
+  const files = diffFileList('M\tlib/a.ts\nA\ttest/a test.ts\nR087\told.ts\tnew.ts\nM\tgen/x.json\nA\tlogo.png',
+    '3\t1\tlib/a.ts\n10\t0\ttest/a test.ts\n1\t1\t{old.ts => new.ts}\n500\t400\tgen/x.json\n-\t-\tlogo.png');
+  assert.deepEqual(files[2], { status: 'R087', paths: ['old.ts', 'new.ts'], added: 1, removed: 1 });
+  assert.deepEqual(files[4], { status: 'A', paths: ['logo.png'], added: null, removed: null });
+  const out = evaluatorDiffCommands(files, ['gen/x.json'], 'b0', 'h1');
+  assert.match(out, /^M \+3 -1 lib\/a\.ts\n {4}git diff --no-ext-diff b0\.\.\.h1 -- lib\/a\.ts$/m);
+  assert.match(out, /^A \+10 -0 test\/a test\.ts\n {4}git diff --no-ext-diff b0\.\.\.h1 -- 'test\/a test\.ts'$/m);
+  assert.match(out, /^R \+1 -1 old\.ts -> new\.ts\n {4}git diff --no-ext-diff -M b0\.\.\.h1 -- old\.ts new\.ts$/m);
+  assert.match(out, /^A binary logo\.png$/m);
+  assert.match(out, /Generated or excluded files[^\n]*\nM \+500 -400 gen\/x\.json$/m);
+  assert.doesNotMatch(out, /-- gen\/x\.json/);
+  assert.match(out, /5 files changed, 514 insertions\(\+\), 402 deletions\(-\)/);
+  assert.match(out, /You MUST read the diff of every changed file[\s\S]*Skipping a changed file is a failure of your job/);
+  assert.deepEqual(['auto', 'bypassPermissions', 'plan', 'acceptEdits', undefined].map((m) => evaluatorRunsGit({ permissionMode: m, provider: 'codex' })),
+    [true, true, false, false, false]);
 });
 
 test('builtWhenStopped: the sha a pass had built when the foreman stopped, only if nothing ended the pass since', () => {
