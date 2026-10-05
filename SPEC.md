@@ -564,8 +564,8 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   `*/.fact-os/features.json` up to depth 3 under `--root` (default: cwd). The page is `lib/dash.html`
   (inline CSS/JS, no dependencies, light and dark, phone width), polling `GET /api/state` every 2s,
   one project at a time. A left sidebar (logo, project picker, foreman status, a "New work paused" chip while paused,
-  the views with icons and the Only-you count, Settings at the bottom) collapses to an icon rail with a toggle (remembered
-  in localStorage) and becomes a drawer opened from a slim top bar at 900px and below. The **Settings** view (`#settings`)
+  the views with icons and the Only-you count, Settings at the bottom) collapses to an icon rail with a round handle on
+  its right edge (one 200ms width transition, labels fade, icons keep their x; remembered in localStorage) and becomes a drawer opened from a slim top bar at 900px and below. The **Settings** view (`#settings`)
   holds the **controls**: the mode switch "Mode: Opus" /
   "Mode: Fable + Sonnet" (other config profiles by name; highlighted when not opus; a click switches to the next profile;
   its tooltip lists role → model, effort, the builder's "high when risky", the observer rows' "(observe --agent)" when no

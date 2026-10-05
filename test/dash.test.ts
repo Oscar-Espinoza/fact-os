@@ -72,7 +72,11 @@ test('the page shell: a sidebar with every view and Settings, the controls in th
   const html = await (await fetch(dash.url + '/')).text();
   const side = html.slice(html.indexOf('<aside'), html.indexOf('</aside>'));
   for (const v of ['factory', 'board', 'observer', 'project', 'you', 'settings']) assert.match(side, new RegExp(`href="#${v}" data-v="${v}"`), v);
-  for (const id of ['side-tog', 'pick', 'menu', 'foreman', 'pz-chip', 'you-n']) assert.match(side, new RegExp(`id="${id}"`), id);
+  for (const id of ['pick', 'menu', 'foreman', 'pz-chip', 'you-n']) assert.match(side, new RegExp(`id="${id}"`), id);
+  // The collapse handle sits on the sidebar wrapper, outside the aside, so it keeps one position in both states.
+  const wrap = html.slice(html.indexOf('<div class="side-wrap">'), html.indexOf('<main>'));
+  assert.doesNotMatch(side, /id="side-tog"/);
+  assert.match(wrap.slice(wrap.indexOf('</aside>')), /<button class="side-handle" id="side-tog"[^>]*aria-controls="side"[^>]*aria-expanded="true"[^>]*aria-label="Collapse sidebar"/);
   assert.match(html, /id="side-open"[^>]*aria-controls="side"/); // the narrow-screen drawer button
   const settings = html.slice(html.indexOf('id="v-settings"'), html.indexOf('</main>'));
   for (const id of ['ctl', 'mode', 'sfx', 'lanes-dn', 'lanes-t', 'lanes-up', 'lanes-def', 'setup-resume', 'pz']) {
@@ -90,6 +94,10 @@ test('the page shell: a sidebar with every view and Settings, the controls in th
   const core = await (await fetch(dash.url + '/dash/core.js')).text();
   assert.match(core, /'settings'\]\.includes\(h\)/); // #settings is a route
   assert.match(core, /store\.set\('sideMin'/); // the rail state is remembered
+  const css = await (await fetch(dash.url + '/dash/base.css')).text();
+  assert.match(css, /\.side-wrap\{transition:width \.2s ease\}/); // one width transition drives the collapse
+  assert.match(css, /\.side-min \.side-lbl\{opacity:0\}/); // labels fade instead of display toggles
+  assert.match(css, /prefers-reduced-motion:reduce/);
 });
 
 test('POST with a project that was not discovered is rejected and changes nothing', async () => {

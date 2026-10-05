@@ -29,12 +29,10 @@
 <div class="scrim" id="scrim" hidden></div>
 
 <div class="app">
+<div class="side-wrap">
 <aside class="side" id="side" aria-label="Sidebar">
   <div class="side-head">
     <a class="brand" href="#factory" title="{{NAME}}"><img src="/assets/logo.png" alt="" width="36" height="34"><span class="side-lbl"><b>{{NAME}}</b><small>SOFTWARE FACTORY</small></span></a>
-    <button class="ib side-btn" id="side-tog" type="button" aria-controls="side" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6 2.5v11"/><path class="tog-arrow" d="M10.5 6.5 9 8l1.5 1.5"/></svg>
-    </button>
   </div>
 
   <div class="picker">
@@ -60,6 +58,11 @@
     <a href="#settings" data-v="settings" class="side-set" title="Settings"><svg class="side-ic" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="9" r="2.4"/><path d="M7.6 1.8h2.8l.4 2 1.6.9 1.9-.7 1.4 2.4-1.5 1.4v1.8l1.5 1.4-1.4 2.4-1.9-.7-1.6.9-.4 2H7.6l-.4-2-1.6-.9-1.9.7-1.4-2.4 1.5-1.4V8.2L2.3 6.8l1.4-2.4 1.9.7 1.6-.9z"/></svg><span class="side-lbl">Settings</span></a>
   </div>
 </aside>
+<!-- Wide screens: the collapse handle straddles the sidebar's right edge, outside its clipped box so it never moves vertically. -->
+<button class="side-handle" id="side-tog" type="button" aria-controls="side" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 3 4.25 6l3 3"/></svg>
+</button>
+</div>
 
 <main>
   <section class="view" id="v-factory"><div id="factory"></div></section>

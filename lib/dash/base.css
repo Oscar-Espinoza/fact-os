@@ -22,7 +22,8 @@ b{font-weight:600}
 .app{display:flex;min-height:100vh}
 main{flex:1 1 auto;min-width:0}
 .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-.side{position:sticky;top:0;height:100vh;width:var(--side-w);flex-shrink:0;display:flex;flex-direction:column;gap:12px;padding:14px 12px;background:var(--head);border-right:1px solid var(--head-line);z-index:30}
+.side-wrap{position:sticky;top:0;height:100vh;width:var(--side-w);flex-shrink:0;z-index:30}
+.side{position:relative;height:100%;width:100%;display:flex;flex-direction:column;gap:12px;padding:14px 12px;background:var(--head);border-right:1px solid var(--head-line)}
 .side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:40px}
 .brand{display:flex;align-items:center;gap:10px;min-width:0}
 .brand img{flex-shrink:0;image-rendering:pixelated}
@@ -32,7 +33,6 @@ main{flex:1 1 auto;min-width:0}
 .brand small{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:2.2px;line-height:1.2;white-space:nowrap}
 .side-btn{flex-shrink:0;color:var(--muted);background:transparent;border-color:transparent}
 .side-btn:hover{color:var(--fg)}
-.side-btn svg{transition:transform .18s}
 .side-ic{flex-shrink:0}
 /* project picker */
 .picker{position:relative}
@@ -79,27 +79,37 @@ main{flex:1 1 auto;min-width:0}
 .spacer{flex:1 1 0}
 .mbar,.scrim{display:none}
 
-/* collapsed: an icon rail; labels stay for screen readers, titles give tooltips */
+/* collapsed: an icon rail. One width transition on the wrapper (main reflows with it); the labels fade and are clipped
+   by their own rows (the sidebar itself never clips, so the picker menu and the edge handle stay visible); every icon sits
+   at the same x in both states, centred in the rail; labels stay for screen readers, titles give tooltips */
+.side-handle{display:none}
 @media (min-width:901px){
-  .side{transition:width .18s,padding .18s}
-  .side-min .side{width:var(--rail-w);padding:14px 10px;align-items:center}
-  .side-min .side-lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-  .side-min .side-head{flex-direction:column;gap:6px}
-  .side-min .side-btn svg{transform:scaleX(-1)}
-  .side-min .picker,.side-min .tabs,.side-min .side-foot,.side-min .status,.side-min .pzchip{width:100%}
-  .side-min #pick{justify-content:center;padding:0}
+  .side-wrap{transition:width .2s ease}
+  .side-min .side-wrap{width:var(--rail-w)}
+  .side-lbl{transition:opacity .2s ease}
+  .side-min .side-lbl{opacity:0}
+  .side-head{padding-left:2px}
+  .side .brand,#pick,.side .status,.side .pzchip,.tabs a,.side-set{overflow:hidden}
+  #pick{padding:0 10px 0 11px}
+  .side .status{padding:9px 10px 9px 14px}
+  .side .status>.side-lbl{flex-shrink:0;width:calc(var(--side-w) - 70px);max-height:84px;transition:opacity .2s ease,max-height .2s ease}
+  .side-min .side .status>.side-lbl{max-height:0}
+  .side .pzchip{padding-left:15px}
+  .tabs a,.side-set{padding:0 10px 0 11px}
   .side-min .menu{left:calc(100% + 8px);top:0}
-  .side-min .status{justify-content:center;padding:9px 0}
-  .side-min .status .dot{margin-top:0}
-  .side-min .pzchip{justify-content:center;padding:6px 0}
-  .side-min .tabs a,.side-min .side-set{justify-content:center;padding:0}
   .side-min .tabs .badge{position:absolute;top:2px;right:0;font-size:10px;padding:0 4px;line-height:1.5}
+  /* the collapse handle: a round tab straddling the sidebar's right edge at a fixed height; its chevron turns over */
+  .side-handle{display:flex;align-items:center;justify-content:center;position:absolute;top:22px;right:-12px;width:24px;height:24px;padding:0;border-radius:50%;background:var(--head);border:1px solid var(--line2);color:var(--muted);cursor:pointer;z-index:1;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+  .side-handle:hover{color:var(--fg);border-color:#34455c;background:#1a2638}
+  .side-handle svg{transition:transform .2s ease}
+  .side-min .side-handle svg{transform:rotate(180deg)}
 }
 /* narrow: a top bar with a menu button; the sidebar slides in over the page */
 @media (max-width:900px){
   .mbar{display:flex;align-items:center;gap:10px;height:52px;padding:0 12px;background:var(--head);border-bottom:1px solid var(--head-line)}
   .mbar .brand b{font-size:16px}
   .mbar .pzchip{padding:4px 8px}
+  .side-wrap{display:contents}
   .side{position:fixed;left:0;top:0;bottom:0;height:auto;width:min(280px,86vw);overflow-y:auto;transform:translateX(-100%);visibility:hidden;transition:transform .2s,visibility .2s;z-index:60;box-shadow:none}
   .side-open .side{transform:none;visibility:visible;box-shadow:0 0 40px rgba(0,0,0,.6)}
   .scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:55}
