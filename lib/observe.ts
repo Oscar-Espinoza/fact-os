@@ -796,6 +796,9 @@ export function renderReport(root: string, state: ObserverState, features: Featu
       ...stuck.map((f) => { const d = lastFor(f.id); return `- ${f.id} is stuck: ${d ? `${CAUSE[d.cause]} (${d.evidence})` : firstLine(f.lastFeedback || '')}`; }),
       ...holds.map((f) => f.planningHold!.cause === 'base-defect'
         ? `- ${f.id} is held for a defect already on base: ${f.planningHold!.evidence.join(' | ')}. It is rechecked when base changes ${(f.planningHold!.paths || []).join(', ') || 'the implicated paths'} (at most twice), or \`${NAME} release ${f.id}\`; queue a fix for the defect.`
+        : f.planningHold!.cause === 'needs-split'
+        ? `- ${f.id} is on a planning hold: its spec probably needs splitting (the planner found, before any build; ${f.planningHold!.evidence.join(' | ')}). ` +
+          `Split or trim its description or acceptance to release it, or \`${NAME} release ${f.id}\` to launch it unchanged.`
         : `- ${f.id} is on a planning hold: ${f.planningHold!.cause === 'spec-conflict' ? 'its spec (the planner found, before any build)' : f.planningHold!.cause === 'spec-error' ? 'its spec' : 'its prompt'} cannot be met as written ` +
         `(${f.planningHold!.confidence}; ${f.planningHold!.evidence.join(' | ')}). Edit its description or acceptance to release it, or \`${NAME} release ${f.id}\` to launch it unchanged.`),
       ...proposals.map((t) => `- Proposal ${t.id}: ${t.title}`)] : ['Nothing.']), '',

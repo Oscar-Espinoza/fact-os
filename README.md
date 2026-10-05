@@ -124,11 +124,13 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   tokens, not dollars, so its runs add nothing to the cost totals or budgets.
 - **Planner.** Before a spec's first build, a read-only Opus run (`config.planner`: `enabled` true, `model` opus, `effort`
   medium, `effortHigh` high for specs saying "must not change"/"all paths"/"every" or touching money, auth or tenants, and
-  after a failed attempt; `maxPerDay` 50; `skipBelow` null or a tier; a profile may set a `planner` entry) checks every
+  after a failed attempt; `maxPerDay` 50; `skipBelow` null or a tier; `splitWords` 750; a profile may set a `planner` entry) checks every
   acceptance line against the code. `VERDICT: INFEASIBLE` (conflicts quoting file:line) puts the feature on a `spec-conflict`
   planning hold without starting a builder or spending an attempt (edit the spec, apply a drafted spec fix, or `fact-os
   release` it); `VERDICT: FEASIBLE` saves a plan under `runs/<id>/plan.md` that the builder follows and the evaluator sees
-  as context only. Its `EFFORT: high` lifts the builder to the profile's `effortHigh`; `SPLIT: yes` is only recorded. A
+  as context only, unless the plan runs over `splitWords` words: then the feature goes on a `needs-split` planning hold
+  (same release rules; the hold shows the word count and any `SPLIT` suggestion, asking for the spec to be split or
+  trimmed; released unchanged, it builds with that plan). Its `EFFORT: high` lifts the builder to the profile's `effortHigh`; `SPLIT: yes` is only recorded. A
   plan is reused until the spec changes; a failed or unparseable planner never blocks a build. See SPEC.md "Plan".
 - **Feature tiers.** Intake sets each feature's `tier` (`normal`, `multi`, `hard`, `risky`, `investigate`); a profile's
   `tiers` maps tiers to builder, resolver and evaluator overrides, e.g. `"tiers": {"risky": {"builder": {"model":

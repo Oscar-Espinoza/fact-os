@@ -1,21 +1,23 @@
 // The planner: one read-only run before a feature's first build. It checks every acceptance line against the code it depends on;
-// a spec that cannot be met as written stops the feature before any builder is paid for (a `spec-conflict` planning hold), and
+// a spec that cannot be met as written stops the feature before any builder is paid for (a `spec-conflict` planning hold), a plan
+// over config.planner.splitWords words does too (a `needs-split` hold: the spec probably needs splitting), and
 // otherwise it writes a short plan the builder follows and the evaluator sees as context. Fail soft: a crash, a timeout or an
 // answer that breaks the contract never blocks a build, it only goes without a plan.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TIERS, type Config, type Feature, type LogEvent, type PlanSummary } from './types.ts';
 
-export const PLAN_MAX_WORDS = 600, PLAN_REJECT_WORDS = 750; // the contract asks for under 600; a little over is tolerated
+export const PLAN_MAX_WORDS = 600; // the contract asks for under 600; a little over is tolerated (up to config.planner.splitWords)
 export const PLAN_FILE = 'plan.json', PLAN_TEXT = 'plan.md'; // under runs/<feature>/, never in the repository
 
 export type Plan =
-  | { verdict: 'FEASIBLE'; effort: 'medium' | 'high'; split: string | null; plan: string }
+  | { verdict: 'FEASIBLE'; effort: 'medium' | 'high'; split: string | null; plan: string; words: number }
   | { verdict: 'INFEASIBLE'; effort: 'medium' | 'high'; split: string | null; conflicts: string[] };
 
 // Strict: the first three non-empty lines are `VERDICT: FEASIBLE|INFEASIBLE`, `EFFORT: medium|high` and `SPLIT: no` or
 // `SPLIT: yes: <the cut>`, in that order. INFEASIBLE needs a numbered CONFLICTS list whose every item quotes file:line evidence;
-// FEASIBLE needs a plan body under PLAN_REJECT_WORDS words. Anything else is an error (the build goes on without a plan).
+// FEASIBLE needs a plan body (its word count is returned; the foreman holds a plan over config.planner.splitWords). Anything else is
+// an error (the build goes on without a plan).
 const FILE_LINE = /[\w@.\/-]+\.[A-Za-z0-9]+:\d+/;
 export function parsePlan(text: unknown): Plan | { error: string } {
   const lines = String(text ?? '').replace(/\r/g, '').split('\n'), at: number[] = [];
@@ -43,8 +45,7 @@ export function parsePlan(text: unknown): Plan | { error: string } {
   }
   if (!body) return { error: 'FEASIBLE without a plan' };
   const words = body.split(/\s+/).filter(Boolean).length;
-  if (words > PLAN_REJECT_WORDS) return { error: `the plan has ${words} words (the contract is under ${PLAN_MAX_WORDS})` };
-  return { verdict: 'FEASIBLE', effort, split, plan: body };
+  return { verdict: 'FEASIBLE', effort, split, plan: body, words };
 }
 
 // Why this launch runs no planner (null: it plans). A plan already made for these inputs is reused instead (see cachedPlan).
@@ -60,7 +61,8 @@ export const plannerRunsSince = (events: Pick<LogEvent, 'ts' | 'event' | 'run'>[
   events.filter((e) => e.event === 'prompt' && e.run?.phase === 'plan' && now - Date.parse(e.ts) < 864e5).length;
 
 // The saved answer for exactly these inputs (holdInputs: the spec, deps, briefs and role instructions), or null.
-export interface SavedPlan extends PlanSummary { tag: string; model: string | null; plannerEffort: string | null; text: string; conflicts?: string[] }
+// `oversize`: a FEASIBLE plan over config.planner.splitWords, saved with a needs-split hold; found again, the hold was released.
+export interface SavedPlan extends PlanSummary { tag: string; model: string | null; plannerEffort: string | null; text: string; conflicts?: string[]; words?: number; oversize?: boolean }
 export function cachedPlan(runDir: string, inputs: string): SavedPlan | null {
   try {
     const p = JSON.parse(readFileSync(join(runDir, PLAN_FILE), 'utf8')) as SavedPlan;

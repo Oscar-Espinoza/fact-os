@@ -3,13 +3,13 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { childEnv, paths, loadState, loadConfig, mutate, log, withSupervisor, withCheckoutLock, sleep, envVar, featureEnv, readControlFile, effectiveLimit, readJson, writeJsonAtomic, readSetupState, updateSetupState, SETUP_HOLD_AFTER, SETUP_HOLD_WINDOW_MS, NAME } from './state.ts';
 import { analyze, mockTasksFor, validate, type MockTask } from './ready.ts';
 import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, declaredNote, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, ladderFailures, ladderStep, plannedEffort, plannerRole, resolveRole, tierApplies } from './profiles.ts';
-import { cachedPlan, parsePlan, planSkip, plannerPrompt, plannerRunsSince, savePlan, summaryOf, type SavedPlan } from './plan.ts';
+import { cachedPlan, parsePlan, PLAN_TEXT, planSkip, plannerPrompt, plannerRunsSince, savePlan, summaryOf, type SavedPlan } from './plan.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { testFailure } from './story.ts';
 import { atomStale, candidateMap, pickAtoms, readAtoms, recap, renderContext, selectLessons } from './context.ts';
@@ -1027,6 +1027,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         log(root, id, 'plan-overridden', 'the spec-conflict hold was released for this unchanged spec; building without a plan, with the planner\'s concerns');
         return 'go';
       }
+      if (saved?.oversize) { // likewise a needs-split hold: released, the unchanged spec builds with the long plan
+        usePlan(saved);
+        log(root, id, 'plan-overridden', `the needs-split hold was released for this unchanged spec; building with the planner's ${saved.words ?? '?'}-word plan`);
+        return 'go';
+      }
       if (saved) {
         if (saved.verdict === 'FEASIBLE') usePlan(saved);
         log(root, id, 'plan-reused', saved.verdict === 'FEASIBLE' ? `the plan of ${saved.ts} for this unchanged spec` : `no plan for this unchanged spec (${saved.error ?? 'none'})`);
@@ -1069,6 +1074,22 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         log(root, id, 'planning-hold', `spec-conflict (high), planner before any build: ${p.conflicts.map((c, i) => `${i + 1}. ${c.split('\n')[0]}`).join(' ')}${split}. ` +
           `No builder was started and no attempt spent. Edit the spec (a spec fix may be drafted), or \`${NAME} release ${id}\` to launch it unchanged.`);
         out(`hold ${id}: the planner found the spec cannot be met as written (${p.conflicts.length} conflict${p.conflicts.length === 1 ? '' : 's'}); no build started`);
+        return 'stop';
+      }
+      const limit = config.planner.splitWords ?? 750;
+      if (p.words > limit) { // a plan this long: the spec probably needs splitting, so no builder is paid for it as written
+        const held = record({ verdict: 'FEASIBLE', effort: p.effort, split: p.split, text: p.plan, words: p.words, oversize: true });
+        const file = relative(root, join(runDir, PLAN_TEXT));
+        const evidence = [`the planner's plan has ${p.words} words (over config.planner.splitWords ${limit}): split the spec into smaller features or trim it`,
+          ...(p.split ? [`the planner suggests splitting: ${p.split}`] : []), `the plan is saved in ${file}`];
+        await edit(id, (x) => {
+          const stop = { attempt: (x.attempts || 0) + 1, counted: false };
+          Object.assign(x, { status: 'todo', stop, updatedAt: now(), plan: summaryOf(held), planningHold: { cause: 'needs-split', confidence: 'high', evidence,
+            review: `plan:${id}/${tag}`, passEnd: now(), inputs: planInputs, ts: now() } });
+        });
+        log(root, id, 'planning-hold', `needs-split (high), planner before any build: ${evidence.join('; ')}. ` +
+          `No builder was started and no attempt spent. Split or trim the spec (a spec fix may be drafted), or \`${NAME} release ${id}\` to launch it unchanged with this plan.`);
+        out(`hold ${id}: the planner's plan has ${p.words} words (over ${limit}); the spec probably needs splitting; no build started`);
         return 'stop';
       }
       const made = record({ verdict: 'FEASIBLE', effort: p.effort, split: p.split, text: p.plan });

@@ -149,12 +149,12 @@ if (mode === 'resolve') {
 } else if (mode === 'plan') {
   // The read-only planner: a FEASIBLE plan by default. "plan:infeasible" (a conflict with file:line evidence), "plan:garbage" (breaks
   // the contract), "plan:error" (the run fails), "plan:high" (EFFORT: high), "plan:split" (suggests a cut), "plan:edit" (commits a file,
-  // which it must not).
+  // which it must not), "plan:long" (a FEASIBLE plan of about 800 words).
   if (has('edit')) commit('planner.txt', 'edited by the planner\n');
   const head = `EFFORT: ${has('high') ? 'high' : 'medium'}\nSPLIT: ${has('split') ? 'yes: the API part and the UI part' : 'no'}`;
   result = has('garbage') ? 'Here is my plan: just build it.' : has('infeasible')
     ? `VERDICT: INFEASIBLE\n${head}\nCONFLICTS\n1. "no runtime change" contradicts "must fail safely": README.md:1 has no failure path.\n   Resolutions: drop one requirement.`
-    : `VERDICT: FEASIBLE\n${head}\n1. Add ${id}.txt (no existing helper: rg found none).\n2. Do not touch README.md.`;
+    : `VERDICT: FEASIBLE\n${head}\n1. Add ${id}.txt (no existing helper: rg found none).\n2. Do not touch README.md.${has('long') ? '\n3. ' + 'detail '.repeat(780) : ''}`;
   if (has('error')) extra = { is_error: true, subtype: 'error_during_execution' };
 } else if (mode === 'review') {
   const past = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'review' && e.id === id; }).length : 0;

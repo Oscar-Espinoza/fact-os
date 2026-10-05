@@ -140,8 +140,9 @@ const readEvents = (root: string, id: string): LogEvent[] => {
   return text.split('\n').flatMap((l) => { if (!l.includes(`"${id}"`)) return []; try { const e = JSON.parse(l) as LogEvent; return e.feature === id ? [e] : []; } catch { return []; } });
 };
 // The failure a proposal answers is still the feature's latest: no launch since, and (for a held feature) the same hold.
-// A hold a spec fix answers: a spec error found by a review or the pre-launch check, or a conflict the planner found before any build.
-const specHold = (h: Feature['planningHold']): boolean => h?.cause === 'spec-error' || h?.cause === 'spec-conflict';
+// A hold a spec fix answers: a spec error found by a review or the pre-launch check, or a conflict (or a plan too long: needs-split)
+// the planner found before any build.
+const specHold = (h: Feature['planningHold']): boolean => h?.cause === 'spec-error' || h?.cause === 'spec-conflict' || h?.cause === 'needs-split';
 export function currentFailure(f: Feature, p: Pick<SpecFixProposal, 'review' | 'launch' | 'inputs'>, events: Pick<LogEvent, 'event' | 'ts'>[]): string | null {
   const last = [...events].reverse().find((e) => e.event === 'launch');
   if (p.launch && last && last.ts !== p.launch) return 'the feature was launched again since';
@@ -298,7 +299,7 @@ export function candidates(root: string, config: Config, features: Feature[], by
   return features.flatMap((f) => {
     if (f.status !== 'todo' && f.status !== 'stuck') return [];
     const mine = Object.entries(byKey).filter(([, r]) => r.feature === f.id && r.cause === 'spec-error').sort((a, b) => (a[1].passStart ?? a[1].ts).localeCompare(b[1].passStart ?? b[1].ts)), latest = mine.at(-1);
-    const before = !!f.planningHold && (f.planningHold.review.startsWith('precheck:') || f.planningHold.cause === 'spec-conflict'); // held before any build
+    const before = !!f.planningHold && (f.planningHold.review.startsWith('precheck:') || f.planningHold.cause === 'spec-conflict' || f.planningHold.cause === 'needs-split'); // held before any build
     if (!latest && !before) return [];
     const inputs = holdInputs(root, config, f); // only for features a spec-error review blamed: it reads the briefs
     if ((f.specFix && f.specFix.inputs === inputs) || f.specFixDecisions?.[inputs]) return [];

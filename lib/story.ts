@@ -344,9 +344,10 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
         state = h.cause === 'base-defect' ? { word: 'On hold', tone: 'hold', why: `The same failure happens on ${inp.base}: ${h.evidence[0] ?? ''}`.trim(), next: `Checked again when ${inp.base} changes that code.` }
           : { word: 'On hold', tone: 'hold', why: h.review.startsWith('precheck:') ? `Before its first build, the spec was found to break a learned spec-writing rule: "${h.evidence[0] ?? ''}" ${h.evidence[1] ?? ''}`.trim()
               : h.cause === 'spec-conflict' ? `Before its first build, the planner found the spec cannot be met as written: ${h.evidence[0] ?? ''}`.trim()
+              : h.cause === 'needs-split' ? `Before its first build, the planner's plan was too long; the spec probably needs splitting: ${h.evidence.slice(0, 2).join('; ')}`.trim()
               : `The ${h.cause === 'prompt-conflict' ? 'instructions conflict' : 'spec cannot be met as written'}: ${h.evidence[0] ?? ''}`.trim(),
-            next: f.specFix?.status === 'proposed' ? 'Review the proposed spec fix below: apply it, or dismiss it and edit the spec yourself.' : 'Edit the spec, or release the hold to launch it as it is.' };
-        if (h.cause !== 'base-defect') needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: state.why ?? '' } : { what: 'Clarify the conflicting requirement', why: state.why ?? '' };
+            next: f.specFix?.status === 'proposed' ? 'Review the proposed spec fix below: apply it, or dismiss it and edit the spec yourself.' : h.cause === 'needs-split' ? 'Split or trim the spec, or release the hold to launch it as it is.' : 'Edit the spec, or release the hold to launch it as it is.' };
+        if (h.cause !== 'base-defect') needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: state.why ?? '' } : { what: h.cause === 'needs-split' ? 'Split or trim the spec' : 'Clarify the conflicting requirement', why: state.why ?? '' };
         break;
       }
       if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) { state = { word: 'Waiting to retry', tone: 'hold', why: 'A diagnosed test-environment fault; no retry used.', next: `Retries the same build at ${new Date(f.envRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` }; break; }
@@ -409,7 +410,7 @@ export function transitions(events: LogEvent[], titles: Record<string, string>, 
 export function queueNote(f: Feature, maxAttempts: number, base: string, unmetDeps: { title: string }[], blockingTask?: string): string | null {
   if (f.status !== 'todo') return null;
   if (f.specFix?.status === 'proposed') return 'Waiting for you: a proposed spec fix.';
-  if (f.planningHold) return f.planningHold.cause === 'base-defect' ? `On hold: the same failure happens on ${base}.` : 'On hold: the spec needs a clarification.';
+  if (f.planningHold) return f.planningHold.cause === 'base-defect' ? `On hold: the same failure happens on ${base}.` : f.planningHold.cause === 'needs-split' ? 'On hold: the spec probably needs splitting.' : 'On hold: the spec needs a clarification.';
   if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) return 'Waiting to retry after a test-environment fault (no retry used).';
   if (f.setupRetryAt && Date.parse(f.setupRetryAt) > Date.now()) return 'Waiting to retry after a setup failure (no retry used).';
   if (blockingTask) return `Needs you first: ${blockingTask}.`;

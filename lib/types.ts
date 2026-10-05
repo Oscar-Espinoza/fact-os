@@ -78,6 +78,7 @@ export interface PlannerConfig {
   effortHigh: string;                 // default high: a spec with sensitive words, or a feature that already failed an attempt
   maxPerDay: number;                  // planner runs started in any 24 hours (0 = none); over it, builds go on without a plan
   skipBelow: Tier | null;             // null = plan every feature; a tier: features of a lower tier (TIERS order) skip planning
+  splitWords: number;                 // default 750: a FEASIBLE plan over it puts the feature on a needs-split hold (no build)
 }
 
 // File claims (docs/merge-process.md): a file is hot when listed in `hot` (a path, or a dir prefix ending in "/") or
@@ -121,7 +122,8 @@ export interface AttemptStop { attempt: number; counted: boolean }
 // saved prompt and outcome, that the spec or the prompt cannot be met as written. Not a person's pause: no attempt is spent, and
 // it is released by an edit of the feature's inputs (its fingerprint changes) or by a person (`release`), never by time.
 export interface PlanningHold {
-  cause: 'spec-error' | 'prompt-conflict' | 'base-defect' | 'spec-conflict'; // spec-conflict: the planner found the spec cannot be met (before any build)
+  cause: 'spec-error' | 'prompt-conflict' | 'base-defect' | 'spec-conflict' | 'needs-split'; // spec-conflict: the planner found the spec cannot be met;
+  // needs-split: its plan ran over config.planner.splitWords words (both before any build)
   confidence: 'medium' | 'high';
   base?: string;                      // base-defect: the base commit at the hold; a later base that changes `paths` rechecks it (at most twice per signature)
   paths?: string[];                   // base-defect: the paths implicated in the defects

@@ -26,9 +26,9 @@ const C = (o: Partial<Config> = {}): Config => ({ ...DEFAULT_CONFIG, ...o });
 
 test('parsePlan: FEASIBLE with effort, split and the plan body', () => {
   assert.deepEqual(parsePlan('VERDICT: FEASIBLE\nEFFORT: high\nSPLIT: no\n\n1. Change lib/a.ts using parse() (rg: lib/b.ts:3).\n2. Order: a then b.'),
-    { verdict: 'FEASIBLE', effort: 'high', split: null, plan: '1. Change lib/a.ts using parse() (rg: lib/b.ts:3).\n2. Order: a then b.' });
+    { verdict: 'FEASIBLE', effort: 'high', split: null, plan: '1. Change lib/a.ts using parse() (rg: lib/b.ts:3).\n2. Order: a then b.', words: 12 });
   const s = parsePlan('\n  VERDICT: FEASIBLE\nEFFORT: medium\nSPLIT: yes: the API and the UI\nplan');
-  assert.deepEqual(s, { verdict: 'FEASIBLE', effort: 'medium', split: 'the API and the UI', plan: 'plan' });
+  assert.deepEqual(s, { verdict: 'FEASIBLE', effort: 'medium', split: 'the API and the UI', plan: 'plan', words: 1 });
 });
 
 test('parsePlan: INFEASIBLE needs numbered conflicts, each quoting file:line', () => {
@@ -44,8 +44,15 @@ test('parsePlan: anything off the contract is an error (fail soft), never a verd
     ['Here is my plan: just build it.', /first line/], ['**VERDICT: FEASIBLE**\nEFFORT: medium\nSPLIT: no\nx', /first line/],
     ['VERDICT: FEASIBLE\nSPLIT: no\nEFFORT: medium\nx', /second line/], ['VERDICT: FEASIBLE\nEFFORT: low\nSPLIT: no\nx', /second line/],
     ['VERDICT: FEASIBLE\nEFFORT: medium\nSPLIT: maybe\nx', /third line/], ['VERDICT: FEASIBLE\nEFFORT: medium\nSPLIT: no', /without a plan/],
-    ['VERDICT: FEASIBLE\nEFFORT: medium\nSPLIT: no\n' + 'word '.repeat(800), /800 words/], ['', /first line/], [null, /first line/],
+    ['', /first line/], [null, /first line/],
   ] as const) assert.match((parsePlan(text) as { error: string }).error ?? 'parsed', why, String(text).slice(0, 40));
+});
+
+test('parsePlan: a long plan is not an error; its word count is returned for the foreman to judge (config.planner.splitWords)', () => {
+  for (const n of [650, 800]) {
+    const p = parsePlan('VERDICT: FEASIBLE\nEFFORT: medium\nSPLIT: no\n' + 'word '.repeat(n));
+    assert.deepEqual(['error' in p, 'words' in p && p.words], [false, n]);
+  }
 });
 
 // ---- skip rules, cap, roles ----
@@ -91,7 +98,8 @@ test('config.planner: defaults, partial blocks keep defaults, bad values are ref
     mkdirSync(join(root, '.fact-os'));
     writeFileSync(file, JSON.stringify({ planner: { maxPerDay: 3 } }));
     assert.deepEqual(loadConfig(root).planner, { ...DEFAULT_CONFIG.planner, maxPerDay: 3 });
-    for (const bad of [{ enabled: 'yes' }, { maxPerDay: -1 }, { skipBelow: 'easy' }, { permissionMode: 'auto' }, { effort: '' }]) {
+    assert.equal(DEFAULT_CONFIG.planner.splitWords, 750);
+    for (const bad of [{ enabled: 'yes' }, { maxPerDay: -1 }, { skipBelow: 'easy' }, { permissionMode: 'auto' }, { effort: '' }, { splitWords: 0 }, { splitWords: 1.5 }, { splitWords: '750' }]) {
       writeFileSync(file, JSON.stringify({ planner: bad }));
       assert.throws(() => loadConfig(root), /config\.planner\./, JSON.stringify(bad));
     }
@@ -179,6 +187,40 @@ test('INFEASIBLE: the feature is held (spec-conflict) before any build; no build
   assert.equal(s.calls('plan', 'a').length, 1, 'the saved answer for this spec is not asked again');
   assert.match(s.calls('build', 'a')[0]!.prompt, /Planner concerns:[^]*README\.md:1/);
   assert.ok(s.events('a').some((e) => e.event === 'plan-overridden'));
+  assert.equal(s.feature('a').status, 'merged');
+});
+
+test('needs-split: a FEASIBLE plan over splitWords holds the feature before any build, with its word count and split suggestion', (t) => {
+  const s = setup(t, { features: [F('a')], scenario: { a: 'plan:long,plan:split' } });
+  const r = s.cli('run'); assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(s.calls('plan', 'a').length, 1);
+  assert.equal(s.calls('build', 'a').length, 0, 'no builder was started');
+  const f = s.feature('a');
+  assert.deepEqual([f.status, f.attempts, f.stop, f.planningHold?.cause], ['todo', 0, { attempt: 1, counted: false }, 'needs-split']);
+  assert.match(f.planningHold!.evidence[0]!, /plan has 79\d words \(over config\.planner\.splitWords 750\): split the spec/);
+  assert.equal(f.planningHold!.evidence[1], 'the planner suggests splitting: the API part and the UI part');
+  assert.match(f.planningHold!.evidence[2]!, /plan\.md$/);
+  assert.deepEqual([f.plan?.verdict, f.plan?.split], ['FEASIBLE', 'the API part and the UI part']);
+  assert.match(readFileSync(join(s.sy('runs'), 'a', 'plan.md'), 'utf8'), /^1\. Add a\.txt[^]*detail detail/);
+  assert.match(s.events('a').find((e) => e.event === 'planning-hold')!.detail, /^needs-split \(high\), planner before any build: [^]*No builder was started and no attempt spent/);
+  // A spec fix may answer it, like a spec-conflict hold.
+  assert.equal(currentFailure(f, { review: f.planningHold!.review, inputs: f.planningHold!.inputs }, []), null);
+  // Held until a person releases it; then the unchanged spec builds with the saved plan, without asking the planner again.
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('plan', 'a').length, 1, 'held features are not relaunched');
+  assert.equal(s.cli('release', 'a').status, 0);
+  const r2 = s.cli('run'); assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+  assert.equal(s.calls('plan', 'a').length, 1);
+  assert.match(s.calls('build', 'a')[0]!.prompt, /Plan \(from the planner[^]*detail detail/);
+  assert.match(s.events('a').find((e) => e.event === 'plan-overridden')!.detail, /needs-split hold was released/);
+  assert.equal(s.feature('a').status, 'merged');
+});
+
+test('needs-split: a plan under config.planner.splitWords is accepted and built', (t) => {
+  const s = setup(t, { features: [F('a')], config: { planner: { splitWords: 900 } }, scenario: { a: 'plan:long' } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').planningHold, undefined);
+  assert.match(s.calls('build', 'a')[0]!.prompt, /Plan \(from the planner[^]*detail detail/);
   assert.equal(s.feature('a').status, 'merged');
 });
 

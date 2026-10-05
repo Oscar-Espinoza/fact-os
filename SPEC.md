@@ -64,7 +64,7 @@ and one dashboard across projects.
   "profiles": {},               // extra model profiles (see Model profiles); optional; a profile may add "tiers" (below)
   "gateFixes": 0,               // resumed builder fixes after a test-gate failure, per pass (see Pass, Test)
   "diagnoser": null,            // null, or a role config (provider "claude" or "codex") diagnosing a repeated gate failure
-  "planner": {"enabled": true, "model": "opus", "effort": "medium", "effortHigh": "high", "maxPerDay": 50, "skipBelow": null}, // see Plan
+  "planner": {"enabled": true, "model": "opus", "effort": "medium", "effortHigh": "high", "maxPerDay": 50, "skipBelow": null, "splitWords": 750}, // see Plan
   "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30} // when a Codex run cannot answer
                                 // (a leftover "classifier" key, from the Jev classifier removed on 2026-10-05, is ignored; doctor notes it)
 }
@@ -329,7 +329,7 @@ Each tick:
      and answers, strictly: `VERDICT: FEASIBLE|INFEASIBLE`, `EFFORT: medium|high`, `SPLIT: no|yes: <the cut>`, then a
      numbered CONFLICTS list (each item quoting file:line, with 1-2 resolutions) or a plan under 600 words (files with the
      helper to reuse, composition points and how each check is proven, the mutation per guard, what not to touch, risks,
-     order; over 750 words is rejected). The answer is saved as `runs/<id>/plan.json` and `plan.md` (never committed),
+     order; a plan over `splitWords`, default 750, holds the feature, see below). The answer is saved as `runs/<id>/plan.json` and `plan.md` (never committed),
      summarized as the feature's `plan`, and reused while `holdInputs` (spec, deps, briefs, role instructions) is
      unchanged, failures included. **INFEASIBLE**: the feature goes back to `todo` with a `spec-conflict` planning hold
      (the conflicts as evidence, uncounted stop, event `planning-hold`): no builder starts and no attempt is spent; it is
@@ -338,7 +338,11 @@ Each tick:
      without a plan and the builder gets the conflicts as "Planner concerns" (`plan-overridden`). **FEASIBLE**: the plan
      follows the acceptance checks in the builder prompt as "Plan (from the planner; deviate only if the code proves it
      wrong, and say so in your final message)" and is shown to the evaluator as context only (it judges the acceptance
-     checks, never the plan); `EFFORT: high` moves the builder to its profile's `effortHigh` (never under opus, a tier or
+     checks, never the plan). A FEASIBLE plan over `splitWords` words (an integer > 0) instead puts the feature on a
+     `needs-split` planning hold exactly like a spec-conflict hold (uncounted stop, no builder, no attempt, the same
+     release rules, spec-fix and observer surfacing); its evidence is the word count, the planner's `SPLIT` cut if any, and
+     the saved `runs/<id>/plan.md`, asking for the spec to be split or trimmed; released unchanged, the spec builds with
+     that plan (`plan-overridden`). `EFFORT: high` moves the builder to its profile's `effortHigh` (never under opus, a tier or
      a ladder step; logged as the run's `rule`); `SPLIT` is recorded (`planned` event, `status`, dashboard story) and
      changes nothing. Skipped (`plan-skipped`) when `enabled` is false, the feature's tier is below `skipBelow` (TIERS
      order; untiered features are planned), `maxPerDay` planner runs started in the last 24 hours (from the log), or the

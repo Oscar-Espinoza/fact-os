@@ -31,7 +31,7 @@ export interface Lesson { key: string; feature: Feature; change: string; why: st
 // spec a review blamed. Each once (`done` holds their keys).
 export function lessonsToLearn(events: LogEvent[], features: Feature[], done: Set<string>): Lesson[] {
   const byId = new Map(features.map((f) => [f.id, f]));
-  const blamed = new Set(events.filter((e) => e.event === 'planning-hold' && /spec-error|spec-conflict/.test(e.detail || '')).map((e) => e.feature));
+  const blamed = new Set(events.filter((e) => e.event === 'planning-hold' && /spec-error|spec-conflict|needs-split/.test(e.detail || '')).map((e) => e.feature));
   return events.flatMap((e) => {
     const key = `${e.ts}|${e.feature}|${e.event}`, f = e.feature ? byId.get(e.feature) : undefined;
     if (!f || done.has(key)) return [];
