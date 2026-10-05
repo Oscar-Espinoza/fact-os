@@ -180,10 +180,15 @@ export function symbolDefined(src: string, symbol: string): boolean | null {
   const lines = m.text.split('\n'), sym = symbol.replace(/[$.]/g, (c) => `\\${c}`), id = `(?<![\\w$])${sym}(?![\\w$])`;
   const decl = new RegExp(`^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function\\*?|const|let|var|class|interface|type|enum)\\s+${id}`);
   const def = new RegExp(`^\\s*(public |private |protected |static |async |readonly |get |set )*${id}\\s*(\\(|:|=|<)`);
-  if (lines.some((l) => decl.test(l) || def.test(l))) return true;
-  // Inside a destructuring pattern a name may be a property key, an alias or a binding; telling them apart needs a parser.
-  const patterns = [...m.text.matchAll(/\b(?:const|let|var)\s*([{[][\s\S]*?[}\]])\s*=/g)].map((x) => x[1]!);
-  return patterns.some((pat) => new RegExp(id).test(pat)) ? null : false;
+  // Inside a destructuring pattern a name may be a property key, an alias or a binding; telling them apart needs a parser, so
+  // a line inside one is never evidence, and a name found only there is unknown.
+  const spans = [...m.text.matchAll(/\b(?:const|let|var)\s*([{[][\s\S]*?[}\]])\s*=/g)].map((x) => {
+    const from = m.text.slice(0, x.index! + x[0].indexOf(x[1]!)).split('\n').length - 1;
+    return { from, to: from + x[1]!.split('\n').length - 1, text: x[1]! };
+  });
+  const inPattern = (i: number) => spans.some((sp) => i >= sp.from && i <= sp.to);
+  if (lines.some((l, i) => !inPattern(i) && (decl.test(l) || def.test(l)))) return true;
+  return spans.some((sp) => new RegExp(id).test(sp.text)) ? null : false;
 }
 
 // What each ref's verification covered: the whole file. Any change to it sends the atom back to the curator before it is used

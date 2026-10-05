@@ -150,6 +150,9 @@ test('fourth recheck: fingerprints are exact blob ids; an unsure scan is unknown
   assert.equal(symbolDefined('import { helpers } from "./h.ts";\nexport const { tenantScoped: localHelper } = helpers;\n', 'tenantScoped'), null);
   assert.equal(symbolDefined('export const {\n  a = 1,\n  tenantScoped,\n} = x;\n', 'tenantScoped'), null);
   assert.equal(symbolDefined('export const { a } = x;\n', 'tenantScoped'), false);
+  assert.equal(symbolDefined('import { helpers } from "./h.ts";\nexport const {\n  tenantScoped: localHelper,\n} = helpers;\n', 'tenantScoped'), null);
+  assert.equal(symbolDefined('export const {\n  tenantScoped = () => true,\n} = x;\n', 'tenantScoped'), null);
+  assert.equal(symbolDefined('export const {\n  a,\n} = x;\nexport function tenantScoped() {}\n', 'tenantScoped'), true);
   assert.equal(symbolDefined('export function tenantScoped$() { return true; }\n', 'tenantScoped$'), true);
   assert.equal(symbolDefined('export function tenantScoped$() {}\n', 'tenantScoped'), false);
 });
