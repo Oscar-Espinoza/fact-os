@@ -366,9 +366,9 @@ export function evaluatorDiffCommands(files: { status: string; paths: string[]; 
     `${f.status[0]} ${counts(f)} ${f.paths.join(' -> ')}\n    ${cmd(f.paths)}`).join('\n')}`,
   hidden.length ? `Generated or excluded files (read them only if a check depends on them):\n${hidden.map((f) =>
     `${f.status[0]} ${counts(f)} ${f.paths.join(' -> ')}`).join('\n')}` : '',
-  'You MUST read the diff of every changed file listed above (for an added file, read the whole file) before you judge, and read ' +
-  'the tests your findings rely on. Run the commands above (one per file, or several paths in one command); do not judge from ' +
-  'file names or counts. Skipping a changed file is a failure of your job: a defect in a file you did not read is still yours to find.',
+  'Read the diff of every changed file listed above (the whole file for an added one) and the tests your findings rely on before you ' +
+  'judge. Run the commands above (one per file, or several paths in one command); file names and counts are not evidence. A defect ' +
+  'in a file you did not read is still yours to find.',
   ].filter(Boolean).join('\n\n');
 }
 

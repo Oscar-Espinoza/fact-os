@@ -1127,13 +1127,13 @@ test('evaluator diff: small is inlined; over evaluatorInlineDiffBytes it is a fi
   };
   const small = evalPrompt({}).p;
   assert.match(small, /Diff main\.\.\.ship\/a:\n```diff\n[\s\S]*b\/a\.txt/);
-  assert.doesNotMatch(small, /not inlined|You MUST read the diff/);
+  assert.doesNotMatch(small, /not inlined|Read the diff of every changed file/);
   const { s, p: big } = evalPrompt({ evaluatorInlineDiffBytes: 0 });
   assert.doesNotMatch(big, /```diff/);
   assert.match(big, /Diff main\.\.\.ship\/a \(not inlined\):/);
   const cmd = /^A \+\d+ -0 a\.txt\n {4}(git diff --no-ext-diff [0-9a-f]{40}\.\.\.[0-9a-f]{40} -- a\.txt)$/m.exec(big);
   assert.ok(cmd, big);
-  assert.match(big, /You MUST read the diff of every changed file[\s\S]*Skipping a changed file is a failure of your job/);
+  assert.match(big, /Read the diff of every changed file[\s\S]*A defect in a file you did not read is still yours to find/);
   assert.match(execFileSync('sh', ['-c', cmd![1]!], { cwd: s.repo, encoding: 'utf8' }), /\+\+\+ b\/a\.txt/, 'the command shows the file\'s diff');
   const plan = evalPrompt({ evaluatorInlineDiffBytes: 0, evaluator: { model: 'opus', effort: 'high', permissionMode: 'plan' } }).p;
   assert.match(plan, /Diff main\.\.\.ship\/a:\n```diff\n/, 'an evaluator that cannot run git gets the diff inlined');

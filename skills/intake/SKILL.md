@@ -7,14 +7,14 @@ description: Interview the user briefly and write fact-os's .fact-os/features.js
 
 Turn what the user wants built into fact-os's feature list and human inbox.
 
-1. Read what already exists: `.fact-os/config.json`, `.fact-os/features.json`, `.fact-os/human.json`,
+1. Read what already exists in the project's state directory (`.fact-os/`, or `.shipyard/` in older projects): `config.json`, `features.json`, `human.json`,
    the README and the code layout. Keep existing features (never reset their `status`/`attempts`).
    Read the spec-writing notes, `spec-notes.md` in the project's state directory (`.fact-os/`, or `.shipyard/` in older
    projects), when it exists, and follow every rule in it: the factory learned them from specs it had to correct, and it
    checks new features against them before their first build (`fact-os spec-notes` prints them).
 2. Ask **at most 5** short questions, in one message, only about what you cannot infer: scope of the
    first release, target surfaces, external services and accounts, what "done" looks like, priorities.
-3. Write `.fact-os/features.json` as `{ "features": [Feature] }`:
+3. Write `features.json` in that directory as `{ "features": [Feature] }`:
    - `id` (short slug, unique), `title`, `description` (enough for a builder with no other context),
    - `shortTitle` (a few plain words for the dashboard) and `goal` (one plain sentence a non-programmer understands:
      what the feature is for, no paths or code). The dashboard shows them first; the title, description and
@@ -33,7 +33,7 @@ Turn what the user wants built into fact-os's feature list and human inbox.
      - `investigate`: the root cause or the right approach is unknown and needs digging first.
    - `status: "todo"`, `attempts: 0`, `updatedAt`: now (ISO). Optional `branch` to continue an existing branch.
    Prefer small features that one agent can finish in one session.
-4. Write `.fact-os/human.json` as `{ "tasks": [HumanTask] }`. Anything only the user can do becomes a
+4. Write `human.json` in that directory as `{ "tasks": [HumanTask] }`. Anything only the user can do becomes a
    task: creating accounts, obtaining credentials or API keys, signing contracts, store/host setup,
    legal and compliance decisions, DNS. Each task has `id`, `title`, exact numbered `steps` the user
    can follow without guessing, `unblocks` (feature ids), `mockable` (true when a builder can make

@@ -13,7 +13,8 @@ description: Start fact-os's foreman on this repo in the background and report s
    "Mark merged". Dependents wait for this verified acknowledgment; it does not perform the Git merge.
    Tell the user which workflow the project uses.
 3. Start the foreman in the background (it keeps running while features wait on the user):
-   `mkdir -p .fact-os/runs && nohup fact-os run --watch > .fact-os/runs/foreman.out 2>&1 &`
+   `mkdir -p <state>/runs && nohup fact-os run --watch > <state>/runs/foreman.out 2>&1 &`
+   (`<state>` is the project's state directory: `.fact-os/`, or `.shipyard/` in older projects.)
    Only one foreman runs per repo; if one is already running, do not start another.
 4. Run `fact-os status` and report it: what is building, what is next, and every open human task
    with its steps (those are the user's to-do list; `fact-os done <id>` marks one done).

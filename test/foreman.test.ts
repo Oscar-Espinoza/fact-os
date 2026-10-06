@@ -292,7 +292,7 @@ test('evaluatorDiffCommands: status, counts and one git diff per file; excluded 
   assert.match(out, /Generated or excluded files[^\n]*\nM \+500 -400 gen\/x\.json$/m);
   assert.doesNotMatch(out, /-- gen\/x\.json/);
   assert.match(out, /5 files changed, 514 insertions\(\+\), 402 deletions\(-\)/);
-  assert.match(out, /You MUST read the diff of every changed file[\s\S]*Skipping a changed file is a failure of your job/);
+  assert.match(out, /Read the diff of every changed file[\s\S]*A defect in a file you did not read is still yours to find/);
   assert.deepEqual(['auto', 'bypassPermissions', 'plan', 'acceptEdits', undefined].map((m) => evaluatorRunsGit({ permissionMode: m, provider: 'codex' })),
     [true, true, false, false, false]);
 });
