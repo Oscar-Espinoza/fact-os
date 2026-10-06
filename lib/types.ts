@@ -269,7 +269,12 @@ export interface RunRecord { phase: RunPhase; tag: string; role: string; provide
 // The builder's own account of a run (FINISH_RULE's optional exit block). Self-reported and attributed: it never decides an
 // outcome, places a hold or clears a failure; the foreman stores it beside the declared touches and the actual diff.
 export const BLOCK_REASONS = ['missing-info', 'spec-conflict', 'environment', 'tooling'] as const;
-export interface BuilderExit { touched: string[]; unsure: string[]; blocked: { reason: typeof BLOCK_REASONS[number]; what: string } | null }
+export interface BuilderExit { touched: string[]; unsure: string[]; blocked: { reason: typeof BLOCK_REASONS[number]; what: string } | null; responses?: ReviewResponse[] }
+// A review fix pass's answer to one numbered reviewer finding (the exit block's `responses`, review fixes only). Self-reported:
+// the next evaluator gets it as context to verify, never as proof. `key`/`text`: the finding it answers (reviewItems), added by
+// the foreman when it stores the exit record.
+export const RESPONSE_STATUSES = ['fixed', 'disputed', 'cannot'] as const;
+export interface ReviewResponse { finding: number; status: typeof RESPONSE_STATUSES[number]; how: string; where: string; key?: string; text?: string }
 
 // log.jsonl
 export interface LogEvent {

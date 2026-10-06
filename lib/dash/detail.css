@@ -81,6 +81,11 @@ details.d-sm>summary{font-size:12px;color:var(--dim)}
 .d-reasons{margin-top:8px;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:6px;display:flex;flex-direction:column;gap:10px;font-size:14px}
 .d-r b{color:var(--amber);font-weight:600;overflow-wrap:anywhere}
 .d-r details{margin-top:2px}
+.d-hd{margin:4px 0 0;font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.d-hd .d-lbl{margin-right:6px}
+.d-hd code{font-family:var(--mono);font-size:12px;color:var(--nav)}
+.d-hs{display:inline-block;margin-right:6px;padding:0 6px;border-radius:999px;border:1px solid currentColor;font-size:11px;line-height:17px;text-transform:uppercase;letter-spacing:.03em}
+.d-hs.fixed{color:var(--green)}.d-hs.disputed{color:var(--amber)}.d-hs.cannot{color:var(--red)}
 
 /* journey */
 .d-jh{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}

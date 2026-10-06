@@ -33,7 +33,7 @@ if (has('hang')) { // never answers; leaves a grandchild in its process group
 }
 // "slow" (any mode): five times the delay, so one feature can outlast another
 await new Promise((r) => setTimeout(r, Number(process.env.FAKE_DELAY_MS ?? 400) * (flags.includes('slow') ? 5 : 1)));
-let result = 'done', extra: Record<string, unknown> = {};
+let result = 'done', extra: Record<string, unknown> = {}, responses: unknown[] | null = null;
 const conflicted = () => git('diff', '--name-only', '--diff-filter=U').split('\n').filter(Boolean);
 if (mode === 'resolve') {
   // keep both sides of each conflicted file (ours, then theirs) and commit the merge; "drop": keep only ours (loses
@@ -125,10 +125,22 @@ if (mode === 'resolve') {
   const commitOnly = prompt.startsWith('The foreman found that your work is not committed');
   const keepFix = prompt.startsWith('The foreman checked the merge you resolved'), reviewFix = prompt.startsWith('An independent evaluator rejected');
   const progressFix = prompt.startsWith('Your branch still has exactly the content the evaluator rejected');
+  const earlyResume = prompt.startsWith('Your turn ended while work was pending');
+  // A review fix answers each numbered finding ("fix:dispute": the first is disputed; "fix:no-answer": no responses; an early
+  // resume answers the findings of this feature's last review fix). "fix:early-exit": the review fix ends its turn waiting.
+  const findingsOf = (p: string) => p.startsWith('An independent evaluator rejected') ? [...p.split('\n\n')[1]!.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1])) : [];
+  const lastReview = earlyResume && existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { mode: string; id: string; prompt: string })
+    .filter((e) => e.mode === 'fix' && e.id === id && e.prompt.startsWith('An independent evaluator rejected')).pop() : undefined;
+  const nums = reviewFix ? findingsOf(prompt) : lastReview ? findingsOf(lastReview.prompt) : [];
+  if (nums.length && !has('no-answer')) responses = nums.map((n, i) => (has('dispute') && i === 0
+    ? { finding: n, status: 'disputed', how: 'The 409 is the specified answer for a saved partial claim; credit.test.ts covers it.', where: 'credit.test.ts:12' }
+    : { finding: n, status: 'fixed', how: 'Changed the handler so the case works, with a test that failed before.', where: `${id}-review-fix.txt` }));
+  if (reviewFix && has('early-exit')) result = 'Gate running (~18 min last time); waiting for its completion notification.';
   if (keepFix) { // declare every lost line exactly as the feedback shows it
     const recs = [...prompt.matchAll(/^ {2}(dropped: .+)$/gm)].map((m) => m[1]!);
     if (!has('noop') && recs.length) git('commit', '-q', '--allow-empty', '-m', ['declare the lines the merge dropped', ...recs.flatMap((r) => [r, 'Reason: moved'])].join('\n'));
   } else if (reviewFix) { if (!has('noop')) commit(`${id}-review-fix.txt`, 'fixed what the evaluator found\n'); }
+  else if (earlyResume) {} // finishes the pending work: nothing to change, it replies with its Summary and exit block
   else if (progressFix) { if (has('empty')) git('commit', '-q', '--allow-empty', '-m', 'an empty commit'); else if (!has('noop')) commit(`${id}-progress.txt`, 'the missing work\n'); }
   else if (!has('noop') && !(has('noop1') && fixes === 0)) {
     if (existsSync(git('rev-parse', '--git-path', 'MERGE_HEAD'))) {
@@ -171,6 +183,12 @@ if (mode === 'resolve') {
   // a scripted string is the evaluator's whole reply, as is (prose instead of a verdict)
   result = typeof scripted === 'string' ? scripted : 'Verdict:\n```json\n' + JSON.stringify(scripted ?? { pass: true,
     findings: [{ check: 'works', ok: true, evidence: 'fake' }], cheating: [], lesson: null }) + '\n```';
+}
+// A builder's reply (build or resumed): a Summary line and an exit block, unless "no-exit" (a bare reply) or "early-exit" (the
+// first build ends its turn waiting for a background command; the resumed session then finishes).
+if ((mode === 'build' || mode === 'fix') && result === 'done') {
+  if (has('early-exit') && mode === 'build') result = 'Gate running (~18 min last time); waiting for its completion notification.';
+  else if (!has('no-exit')) result = 'Summary: Did the work.\n```exit\n' + JSON.stringify({ touched: [], unsure: [], blocked: null, ...(responses ? { responses } : {}) }) + '\n```';
 }
 const args = process.argv.slice(2), arg = (k: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : null); // model/effort: what this launch ran with
 appendFileSync(log, JSON.stringify({ mode, id, t0, t1: Date.now(), model: arg('--model'), effort: arg('--effort'), provider: process.env.FAKE_PROVIDER ?? 'claude', prompt, args }) + '\n');

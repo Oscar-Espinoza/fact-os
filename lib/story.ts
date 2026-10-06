@@ -2,18 +2,21 @@
 // Pure: built from the feature, its log events (oldest first) and its run artifacts. State comes from recorded events and
 // validated verdicts only; an agent's own words supply a sentence, never a pass or a fail. What the records do not say is
 // not invented: a step without a recorded result says so.
-import type { Feature, LogEvent, Verdict, SpecFixProposal, SpecFixRecord } from './types.ts';
+import type { Feature, LogEvent, Verdict, SpecFixProposal, SpecFixRecord, ReviewResponse } from './types.ts';
 
 export type StepKind = 'build' | 'reused' | 'save' | 'resolve' | 'test' | 'diagnose' | 'review' | 'fix' | 'merge' | 'ready' | 'end' | 'stop' | 'hold' | 'note';
 export type StepState = 'done' | 'running' | 'needs-changes' | 'failed' | 'interrupted' | 'reused' | 'info';
-export interface Reason { title: string; detail?: string }
+// key: which finding of the verdict it is (reviewItems); handled: how a review fix answered it, once a fix pass followed (null: no
+// answer was recorded for it).
+export interface Reason { title: string; detail?: string; key?: string; handled?: { status: ReviewResponse['status']; how: string; where: string } | null }
 // `said`: an agent's own final words, kept for an expand control; a row's `text` never comes from them.
 export interface Step { kind: StepKind; label: string; state: StepState; text: string; note?: string; reasons?: Reason[]; start?: string; end?: string; tag?: string; who?: string; said?: string }
 export type TryOutcome = 'running' | 'merged' | 'ready' | 'failed' | 'stuck' | 'held' | 'stopped' | 'interrupted';
 export interface Try { n: number; outcome: TryOutcome; summary: string; steps: Step[]; start?: string; end?: string }
 export interface Cycle { tries: Try[]; endedBy?: string }
 // files/unsure: a build's structured exit record (the files it touched, the points it reported as unsure), when one was written.
-export interface StoryRun { tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; text: string; verdict?: Verdict | null; files?: number; unsure?: string[] }
+// asked: a review fix's run, the number of findings its prompt asked it to answer; responses: its answers (its exit record).
+export interface StoryRun { tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; text: string; verdict?: Verdict | null; files?: number; unsure?: string[]; asked?: number; responses?: ReviewResponse[] }
 export interface StoryState { word: string; tone: 'run' | 'fix' | 'ok' | 'queue' | 'hold' | 'bad' | 'idle'; why: string | null; next: string | null }
 export interface Story {
   title: string; goal: string | null; state: StoryState; needsYou: { what: string; why: string } | null;
@@ -76,10 +79,16 @@ export function builderText(text: string | undefined): string {
 }
 // A builder step's one-line outcome, from structured records only (its exit record's file list, the commit the checks ran
 // on); the agent's own final message is never the row's text.
-export function buildOutcome(kind: 'build' | 'fix' | 'resolve', run: Pick<StoryRun, 'files' | 'unsure'> | undefined, sha: string | undefined): string {
+// `answered`: for a review fix, its answers to the review's findings (the summary leads with their counts).
+export function buildOutcome(kind: 'build' | 'fix' | 'resolve', run: Pick<StoryRun, 'files' | 'unsure'> | undefined, sha: string | undefined, answered?: { responses: ReviewResponse[]; findings: number }): string {
   const verb = kind === 'fix' ? 'Fixed' : kind === 'resolve' ? 'Combined the changes' : 'Built';
   const parts = [run?.files != null ? `${run.files} ${run.files === 1 ? 'file' : 'files'} changed` : '', sha ? `commit ${sha.slice(0, 7)}` : ''].filter(Boolean);
   const unsure = run?.unsure?.length ? ` It flagged ${run.unsure.length} open ${run.unsure.length === 1 ? 'point' : 'points'}.` : '';
+  if (answered) {
+    const rs = answered.responses, c = (st: ReviewResponse['status']) => rs.filter((r) => r.status === st).length, none = answered.findings - rs.length;
+    const head = rs.length ? `${c('fixed')} fixed, ${c('disputed')} disputed, ${c('cannot')} cannot${none > 0 ? `, ${none} not answered` : ''}` : 'No answers to the review findings were recorded';
+    return `${head}${parts.length ? ` (${parts.join(', ')})` : ''}.${unsure}`;
+  }
   return `${parts.length ? `${verb}: ${parts.join(', ')}` : run ? `${verb}; no file list or commit was recorded` : `${verb}; no build record was found for this step`}.${unsure}`;
 }
 const said = (r: StoryRun): string | undefined => {
@@ -88,13 +97,21 @@ const said = (r: StoryRun): string | undefined => {
 };
 const SHA = /^[0-9a-f]{7,40}$/;
 const sentence = (s: string, n = 140) => clip((/^(.+?[.!?])(\s|$)/.exec(s.trim())?.[1] ?? s.trim()), n);
-// A review's reasons, failed findings and blocking entries first; a passing check is never a reason.
+// A rejection's findings in one fixed order (blocking, cheating, failed checks, base defects): the order and numbering of a
+// review fix prompt and of the review row's reasons. `key` identifies the finding; `part` is a verdict holding only it.
+export function reviewItems(v: Verdict): { key: string; part: Partial<Verdict> }[] {
+  return [...v.blocking.map((b) => ({ key: `blocking:${b}`, part: { blocking: [b] } })),
+    ...v.cheating.map((c) => ({ key: `cheating:${c}`, part: { cheating: [c] } })),
+    ...v.findings.filter((f) => f.ok !== true).map((f) => ({ key: `failed:${f.check}`, part: { findings: [f] } })),
+    ...(v.baseDefects ?? []).map((d) => ({ key: `base:${d.check}:${d.signature}`, part: { baseDefects: [d] } }))];
+}
+// A review's reasons, blocking entries first (reviewItems order); a passing check is never a reason.
 export function reviewReasons(v: Verdict): Reason[] {
-  const out: Reason[] = [];
-  for (const b of v.blocking) out.push({ title: sentence(b.replace(/^[A-Z][\w /-]{2,40}:\s*/, (m) => m), 140), detail: b });
-  for (const c of v.cheating) out.push({ title: `Weakened or fake test: ${sentence(c, 120)}`, detail: c });
-  for (const f of v.findings) if (f.ok !== true) out.push({ title: `Check failed: ${clip(f.check, 110)}`, detail: f.evidence });
-  for (const d of v.baseDefects ?? []) out.push({ title: `Defect already on main: ${clip(d.signature, 110)}`, detail: d.evidence });
+  const out: Reason[] = reviewItems(v).map(({ key, part }) => {
+    const b = part.blocking?.[0], c = part.cheating?.[0], f = part.findings?.[0], d = part.baseDefects?.[0];
+    return b != null ? { title: sentence(b, 140), detail: b, key } : c != null ? { title: `Weakened or fake test: ${sentence(c, 120)}`, detail: c, key }
+      : f ? { title: `Check failed: ${clip(f.check, 110)}`, detail: f.evidence, key } : { title: `Defect already on main: ${clip(d!.signature, 110)}`, detail: d!.evidence, key };
+  });
   if (v.error && !out.length) out.push({ title: /^evaluator failed/.test(v.error) ? 'The review run itself failed' : 'The review answer was not valid', detail: v.error });
   return out;
 }
@@ -182,6 +199,18 @@ export function withResets(events: LogEvent[]): LogEvent[] {
 const cycleEnd = (e: LogEvent): string | null => CYCLE_START[e.event] ?? (e.event === 'resumed' && e.attemptsReset ? 'before it was resumed with fresh tries'
   : e.event === 'attempts-reset' ? (e.detail === 'spec' ? 'before the spec was edited' : 'before its tries were reset') : null);
 
+// Puts a review fix's answers under the review's reasons (by finding key, else by number when the answers carry no keys); a
+// reason with no answer gets null ('no answer recorded'). Returns what the fix row's summary counts.
+export function answer(reasons: Reason[], responses: ReviewResponse[]): { responses: ReviewResponse[]; findings: number } {
+  const keyed = responses.some((r) => r.key), used: ReviewResponse[] = [];
+  reasons.forEach((r, i) => {
+    const hit = keyed ? responses.find((x) => x.key && x.key === r.key) : responses.find((x) => x.finding === i + 1);
+    r.handled = hit ? { status: hit.status, how: hit.how, where: hit.where } : null;
+    if (hit) used.push(hit);
+  });
+  return { responses: used, findings: reasons.length };
+}
+
 export function buildStory(inp: StoryInput): Story {
   const f = inp.feature, runs = [...inp.runs].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), used = new Set<StoryRun>();
   const cycles: Cycle[] = [{ tries: [] }];
@@ -189,6 +218,7 @@ export function buildStory(inp: StoryInput): Story {
   let tr: Try | null = null, pendingNote: string | null = null, testsInTry = 0, reviewsInTry = 0, envRetest = false, lateMerge: string | null = null;
   const cyc = () => cycles[cycles.length - 1]!, orphans: { when: string; text: string }[] = []; // failures logged outside any recorded try
   const st = { open: null as Step | null }; // the running step (a holder: closures reassign it)
+  const reviewOf = new Map<Step, Step>(); // a review fix's row → the review row whose findings it answers
   // The artifact of a step that ended at `end`: the newest unused one of `roles` written during the step. The foreman writes
   // a run's output before logging the event that ends the step, so a later repair's output never belongs to it.
   const artifact = (roles: StoryRun['role'][], start: string | undefined, end: string, peek = false) => {
@@ -206,7 +236,8 @@ export function buildStory(inp: StoryInput): Story {
     else if (s.kind === 'build' || s.kind === 'fix' || s.kind === 'resolve') {
       const a = artifact(s.kind === 'resolve' ? ['resolve'] : ['build', 'resolve'], s.start, ts);
       if (a) { s.tag = a.tag; const w = said(a); if (w) s.said = w; }
-      if (a || state === 'done') s.text = buildOutcome(s.kind, a, sha && SHA.test(sha) ? sha : undefined);
+      const rv = reviewOf.get(s), answered = rv?.reasons?.length && a?.asked ? answer(rv.reasons, a?.responses ?? []) : undefined;
+      if (a || state === 'done') s.text = buildOutcome(s.kind, a, sha && SHA.test(sha) ? sha : undefined, answered);
     }
   };
   const closeReview = (ts: string, state: StepState, lead: string) => {
@@ -283,7 +314,13 @@ export function buildStory(inp: StoryInput): Story {
         st.open = null; break;
       }
       case 'env-rerun': if (st.open?.kind === 'test') close(e.ts, 'failed', testFailText(e)); envRetest = true; break;
-      case 'review-fix': closeReview(e.ts, 'needs-changes', 'Needs changes'); push({ kind: 'fix', label: 'Fix', state: 'running', text: 'Addressing the review findings in the same session.', note: 'No retry used for this repair.', start: e.ts }); break;
+      case 'review-fix': {
+        const rv = st.open?.kind === 'review' ? st.open : null;
+        closeReview(e.ts, 'needs-changes', 'Needs changes');
+        const fx: Step = { kind: 'fix', label: 'Fix', state: 'running', text: 'Addressing the review findings in the same session.', note: 'No retry used for this repair.', start: e.ts };
+        push(fx); if (rv) reviewOf.set(fx, rv); break;
+      }
+      case 'builder-resumed-early-exit': if (st.open) st.open.note = `${st.open.note ? st.open.note + ' ' : ''}Its turn ended while work was still running; the factory resumed it once to finish.`; break;
       case 'revalidate': closeReview(e.ts, 'done', ''); push({ kind: 'note', label: 'Main moved', state: 'info', text: 'Main changed after the review; checking the combined work again.', start: e.ts }); break;
       case 'ready': closeReview(e.ts, 'done', ''); push({ kind: 'ready', label: 'Ready', state: 'done', text: inp.manualMerge ? 'Ready for you to merge.' : 'Ready to merge.', start: e.ts }); endTry(e.ts, 'ready', 'Passed review; ready to merge.'); break;
       case 'merged': {

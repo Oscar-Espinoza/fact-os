@@ -11,9 +11,9 @@ import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, 
 import { escalates, ladderFailures, ladderStep, plannedEffort, plannerRole, resolveRole, tierApplies } from './profiles.ts';
 import { cachedPlan, parsePlan, PLAN_TEXT, planSkip, plannerPrompt, plannerRunsSince, savePlan, summaryOf, type SavedPlan } from './plan.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
-import { testFailure } from './story.ts';
+import { reviewItems, testFailure } from './story.ts';
 import { atomStale, candidateMap, pickAtoms, readAtoms, recap, renderContext, selectLessons } from './context.ts';
-import { IN_FLIGHT, ISSUE_KINDS, type FailureKind, BLOCK_REASONS, type BuilderExit, type IssueKind, type BaseDefect, type RunPhase, type RunRecord, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
+import { IN_FLIGHT, ISSUE_KINDS, type FailureKind, BLOCK_REASONS, RESPONSE_STATUSES, type ReviewResponse, type BuilderExit, type IssueKind, type BaseDefect, type RunPhase, type RunRecord, type ClaudeResult, type Config, type Control, type Feature, type Finding, type HumanTask, type LogEvent, type Paths, type Role, type RoleConfig, type Verdict } from './types.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 export const HEADING = `## ${NAME} lessons`, OLD_HEADINGS = ['## Shipyard lessons'];
@@ -400,7 +400,7 @@ export function failureId(output: string): string {
   return [...keep].some((l) => /\b\w*Error\b:|AssertionError|\bExpected\b|\bReceived\b/i.test(l)) ? [...keep].sort().join('\n') : '';
 }
 
-export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string | { commands: string }, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = [], plan = ''): string {
+export function evaluatorPrompt(root: string, config: Config, f: Feature, branch: string, diff: string | { commands: string }, test: { code: number; tail: string }, tests: string[], resolved = '', notes = '', edits: string[] = [], mockTasks: HumanTask[] = [], plan = '', answers = ''): string {
   const onMock = mockTasks.length > 0;
   return [`You are the evaluator for feature "${f.id}": ${f.title}`,
     'You did not write this code. Judge it skeptically. You may read files and run commands; do not modify or commit anything in this',
@@ -448,7 +448,7 @@ export function evaluatorPrompt(root: string, config: Config, f: Feature, branch
       `checks or the diff, or reject the feature and list it under "cheating":\n${edits.map((e) => `- ${e}`).join('\n')}\n` : '',
     plan ? `\nContext only: the plan a read-only planner wrote before the build. Judge the work against the acceptance checks above, never ` +
       `against this plan; a deviation from it is not a finding by itself.\n${plan}\n` : '',
-    briefs(root, config), notes].join('\n');
+    answers, briefs(root, config), notes].join('\n');
 }
 
 // Edits between two commits to test files that exist at `from` (TEST_FILE): deleted files, removed lines, and added
@@ -506,7 +506,8 @@ export function commitFixPrompt(config: Config, problem: string): string {
 export const FINISH_RULE = 'Before your final reply, wait for every command needed for acceptance to complete, inspect its exit status, and commit all ' +
   'required code and evidence. Prefer foreground commands; if a tool backgrounds a long command, poll or wait within this run until it finishes. ' +
   'Never finish with required work or evidence still pending, and stop or finish every background command before your final reply (one that ends ' +
-  'after it starts a stray extra turn). Keep any acceptance requirement for a complete gate run: do not replace it with ' +
+  'after it starts a stray extra turn). Ending your turn is not waiting: the foreman takes the reply that ends your turn as final, ' +
+  'and a completion notification that arrives after it is never acted on, so never end your turn to wait for one. Keep any acceptance requirement for a complete gate run: do not replace it with ' +
   'partial checks; if it cannot complete here, say so plainly with the actual limitation. Begin your final reply with one plain sentence, ' +
   'starting "Summary:", saying what you changed or what stopped you, in words a non-programmer understands (no paths or code). ' +
   'End it with a fenced ```exit block holding one JSON object: {"touched": [the repository paths you changed], "unsure": [assumptions you made ' +
@@ -551,8 +552,52 @@ export function parseExit(text: string): BuilderExit | null {
   const b = r.blocked as Record<string, unknown> | null | undefined;
   const blocked = b && typeof b === 'object' && (BLOCK_REASONS as readonly string[]).includes(b.reason as string) && typeof b.what === 'string' && b.what.trim()
     ? { reason: b.reason as typeof BLOCK_REASONS[number], what: b.what.trim().slice(0, 300) } : null;
-  return { touched: strs(r.touched, 80, 200), unsure: strs(r.unsure, 5, 300), blocked };
+  const responses = parseResponses(r.responses);
+  return { touched: strs(r.touched, 80, 200), unsure: strs(r.unsure, 5, 300), blocked, ...(responses.length ? { responses } : {}) };
 }
+// An exit block's `responses`, fail-soft: entries with a positive integer finding, a known status and a nonempty `how` are kept
+// (bounded; the first answer to a finding wins; `where` may be empty); anything else is dropped. `count`: the findings the fix
+// prompt numbered, when known (an answer to a number outside 1..count is dropped).
+export function parseResponses(v: unknown, count?: number): ReviewResponse[] {
+  if (!Array.isArray(v)) return [];
+  const out: ReviewResponse[] = [], seen = new Set<number>();
+  for (const e of v.slice(0, 60)) {
+    if (!e || typeof e !== 'object') continue;
+    const o = e as Record<string, unknown>, n = typeof o.finding === 'string' && /^\d+$/.test(o.finding.trim()) ? Number(o.finding) : o.finding;
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || (count != null && n > count) || seen.has(n)) continue;
+    const status = typeof o.status === 'string' ? o.status.trim().toLowerCase() : '';
+    if (!(RESPONSE_STATUSES as readonly string[]).includes(status) || typeof o.how !== 'string' || !o.how.trim()) continue;
+    seen.add(n);
+    out.push({ finding: n, status: status as ReviewResponse['status'], how: o.how.trim().slice(0, 500), where: typeof o.where === 'string' ? o.where.trim().slice(0, 200) : '' });
+  }
+  return out.sort((a, b) => a.finding - b.finding);
+}
+
+// A review's findings as the fix prompt numbers them (reviewItems order: blocking, cheating, failed checks, base defects),
+// each as the line the feedback gives it.
+export function numberedFindings(v: Verdict): { n: number; key: string; text: string }[] {
+  return reviewItems(v).map((it, i) => ({ n: i + 1, key: it.key, text: feedbackFromVerdict(it.part) }));
+}
+// The builder's answers, for the next evaluator of the same try: context to verify, never evidence. Disputed answers are
+// flagged for explicit verification.
+export function responsesBrief(rs: ReviewResponse[], findings: { n: number; text: string }[]): string {
+  if (!findings.length) return '';
+  const line = (f: { n: number; text: string }) => {
+    const r = rs.find((x) => x.finding === f.n), what = clipText(f.text.replace(/\s+/g, ' '), 160);
+    return r ? `${f.n}. ${r.status === 'disputed' ? 'DISPUTED (verify explicitly whether the finding holds)' : r.status}: ${what}\n   Builder: ${clipText(r.how, 300)}${r.where ? ` (${r.where})` : ''}`
+      : `${f.n}. no answer: ${what}`;
+  };
+  return '\nContext only: before this review, the builder answered the earlier findings as follows. Verify each claim against the code and ' +
+    'tests; never accept it on its word. For each DISPUTED item, state in the matching finding\'s evidence whether the dispute holds.\n' +
+    findings.map(line).join('\n') + '\n';
+}
+const clipText = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s);
+
+// A builder reply that ended its turn with work still pending: no exit block (none recovered from the transcript either), or
+// words saying it is waiting for a background command's notification.
+export const EARLY_EXIT_PROMPT = 'Your turn ended while work was pending. Wait in the foreground for it to finish, then reply with the Summary and exit block.';
+export const waitingReply = (text: string): boolean => /\bwaiting for\b/i.test(text || '') && /\b(notification|completion)\b/i.test(text || '');
+export const earlyExit = (text: string, exit: BuilderExit | null): boolean => !exit || waitingReply(text);
 
 // Sent to the builder's own resumed session when its build left the content the evaluator rejected unchanged (config.progressFixes).
 export function progressFixPrompt(config: Config, rejection: string): string {
@@ -570,13 +615,21 @@ export function keepFixPrompt(config: Config, feedback: string): string {
 }
 
 // Sent to the builder's own resumed session after an actionable evaluator rejection (config.reviewFixes).
-export function reviewFixPrompt(config: Config, feedback: string): string {
-  return ['An independent evaluator rejected the work you just committed. Its findings:', '', feedback, '',
+// `feedback`: the findings, numbered (numberedFindings), or a plain text; the builder answers each numbered one in its exit block.
+export function reviewFixPrompt(config: Config, feedback: string | { n: number; text: string }[]): string {
+  const numbered = typeof feedback !== 'string', count = numbered ? feedback.length : 0;
+  return ['An independent evaluator rejected the work you just committed. Its findings:', '',
+    numbered ? feedback.map((f) => `${f.n}. ${f.text}`).join('\n') : feedback, '',
     'Fix the code so each reported behaviour is correct. Write or extend a test for each defect that fails before your fix. ' +
     'The acceptance checks are unchanged: do not narrow them, and do not skip, delete or weaken a test. If a finding cannot be met as ' +
     'the feature is specified, say so plainly in your final message instead of working around it. Lines marked BASE DEFECT fail on ' +
     `${config.base} too: do not try to fix them in this feature. Commit all your work and leave the ` +
     `worktree clean. The gate and a fresh evaluator run again afterwards. Only the foreman merges into ${config.base}. ` + FINISH_RULE,
+    numbered && count ? `\nAnswer every finding: add to your exit block a "responses" array with exactly one entry per numbered finding above ` +
+      `(${count}), in the same order and numbering: {"finding": <its number>, "status": "fixed" | "disputed" | "cannot", "how": one or two ` +
+      'plain sentences, "where": the file:line, commit sha or test name that shows it}. "disputed": the finding is wrong; "how" gives the ' +
+      'evidence (what you ran or read, and what it showed). "cannot": say what blocks it (a spec conflict, outside this feature\'s scope, a ' +
+      'defect already on the base branch). The next evaluator checks every answer against the code.' : '',
   ].join('\n');
 }
 
@@ -862,7 +915,17 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       spent += p.cost;
       if (p.cost) await edit(id, (x) => { x.costUsd = Math.round(((x.costUsd || 0) + p.cost) * 1e6) / 1e6; });
       if (r.timedOut) return { ...p, ok: false, error: `timed out after ${config.timeoutMin} min` };
-      if (role === 'builder' && !opts.diagnose && p.ok) noteExit(p.text, file, p.sessionId, resumed ? before : 0);
+      if (role === 'builder' && !opts.diagnose && p.ok) {
+        const x = noteExit(p.text, file, p.sessionId, resumed ? before : 0), sid = p.sessionId ?? resumed;
+        // A turn that ended with work pending (no exit block, or waiting for a notification): resumed once per pass to finish it.
+        if (earlyLeft > 0 && sid && r.code === 0 && !stopping && earlyExit(p.text, x)) {
+          earlyLeft--;
+          log(root, id, 'builder-resumed-early-exit', `the builder's turn ended while work was pending (${waitingReply(p.text) ? 'it said it was waiting for a notification' : 'no exit block'}): ${JSON.stringify(p.text.trim().slice(0, 200))}`);
+          out(`resume ${id}: the builder's turn ended while work was pending; resuming it once`);
+          try { renameSync(join(runDir, file), join(runDir, file.replace(/\.json$/, '.early-exit.json'))); } catch {}
+          return claude(role, EARLY_EXIT_PROMPT, file, { ...opts, extra: ['--resume', sid] });
+        }
+      }
       return r.code === 0 || !p.ok ? p : { ...p, ok: false, error: `exit ${r.code}: ${tail(r.err, 500)}` };
     };
     // Beside each builder run: its exit block, the touches the spec declared and the files actually changed since base (merge-base,
@@ -872,17 +935,32 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       log(root, id, 'prompt', `diagnoser model=${c.model || '-'} effort=${c.effort || '-'}`, undefined, { run: { phase: 'diagnose', tag, role: 'diagnoser', provider: c.provider ?? 'claude',
         model: c.model ?? null, effort: c.effort ?? null, tier: f.tier ?? null, resumed: false, promptBytes: Buffer.byteLength(prompt), ...(fallback ? { fallback: true } : {}) } });
     let predicted: string[] | null = null; // the candidate map's files, for scoring the prediction against the actual diff
+    let fixFindings: { n: number; key: string; text: string }[] | null = null; // the review fix in flight: the findings it must answer
+    let answers = ''; // the last review fix's answers, for the next evaluation in this pass (responsesBrief)
+    let answerCounts = ''; // the review fix's answers counted, logged once its run (and any early-exit resume) ended
+    let earlyLeft = 1; // early-exit resumes left in this pass
     // A background command finishing after the builder's final reply wakes its session again, and that stray turn becomes the
     // run's result; the real reply (its Summary line and exit block) is then read from the session transcript.
     // `from`: the transcript's length before this run (a resumed session's earlier replies belong to earlier runs).
-    const noteExit = (text: string, file: string, sessionId?: string, from = 0) => {
+    // A review fix (fixFindings set): its answers to the numbered findings are kept with the finding each answers, logged, and
+    // handed to the next evaluation of this try (answers).
+    const noteExit = (text: string, file: string, sessionId?: string, from = 0): BuilderExit | null => {
       const own = parseExit(text), real = !own && sessionId ? finalReply(transcriptPath(wt, sessionId), from) : null;
-      const x = own ?? (real ? parseExit(real.text) : null), mb = git(['merge-base', 'HEAD', config.base], wt).out;
+      let x = own ?? (real ? parseExit(real.text) : null);
+      if (fixFindings) {
+        const ff = fixFindings, rs = parseResponses(x?.responses ?? [], ff.length).map((r) => ({ ...r, key: ff[r.finding - 1]!.key, text: ff[r.finding - 1]!.text.slice(0, 600) }));
+        if (x) { const { responses: _, ...rest } = x; x = rs.length ? { ...rest, responses: rs } : rest; }
+        answers = responsesBrief(rs, ff);
+        const c = (st: ReviewResponse['status']) => rs.filter((r) => r.status === st).length;
+        answerCounts = `${c('fixed')} fixed, ${c('disputed')} disputed, ${c('cannot')} cannot, ${ff.length - rs.length} unanswered (of ${ff.length} findings)`;
+      }
+      const mb = git(['merge-base', 'HEAD', config.base], wt).out;
       const actual = mb ? git(['diff', '--name-only', mb, 'HEAD'], wt).out.split('\n').filter(Boolean) : [];
       const summary = real ? /^\s*\**summary:?\**\s*(.+)$/im.exec(real.text)?.[1]?.trim() : undefined;
-      writeFileSync(join(runDir, file.replace(/\.json$/, '.exit.json')), JSON.stringify({ exit: x, declared: f.touches ?? null, predicted, actual,
+      writeFileSync(join(runDir, file.replace(/\.json$/, '.exit.json')), JSON.stringify({ exit: x, declared: f.touches ?? null, predicted, actual, ...(fixFindings ? { findings: fixFindings } : {}),
         ...(real ? { recovered: true, reply: { uuid: real.uuid ?? null, ts: real.ts ?? null }, ...(summary ? { summary: summary.slice(0, 400) } : {}) } : {}) }));
       if (x?.blocked) log(root, id, 'builder-blocked', `${x.blocked.reason}: ${x.blocked.what}`);
+      return x;
     };
 
     // A role run by its provider. Codex (evaluator, diagnoser): whatever the run leaves in the worktree is undone (`cleaned`);
@@ -1415,7 +1493,8 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       const inputsAtEval = validationInputs(); // what this evaluation is given: a rejection is bound to it, not to state after the paid run
       const edits = testEdits(wt, evalBase, sha);
       if (edits.length) log(root, id, 'test-edits', edits.join('; '));
-      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks, evalPlan);
+      const ep = evaluatorPrompt(root, config, f, branch, diff, test, names.filter((p) => TEST_FILE.test(p) && existsSync(join(wt, p))), resolved, notesBlock(roleCfg('evaluator').model, 'evaluator', en), edits, mockTasks, evalPlan, answers);
+      answers = ''; // answers inform only the next evaluation
       const epPinned = `${ep}\nFor "baseDefects": the base commit of this evaluation is ${evalBase} and the feature commit is ${sha}; reproduce on exactly those and report them as "baseSha" and "featureSha".`;
       recordPrompt('evaluator', epPinned, en, undefined, 'review');
       const verdictOf = (r: ClaudeResult): Verdict => r.ok ? parseVerdict(r.text) : { pass: false, findings: [], cheating: [], blocking: [], notes: [], lesson: null, error: `evaluator failed: ${r.error}` };
@@ -1473,9 +1552,11 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
         await set(id, { status: 'building', sha: undefined, pendingLesson: undefined });
         log(root, id, 'review-fix', 'resuming the builder with the evaluator\'s findings');
         out(`fix ${id}: the evaluator rejected it; resuming the builder`);
-        const rp = reviewFixPrompt(config, feedbackFromVerdict(v));
+        const nf = numberedFindings(v), rp = reviewFixPrompt(config, nf);
         recordPrompt('builder', rp, builderNotes, undefined, 'fix-review', true);
-        const r = await claude('builder', rp, `${tag}-build.json`, { extra: ['--resume', builderSession] });
+        fixFindings = nf;
+        const r = await claude('builder', rp, `${tag}-build.json`, { extra: ['--resume', builderSession] }).finally(() => { fixFindings = null; });
+        if (answerCounts) { log(root, id, 'review-responses', answerCounts); answerCounts = ''; }
         if (await stopped()) return;
         if (!r.ok) return fail(`builder failed: ${r.error}`, 'builder');
         if (r.sessionId) builderSession = r.sessionId;

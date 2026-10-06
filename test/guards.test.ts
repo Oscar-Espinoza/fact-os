@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { procStart, holdInputs, failureId } from '../lib/foreman.ts';
-import { startDash, conflictTimeline, type ProjectState } from '../lib/dash.ts';
+import { startDash, conflictTimeline, featureHistory, type ProjectState } from '../lib/dash.ts';
 import { agentStats, observeOnce } from '../lib/observe.ts';
 import { passesOf } from '../lib/promptreview.ts';
 import type { Config, Feature, FeaturesFile, LogEvent, Verdict } from '../lib/types.ts';
@@ -1433,7 +1433,7 @@ test('I04 review: lost dependency ancestry is not resumed even when the worktree
   const provider = join(s.repo, '.fact-os/provider.sh'), calls = join(s.repo, '.fact-os/calls');
   writeFileSync(provider, `#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "$*" >> '${calls}'\ncase "$*" in\n  *--resume*) git add -A; git commit -qm leftover ;;\n` +
     `  *) git merge --abort; echo built > b.txt; git add b.txt; git commit -qm built; echo leftover > leftover.txt ;;\nesac\n` +
-    `printf '%s' '{"type":"result","is_error":false,"result":"done","session_id":"original","total_cost_usd":0}'\n`, { mode: 0o755 });
+    `printf '%s' '${JSON.stringify({ type: 'result', is_error: false, result: 'Summary: done.\n```exit\n{"touched":[],"unsure":[],"blocked":null}\n```', session_id: 'original', total_cost_usd: 0 })}'\n`, { mode: 0o755 });
   s.env.FACTOS_CLAUDE = provider;
   assert.equal(s.cli('run').status, 2);
   assert.match(s.feature('b').lastFeedback!, /declared merged dependencies/);
@@ -1770,6 +1770,60 @@ test('reviewFixes: a second rejection counts once; cheating, an invalid verdict 
   assert.deepEqual([s.feature('a').status, s.feature('a').attempts, s.calls('fix', 'a').length, s.calls('eval', 'a').length], ['stuck', 1, 1, 2]);
   assert.deepEqual([s.feature('b').status, s.calls('fix', 'b').length], ['stuck', 0]);
   assert.deepEqual([s.feature('c').status, s.calls('fix', 'c').length], ['stuck', 0], 'an invalid verdict is not a repair brief');
+});
+
+const REJECT3 = { pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'missing guard (a.ts:3)' }, { check: 'works', ok: true, evidence: 'ok' },
+  { check: 'rejects a partial claim', ok: false, evidence: 'returns 200' }], cheating: [], blocking: ['Money rounding is wrong in a.ts:9.'], lesson: null };
+
+test('reviewFixes: the fix answers each numbered finding; answers are stored, shown under the review reasons and handed to the next evaluator to verify', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, reviewFixes: 1 }, scenario: { a: 'fix:dispute' }, verdicts: { a: [REJECT3] } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(s.calls('build', 'a')[0]!.prompt, /"responses"/, 'only a review fix is asked for answers');
+  const [fix] = s.calls('fix', 'a');
+  assert.match(fix!.prompt, /^1\. BLOCKING: Money rounding is wrong in a\.ts:9\.\n2\. FAILED a\.txt exists: missing guard \(a\.ts:3\)\n3\. FAILED rejects a partial claim: returns 200$/m);
+  assert.match(fix!.prompt, /"responses" array with exactly one entry per numbered finding above \(3\)/);
+  const evals = s.calls('eval', 'a');
+  assert.equal(evals.length, 2);
+  assert.doesNotMatch(evals[0]!.prompt, /answered the earlier findings/);
+  assert.match(evals[1]!.prompt, /the builder answered the earlier findings as follows\. Verify each claim[\s\S]*never accept it on its word/);
+  assert.match(evals[1]!.prompt, /^1\. DISPUTED \(verify explicitly whether the finding holds\): BLOCKING: Money rounding[^\n]*\n {3}Builder: The 409 is the specified answer[^\n]*\(credit\.test\.ts:12\)$/m);
+  assert.match(evals[1]!.prompt, /^3\. fixed: FAILED rejects a partial claim: returns 200$/m);
+  assert.equal(events(s, 'a').find((e) => e.event === 'review-responses')?.detail, '2 fixed, 1 disputed, 0 cannot, 0 unanswered (of 3 findings)');
+  const rd = join(s.repo, '.fact-os', 'runs', 'a'), file = readdirSync(rd).find((x) => /^1\.\d+-build\.exit\.json$/.test(x) && /"findings"/.test(readFileSync(join(rd, x), 'utf8')))!;
+  const rec = JSON.parse(readFileSync(join(rd, file), 'utf8')) as { exit: { responses: { finding: number; status: string; key: string; text: string }[] }; findings: { n: number; key: string }[] };
+  assert.deepEqual(rec.exit.responses.map((x) => [x.finding, x.status, x.key]), [[1, 'disputed', 'blocking:Money rounding is wrong in a.ts:9.'], [2, 'fixed', 'failed:a.txt exists'], [3, 'fixed', 'failed:rejects a partial claim']]);
+  assert.equal(rec.findings.length, 3);
+  // The dashboard: each reason of the rejected review shows how it was handled; the fix row counts the answers.
+  const steps = featureHistory(s.repo, 'a').story!.current!.steps, review = steps.find((x) => x.label === 'Review')!, fixRow = steps.find((x) => x.label === 'Fix')!;
+  assert.deepEqual(review.reasons!.map((x) => [x.title, x.handled?.status]), [['Money rounding is wrong in a.ts:9.', 'disputed'], ['Check failed: a.txt exists', 'fixed'], ['Check failed: rejects a partial claim', 'fixed']]);
+  assert.equal(review.reasons![0]!.handled!.where, 'credit.test.ts:12');
+  assert.match(fixRow.text, /^2 fixed, 1 disputed, 0 cannot \(0 files changed, commit [0-9a-f]{7}\)\.$/);
+});
+
+test('reviewFixes: a fix that answers nothing still passes on; every finding shows no answer recorded', (t) => {
+  const s = setup(t, { features: [F('a')], config: { maxAttempts: 1, reviewFixes: 1 }, scenario: { a: 'fix:no-answer' }, verdicts: { a: [REJECT3] } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(s.feature('a').status, 'merged');
+  assert.match(s.calls('eval', 'a')[1]!.prompt, /^2\. no answer: FAILED a\.txt exists/m);
+  const steps = featureHistory(s.repo, 'a').story!.current!.steps;
+  assert.deepEqual(steps.find((x) => x.label === 'Review')!.reasons!.map((x) => x.handled), [null, null, null]);
+  assert.match(steps.find((x) => x.label === 'Fix')!.text, /^No answers to the review findings were recorded \(0 files changed, commit [0-9a-f]{7}\)\.$/);
+});
+
+test('early exit: a builder turn that ends waiting for a notification (or with no exit block) is resumed once per pass, then the pass goes on', (t) => {
+  const s = setup(t, { features: [F('a'), F('b'), F('c')], config: { maxAttempts: 1, reviewFixes: 1, maxParallel: 1 },
+    scenario: { a: 'early-exit', b: 'no-exit,fix:no-exit', c: 'fix:early-exit' }, verdicts: { c: [REJECT3] } });
+  const r = s.cli('run'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const id of ['a', 'b', 'c']) assert.equal(s.feature(id).status, 'merged', id);
+  const resumes = (id: string) => s.calls('fix', id).filter((c) => c.prompt.startsWith('Your turn ended while work was pending. Wait in the foreground'));
+  assert.deepEqual([resumes('a').length, resumes('b').length, resumes('c').length], [1, 1, 1], 'once per pass, even when the resumed turn has no exit block either');
+  assert.equal(resumes('a')[0]!.args[resumes('a')[0]!.args.indexOf('--resume') + 1], 'fake');
+  for (const id of ['a', 'b', 'c']) assert.equal(events(s, id).filter((e) => e.event === 'builder-resumed-early-exit').length, 1, id);
+  assert.match(events(s, 'a').find((e) => e.event === 'builder-resumed-early-exit')!.detail, /it said it was waiting.*waiting for its completion notification/);
+  assert.match(events(s, 'b').find((e) => e.event === 'builder-resumed-early-exit')!.detail, /no exit block/);
+  assert.ok(readdirSync(join(s.repo, '.fact-os', 'runs', 'a')).includes('1-build.early-exit.json'), 'the early reply is kept beside the run');
+  // c: the review fix ended early; the resumed turn's answers are the ones stored.
+  assert.equal(events(s, 'c').filter((e) => e.event === 'review-responses').at(-1)?.detail, '3 fixed, 0 disputed, 0 cannot, 0 unanswered (of 3 findings)');
 });
 
 // ---- no-progress guard (progressFixes) ----

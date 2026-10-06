@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { buildStory, buildOutcome, withResets, builderText, firstSentence, modelName, queueNote, reasonOf, reviewHeadline, testFailure, transitions, whoOf, type StoryRun } from '../lib/story.ts';
+import { answer, buildStory, buildOutcome, reviewItems, reviewReasons, withResets, builderText, firstSentence, modelName, queueNote, reasonOf, reviewHeadline, testFailure, transitions, whoOf, type StoryRun } from '../lib/story.ts';
 import type { Feature, LogEvent, Verdict } from '../lib/types.ts';
 
 const F = (o: Partial<Feature> = {}): Feature => ({ id: 'a', title: 'Fix the store restore test', description: 'd', acceptance: ['x'], surface: 'any', deps: [], priority: 1,
@@ -279,4 +279,17 @@ test('a logged spec edit (acceptance-changed) also closes the earlier work, and 
     E('10:06:00', 'launch'), E('10:06:05', 'prompt', '', run('build', 'builder', '2')), E('10:07:00', 'interrupted'), E('10:08:00', 'launch'), E('10:08:05', 'prompt', '', run('build', 'builder', '2.2'))];
   assert.equal(withResets(normal).length, normal.length);
   assert.equal(withResets([...normal, E('10:09:00', 'launch', '', { inputs: 'b' }), E('10:09:05', 'prompt', '', run('build', 'builder', '1.2'))]).filter((e) => e.event === 'attempts-reset').length, 1);
+});
+
+test('review answers: reasons in the fix prompt\'s order get each answer by key (or by number), and the fix row counts them', () => {
+  const v = V({ findings: [{ check: 'c1', ok: false, evidence: 'e1' }, { check: 'ok', ok: true, evidence: '' }], blocking: ['b1'], cheating: ['x1'] });
+  assert.deepEqual(reviewItems(v).map((i) => i.key), ['blocking:b1', 'cheating:x1', 'failed:c1']);
+  const rs = reviewReasons(v);
+  assert.deepEqual(rs.map((r) => r.key), ['blocking:b1', 'cheating:x1', 'failed:c1']);
+  const a = answer(rs, [{ finding: 9, status: 'fixed', how: 'h', where: 'w', key: 'failed:c1' }, { finding: 1, status: 'cannot', how: 'spec conflict', where: '', key: 'blocking:b1' }]);
+  assert.deepEqual(rs.map((r) => r.handled?.status ?? null), ['cannot', null, 'fixed'], 'matched by key, whatever the number');
+  assert.equal(buildOutcome('fix', { files: 2 }, 'abcdef1234', a), '1 fixed, 0 disputed, 1 cannot, 1 not answered (2 files changed, commit abcdef1).');
+  const rs2 = reviewReasons(v); answer(rs2, [{ finding: 2, status: 'disputed', how: 'h', where: '' }]);
+  assert.deepEqual(rs2.map((r) => r.handled?.status ?? null), [null, 'disputed', null], 'no keys: matched by number');
+  assert.equal(buildOutcome('fix', undefined, 'abcdef1234', { responses: [], findings: 3 }), 'No answers to the review findings were recorded (commit abcdef1).');
 });

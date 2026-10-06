@@ -383,6 +383,17 @@ Each tick:
      prompt, then the commit checks again; no commits at all or lost dependency ancestry still fail at once.
      A `gate-fix` or `commit-fix` ends build reuse of the sha that failed (a stop during a fix rebuilds). Observer statistics
      treat the fix as part of the pass (no new launch or build); prompt rates credit the final builder prompt.
+     A review fix (`reviewFixes`) numbers the findings in one order (blocking, cheating, failed checks, base defects;
+     the dashboard's review reasons use the same order) and asks, only in that prompt, for an exit-block `responses`
+     array: one `{finding, status: fixed|disputed|cannot, how, where}` per number (disputed: the evidence; cannot: what
+     blocks it). Parsed fail-soft (bad entries dropped, a missing array never fails the pass), stored in the run's
+     `.exit.json` with each answer's finding key/text and the numbered `findings`, and logged as `review-responses`
+     (`n fixed, m disputed, k cannot, u unanswered (of N findings)`). The next evaluation in the pass gets them as
+     context only ("verify each claim, never accept it on its word"; DISPUTED items flagged for explicit verification).
+     Every builder run (first or resumed) whose turn ended with work pending — no exit block (none recovered from the
+     transcript either), or "waiting for" plus "notification"/"completion" in its reply — is resumed once per pass with
+     "Your turn ended while work was pending. Wait in the foreground for it to finish, then reply with the Summary and
+     exit block." (`builder-resumed-early-exit`; the early reply kept as `<tag>-build.early-exit.json`).
      Before every evaluation the foreman lists edits to test files that exist on `base` (deleted files, removed
      lines, added `.skip`/`.only`/`.todo`/`.fails`/`xit`), logs them as `test-edits` and gives them to the evaluator,
      which must justify each or reject the feature; new test files are not listed, and the list never blocks by itself.
@@ -672,7 +683,9 @@ The `claude` binary is `process.env.FACTOS_CLAUDE || "claude"` so tests can subs
   launch's `inputs` hash changed). Work before a boundary sits in a folded "Earlier work (before …)" section.
   Build/Fix/Combine rows state their outcome from structured records only (files touched from the build's exit
   record, the commit the checks ran on, open points it flagged), never the agent's final message, which stays
-  behind a "What the agent said" fold. Every row and the try header show the date and time in the viewer's
+  behind a "What the agent said" fold. A review fix's row leads with its answers ("2 fixed, 1 disputed, 0 cannot"),
+  and each reason of the review it answered shows "How it was handled" (status, how, where) or "no answer recorded".
+  Every row and the try header show the date and time in the viewer's
   timezone ("today 11:47 AM", "yesterday …", else "Oct 3, 11:47 AM").
   Detail selects the latest retained output per role/attempt, while
   expanded recorded-run logs show every retained tag, resolver output, finding evidence and original

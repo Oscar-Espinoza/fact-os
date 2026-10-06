@@ -93,7 +93,10 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   or that lost its dependencies, still fails). `keepFixes` (1; when the builder's committed merge resolution lost lines,
   resume its session that many times per pass with copyable `dropped:` records before a counted failure) and
   `reviewFixes` (0; after an actionable evaluator rejection — a valid verdict, no cheating, concrete failed findings —
-  resume the builder's session that many times per pass, then the gate and a fresh evaluator run on the new commit).
+  resume the builder's session that many times per pass, then the gate and a fresh evaluator run on the new commit;
+  the builder answers each numbered finding as fixed, disputed or cannot in its exit block, the dashboard shows each
+  answer under the finding, and the next evaluator verifies the answers). A builder turn that ends with work pending
+  (no exit block, or "waiting for … notification") is resumed once per pass to finish it.
   `progressFixes` (1; when a build leaves exactly the content an evaluator rejected — same tree, same acceptance, test
   command, base, mock allowance and evaluator instructions — resume the builder's session that many times per pass;
   still unchanged, a counted failure without running the gate or the evaluator again).

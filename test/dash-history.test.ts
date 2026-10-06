@@ -326,3 +326,24 @@ test('F99-17 served timeline: the current try starts at the re-plan, earlier wor
   assert.match(F.dayTime('2026-10-01T09:00:00', now), /^Oct 1, 9:00/);
   assert.match(F.dayTime('2025-12-31T09:00:00', now), /^Dec 31, 2025, 9:00/);
 });
+
+test('served timeline: a review fix\'s answers show under each finding of the rejected review, and the fix row counts them', async (t) => {
+  const s = await fixture(t, { ...feature('merged', 0), updatedAt: '2026-10-05T12:10:00Z' }), T = (m: number) => Date.parse('2026-10-05T12:00:00Z') + m * 60e3;
+  const e = (m: number, event: string, detail = '') => JSON.stringify({ ts: new Date(T(m)).toISOString(), feature: 'a', event, detail });
+  writeFileSync(join(s.dir, 'log.jsonl'), [e(0, 'launch'), e(2, 'testing', 'aaaaaaa1'), e(3, 'evaluating'), e(5, 'review-fix', 'resuming'), e(5.5, 'review-responses', '1 fixed, 1 disputed, 0 cannot, 1 unanswered (of 3 findings)'),
+    e(7, 'testing', 'bbbbbbb2'), e(8, 'evaluating'), e(9, 'merged', 'task/a')].join('\n') + '\n');
+  s.put('1-build.json', 'built', T(1));
+  s.put('1-eval.json', { pass: false, findings: [{ check: 'a.txt exists', ok: false, evidence: 'missing' }, { check: 'refunds', ok: false, evidence: 'wrong total' }], cheating: [], blocking: ['Money rounding is wrong.'], notes: [], lesson: null }, T(4));
+  s.put('1.2-build.json', 'Summary: fixed two of them.', T(6));
+  writeFileSync(join(s.dir, 'runs/a/1.2-build.exit.json'), JSON.stringify({ findings: [{ n: 1, key: 'blocking:Money rounding is wrong.' }, { n: 2, key: 'failed:a.txt exists' }, { n: 3, key: 'failed:refunds' }],
+    exit: { touched: ['a.ts'], unsure: [], blocked: null, responses: [
+      { finding: 1, status: 'disputed', how: 'Rounding follows the spec <half-even>.', where: 'money.test.ts:4', key: 'blocking:Money rounding is wrong.' },
+      { finding: 2, status: 'fixed', how: 'Created the file.', where: 'a.txt', key: 'failed:a.txt exists' }] } }));
+  s.put('1.3-eval.json', { pass: true, findings: [{ check: 'a.txt exists', ok: true, evidence: 'ok' }], cheating: [], blocking: [], notes: [], lesson: null }, T(8.5));
+  const b = await browser(s.dash.url), j = b.node('d-journey').innerHTML as string;
+  assert.match(j, /1 fixed, 1 disputed, 0 cannot, 1 not answered \(1 file changed, commit bbbbbbb\)\./);
+  const reasons = /Why \(3\)[\s\S]*?<\/details>\s*<\/div>/.exec(j)?.[0] ?? j;
+  assert.match(reasons, /Money rounding is wrong\.[\s\S]*How it was handled<\/span><span class="d-hs disputed">disputed<\/span>Rounding follows the spec &#60;half-even&#62;\. <code>money\.test\.ts:4<\/code>/);
+  assert.match(reasons, /a\.txt exists[\s\S]*<span class="d-hs fixed">fixed<\/span>Created the file\./);
+  assert.match(reasons, /refunds[\s\S]*How it was handled<\/span><span class="dim">no answer recorded<\/span>/);
+});

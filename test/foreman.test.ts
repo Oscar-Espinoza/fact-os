@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTag, promptFingerprint, evaluatorDiff, evaluatorDiffCommands, diffFileList, evaluatorRunsGit, builtWhenStopped, parseDiagnosis, parseCodexEvents, codexArgs, CODEX_UNAVAILABLE, evaluatorPrompt, builderPrompt } from '../lib/foreman.ts';
 import { DEFAULT_CONFIG } from '../lib/state.ts';
+import { parseResponses, numberedFindings, responsesBrief, earlyExit, reviewFixPrompt, EARLY_EXIT_PROMPT } from '../lib/foreman.ts';
 import { finalReply, transcriptLines, transcriptPath, parseExit, parseVerdict, baseOnly, testOutcome, FINISH_RULE, parseClaudeOutput, applyFailure, recoverInFlight, feedbackFromVerdict, appendLesson,
   waitForChange, stamp, childAlive, procStart, groupOf } from '../lib/foreman.ts';
 import type { Feature } from '../lib/types.ts';
@@ -428,4 +429,35 @@ test('finalReply and transcriptPath: the real final reply of this run only — a
     assert.equal(key.length, 207); assert.match(key, /-lnrja3$/); // Claude Code 2.1.289's own key for this path assert.equal(key.slice(0, 200), long.replace(/[^A-Za-z0-9]/g, '-').slice(0, 200));
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('review answers: parsed fail-soft, numbered in the prompt, briefed to the next evaluator with disputes flagged', () => {
+  const x = parseExit('Summary: Fixed.\n```exit\n{"touched": [], "unsure": [], "blocked": null, "responses": [{"finding": 2, "status": "Fixed", "how": " Added the guard. ", "where": "a.ts:3"}, ' +
+    '{"finding": "1", "status": "disputed", "how": "The spec says 409."}, {"finding": 2, "status": "cannot", "how": "dup"}, {"finding": 0, "status": "fixed", "how": "x"}, ' +
+    '{"finding": 3, "status": "maybe", "how": "x"}, {"finding": 4, "status": "fixed", "how": ""}, "junk"]}\n```')!;
+  assert.deepEqual(x.responses, [{ finding: 1, status: 'disputed', how: 'The spec says 409.', where: '' }, { finding: 2, status: 'fixed', how: 'Added the guard.', where: 'a.ts:3' }]);
+  assert.equal(parseExit('```exit\n{"touched": [], "responses": "all fixed"}\n```')!.responses, undefined, 'a malformed responses field never fails the exit block');
+  assert.deepEqual(parseResponses([{ finding: 5, status: 'fixed', how: 'h' }], 3), [], 'a number the prompt did not show is dropped');
+  const v = parseVerdict(JSON.stringify({ pass: false, findings: [{ check: 'c1', ok: false, evidence: 'e1' }], cheating: [], blocking: ['b1'], notes: [], lesson: null }));
+  const nf = numberedFindings(v);
+  assert.deepEqual(nf, [{ n: 1, key: 'blocking:b1', text: 'BLOCKING: b1' }, { n: 2, key: 'failed:c1', text: 'FAILED c1: e1' }]);
+  const p = reviewFixPrompt({ ...DEFAULT_CONFIG, base: 'main' } as never, nf);
+  assert.match(p, /Its findings:\n\n1\. BLOCKING: b1\n2\. FAILED c1: e1\n/);
+  assert.match(p, /exactly one entry per numbered finding above \(2\)[\s\S]*"status": "fixed" \| "disputed" \| "cannot"/);
+  assert.doesNotMatch(reviewFixPrompt({ ...DEFAULT_CONFIG, base: 'main' } as never, 'FAILED c1: e1'), /"responses"/);
+  const brief = responsesBrief([{ finding: 1, status: 'disputed', how: 'Spec says so.', where: 'spec.md:2' }], nf);
+  assert.match(brief, /never accept it on its word/);
+  assert.match(brief, /^1\. DISPUTED \(verify explicitly whether the finding holds\): BLOCKING: b1\n {3}Builder: Spec says so\. \(spec\.md:2\)$/m);
+  assert.match(brief, /^2\. no answer: FAILED c1: e1$/m);
+  assert.equal(responsesBrief([], []), '');
+});
+
+test('early exit: a reply with no exit block, or one waiting for a notification, ends the turn too soon', () => {
+  const ok = parseExit('Summary: done.\n```exit\n{"touched": []}\n```');
+  assert.equal(earlyExit('Gate running (~18 min last time); waiting for its completion notification.', null), true);
+  assert.equal(earlyExit('Summary: done.', null), true);
+  assert.equal(earlyExit('Summary: done, waiting for the completion notification.\n```exit\n{}\n```', ok), true);
+  assert.equal(earlyExit('Summary: done.', ok), false);
+  assert.match(EARLY_EXIT_PROMPT, /^Your turn ended while work was pending\. Wait in the foreground for it to finish, then reply with the Summary and exit block\.$/);
+  assert.match(FINISH_RULE, /Ending your turn is not waiting/);
 });

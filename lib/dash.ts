@@ -8,7 +8,7 @@ import { readdirSync, existsSync, statSync, readFileSync, realpathSync } from 'n
 import { join, basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paths, load, loadConfig, STATE_DIRS, NAME, mutate, log, tailLines, errMsg, pidAlive, readJson, readControlFile, writeControl, withCheckoutLock, effectiveLimit, validLanes, MAX_LANES, readSetupState, releaseSetupHold, type SetupState } from './state.ts';
-import { git, parseClaudeOutput, parseVerdict, feedbackFromVerdict } from './foreman.ts';
+import { git, parseClaudeOutput, parseVerdict, feedbackFromVerdict, parseResponses } from './foreman.ts';
 import { conflictFiles } from './merge.ts';
 import { analyze, taskReach, specHash } from './ready.ts';
 import { act, ACTIONS, type Action } from './actions.ts';
@@ -382,13 +382,21 @@ function storyRuns(dir: string, id: string): StoryRun[] {
       const file = join(rd, name), p = parseClaudeOutput(readFileSync(file, 'utf8'));
       // A build whose last turn was a stray reply: its real Summary line, recovered from the transcript (see noteExit).
       // Its exit record also lists the files it touched and what it was unsure of: the row's outcome comes from those.
-      const rec = m[2] === 'build' ? (tryJson(readIfExists(join(rd, `${m[1]}-build.exit.json`)) ?? '') as { recovered?: boolean; summary?: string; exit?: { touched?: unknown; unsure?: unknown } } | null) : null;
+      const rec = m[2] === 'build' ? (tryJson(readIfExists(join(rd, `${m[1]}-build.exit.json`)) ?? '') as { recovered?: boolean; summary?: string; exit?: { touched?: unknown; unsure?: unknown; responses?: unknown } | null; findings?: unknown } | null) : null;
       const text = rec?.recovered && rec.summary ? `Summary: ${rec.summary}` : p.text;
       const touched = rec?.exit?.touched, unsure = rec?.exit?.unsure;
       return [{ tag: m[1]!, role: m[2] as StoryRun['role'], at: new Date(statSync(file).mtimeMs).toISOString(), text, verdict: m[2] === 'eval' && p.ok ? parseVerdict(p.text) : null,
-        ...(Array.isArray(touched) ? { files: touched.length } : {}), ...(Array.isArray(unsure) ? { unsure: unsure.map(String) } : {}) }];
+        ...(Array.isArray(touched) ? { files: touched.length } : {}), ...(Array.isArray(unsure) ? { unsure: unsure.map(String) } : {}),
+        ...(Array.isArray(rec?.findings) ? { asked: rec.findings.length, ...storedResponses(rec.exit?.responses) } : {}) }];
     } catch { return []; }
   });
+}
+// A review fix's stored answers (its exit record), re-validated: the record is a file on disk, so it is read fail-soft.
+function storedResponses(v: unknown): { responses?: StoryRun['responses'] } {
+  const keyed = Array.isArray(v) ? v as { key?: unknown; text?: unknown }[] : [];
+  const rs = parseResponses(v).map((r) => { const o = keyed.find((x) => (x as { finding?: unknown }).finding === r.finding);
+    return { ...r, ...(typeof o?.key === 'string' ? { key: o.key } : {}), ...(typeof o?.text === 'string' ? { text: o.text } : {}) }; });
+  return rs.length ? { responses: rs } : {};
 }
 // A feature's goal and short title: its own fields, else the observer's cached summary while the spec it was made from is unchanged.
 function goalOf(dir: string, f: Feature): { goal: string; shortTitle?: string } | null {
