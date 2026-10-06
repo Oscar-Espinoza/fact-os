@@ -13,7 +13,7 @@ export const DEFAULT_CONFIG: Config = {
   test: 'pnpm test', merge: 'auto', briefFiles: [], lessonsFile: 'CLAUDE.md', postMerge: null, prepare: null, refreshBeforeTest: false,
   groupBy: null, maxRefreshes: 5, mergeHook: null, restoreFrom: null, evaluatorDiffExclude: [], evaluatorInlineDiffBytes: 12000, claims: null, conflictBrief: false, resolver: null,
   gateFixes: 0, commitFixes: 0, keepFixes: 1, progressFixes: 1, reviewFixes: 0, contextMaxBytes: 1200, lessonsMaxBytes: 6000, recapMaxBytes: 4000, setupRetryDelaysSec: [30, 120], diagnoser: null, codex: { fallback: { model: 'opus', effort: 'high' }, cooldownMin: 30 },
-  planner: { enabled: true, model: 'opus', effort: 'medium', effortHigh: 'high', maxPerDay: 50, skipBelow: null, splitWords: 750 },
+  planner: { enabled: true, model: 'opus', effort: 'medium', effortHigh: 'high', maxPerDay: 50, skipBelow: null, splitWords: 750, autoApply: false },
 };
 
 // The product name, used for the state dir, commit prefixes, headings and UI. Rename here only.
@@ -258,8 +258,9 @@ function configProblems(raw: unknown): string[] {
       field(pl, 'config.planner', 'maxPerDay', uint, 'a safe integer >= 0');
       field(pl, 'config.planner', 'skipBelow', (x) => x === null || (TIERS as unknown[]).includes(x), `null or a tier (${TIERS.join(', ')})`);
       field(pl, 'config.planner', 'splitWords', (x) => uint(x) && (x as number) > 0, 'a safe integer > 0');
-      for (const key of Object.keys(pl)) if (!['enabled', 'model', 'effort', 'effortHigh', 'maxPerDay', 'skipBelow', 'splitWords'].includes(key))
-        problems.push(`config.planner.${key}: unknown field (enabled, model, effort, effortHigh, maxPerDay, skipBelow, splitWords; the planner always runs read-only)`);
+      field(pl, 'config.planner', 'autoApply', (x) => typeof x === 'boolean', 'a boolean');
+      for (const key of Object.keys(pl)) if (!['enabled', 'model', 'effort', 'effortHigh', 'maxPerDay', 'skipBelow', 'splitWords', 'autoApply'].includes(key))
+        problems.push(`config.planner.${key}: unknown field (enabled, model, effort, effortHigh, maxPerDay, skipBelow, splitWords, autoApply; the planner always runs read-only)`);
     }
   }
   if (Object.hasOwn(c, 'claims') && c.claims !== null) {

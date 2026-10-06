@@ -80,6 +80,7 @@ export interface PlannerConfig {
   maxPerDay: number;                  // planner runs started in any 24 hours (0 = none); over it, builds go on without a plan
   skipBelow: Tier | null;             // null = plan every feature; a tier: features of a lower tier (TIERS order) skip planning
   splitWords: number;                 // default 750: a FEASIBLE plan over it puts the feature on a needs-split hold (no build)
+  autoApply: boolean;                 // default false: the foreman applies an INFEASIBLE answer's revised spec itself when AUTO is yes (once per feature)
 }
 
 // File claims (docs/merge-process.md): a file is hot when listed in `hot` (a path, or a dir prefix ending in "/") or
@@ -134,6 +135,8 @@ export interface PlanningHold {
   passEnd: string;                    // ISO end of that pass
   inputs: string;                     // holdInputs fingerprint when placed: description, acceptance, deps and briefs
   ts: string;
+  revised?: string;                   // spec-conflict: the planner's complete revised spec, as a person reads it (runs/<id>/plan-revised-spec.md)
+  auto?: boolean;                     // spec-conflict: every conflict is spec-only and the revised spec is usable (`plan-apply` may apply it)
 }
 
 export interface Feature {
@@ -175,6 +178,7 @@ export interface Feature {
   touches?: string[];                 // files (or dir prefixes ending in "/") it is expected to change: claimed while it runs
   specFix?: SpecFixProposal;          // the latest drafted spec fix (lib/specfix.ts)
   specFixes?: SpecFixRecord[];        // spec fixes applied to it, oldest first (undo restores the latest)
+  planRevisions?: PlanRevision[];     // planner revised specs applied to it (`plan-apply`, or config.planner.autoApply), oldest first
   specFixDecisions?: Record<string, string>; // spec inputs → what was decided for them (declined, none, applied): never drafted again
   specCheck?: { inputs: string; ts: string; issues: { note: string; quote: string; why: string }[] }; // the pre-launch check against the spec-writing notes (lib/specnotes.ts)
   plan?: PlanSummary;                 // the planner's latest answer for this spec (the plan text is in runs/<id>/plan.md, never committed)
@@ -186,6 +190,9 @@ export interface Feature {
   foremanPid?: number;
 }
 
+// A planner's revised spec applied to a feature (lib/specfix.ts applyPlanRevision): what it replaced, by whom, from which plan.
+export interface PlanRevision { ts: string; by: 'person' | 'auto'; review: string; inputs: string; after: string;
+  old: { description: string; acceptance: string[] }; new: { description: string; acceptance: string[] }; conflicts: string[] }
 export interface PlanSummary { inputs: string; ts: string; verdict: 'FEASIBLE' | 'INFEASIBLE' | 'none'; effort?: 'medium' | 'high'; split?: string | null; error?: string }
 
 export interface HumanTask {

@@ -800,7 +800,9 @@ export function renderReport(root: string, state: ObserverState, features: Featu
         ? `- ${f.id} is on a planning hold: its spec probably needs splitting (the planner found, before any build; ${f.planningHold!.evidence.join(' | ')}). ` +
           `Split or trim its description or acceptance to release it, or \`${NAME} release ${f.id}\` to launch it unchanged.`
         : `- ${f.id} is on a planning hold: ${f.planningHold!.cause === 'spec-conflict' ? 'its spec (the planner found, before any build)' : f.planningHold!.cause === 'spec-error' ? 'its spec' : 'its prompt'} cannot be met as written ` +
-        `(${f.planningHold!.confidence}; ${f.planningHold!.evidence.join(' | ')}). Edit its description or acceptance to release it, or \`${NAME} release ${f.id}\` to launch it unchanged.`),
+        `(${f.planningHold!.confidence}; ${f.planningHold!.evidence.join(' | ')}). ` +
+        (f.planningHold!.revised ? `The planner proposed a revised spec (runs/${f.id}/plan-revised-spec.md; ${f.planningHold!.auto ? `AUTO: yes, \`${NAME} plan-apply ${f.id}\` applies it` : 'AUTO: no, a conflict is protected'}). ` : '') +
+        `Edit its description or acceptance to release it, or \`${NAME} release ${f.id}\` to launch it unchanged.`),
       ...proposals.map((t) => `- Proposal ${t.id}: ${t.title}`)] : ['Nothing.']), '',
     '## Last 24 hours', '',
     `Failures: ${recent.length}. Sent back by the observer: ${sent.length}. Improvements queued: ${state.improvements.length}.`, '',

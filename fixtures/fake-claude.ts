@@ -162,9 +162,19 @@ if (mode === 'resolve') {
   // The read-only planner: a FEASIBLE plan by default. "plan:infeasible" (a conflict with file:line evidence), "plan:garbage" (breaks
   // the contract), "plan:error" (the run fails), "plan:high" (EFFORT: high), "plan:split" (suggests a cut), "plan:edit" (commits a file,
   // which it must not), "plan:long" (a FEASIBLE plan of about 800 words).
+  // "plan:multi": two spec-only conflicts with a revised spec, AUTO: yes; "plan:protected": the same with the second conflict
+  // protected, AUTO: no; "plan:malformed": INFEASIBLE with no conflicts list or revised spec; "plan:once": only the first plan
+  // call of the feature misbehaves, later ones answer FEASIBLE.
   if (has('edit')) commit('planner.txt', 'edited by the planner\n');
   const head = `EFFORT: ${has('high') ? 'high' : 'medium'}\nSPLIT: ${has('split') ? 'yes: the API part and the UI part' : 'no'}`;
-  result = has('garbage') ? 'Here is my plan: just build it.' : has('infeasible')
+  const plansBefore = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const e = JSON.parse(l) as { mode: string; id: string }; return e.mode === 'plan' && e.id === id; }).length : 0;
+  const multi = (prot: boolean) => `VERDICT: INFEASIBLE\n${head}\nCONFLICTS\n` +
+    `1. [spec-only] Acceptance 1 ("${id}.txt exists") vs the description ("Build ${id}"): README.md:1 "# app" has no build step.\n   Resolution: description "Build ${id}" -> "Build ${id} as a plain file"\n` +
+    `2. [${prot ? 'protected' : 'spec-only'}] Acceptance 1 vs the cleanup rule in AGENTS.md:3 "never leave files behind".\n   Resolution: acceptance 1 -> "${id}.txt exists and is kept"\n` +
+    `COMPLETE REVISED SPEC\nDescription changes:\n- OLD: Build ${id}\n  NEW: Build ${id} as a plain file\nAcceptance:\n1. ${id}.txt exists and is kept\n2. ${id}.txt says hello\nAUTO: ${prot ? 'no' : 'yes'}`;
+  const odd = !has('once') || plansBefore === 0;
+  result = has('garbage') ? 'Here is my plan: just build it.' : odd && has('multi') ? multi(false) : odd && has('protected') ? multi(true)
+    : odd && has('malformed') ? `VERDICT: INFEASIBLE\n${head}\nThe cleanup rule and the ownership rule cannot both hold; I did not number anything.` : odd && has('infeasible')
     ? `VERDICT: INFEASIBLE\n${head}\nCONFLICTS\n1. "no runtime change" contradicts "must fail safely": README.md:1 has no failure path.\n   Resolutions: drop one requirement.`
     : `VERDICT: FEASIBLE\n${head}\n1. Add ${id}.txt (no existing helper: rg found none).\n2. Do not touch README.md.${has('long') ? '\n3. ' + 'detail '.repeat(780) : ''}`;
   if (has('error')) extra = { is_error: true, subtype: 'error_during_execution' };

@@ -9,7 +9,7 @@ import { childEnv, paths, loadState, loadConfig, mutate, log, withSupervisor, wi
 import { analyze, mockTasksFor, validate, type MockTask } from './ready.ts';
 import { DEFAULT_CLAIMS, DROP_PROTOCOL, changedNote, claimBlock, conflictBrief, declaredNote, featureFiles, hotPaths, hotScores, hotTest, sharedPath, keepCheck, keepFeedback } from './merge.ts';
 import { escalates, ladderFailures, ladderStep, plannedEffort, plannerRole, resolveRole, tierApplies } from './profiles.ts';
-import { cachedPlan, parsePlan, PLAN_TEXT, planSkip, plannerPrompt, plannerRunsSince, savePlan, summaryOf, type SavedPlan } from './plan.ts';
+import { cachedPlan, parsePlan, PLAN_REVISED, PLAN_TEXT, planSkip, plannerPrompt, plannerRunsSince, revisedText, revisionProblem, savePlan, summaryOf, type SavedPlan } from './plan.ts';
 import { notesBlock, notesHash, readNotes } from './notes.ts';
 import { reviewItems, testFailure } from './story.ts';
 import { atomStale, candidateMap, pickAtoms, readAtoms, recap, renderContext, selectLessons } from './context.ts';
@@ -1190,15 +1190,30 @@ async function runOwned(root: string, opts: RunOptions): Promise<number> {
       if ('error' in p) return soft(`invalid: ${p.error}`);
       const split = p.split ? `; split suggested: ${p.split}` : '';
       if (p.verdict === 'INFEASIBLE') {
-        const held = record({ verdict: 'INFEASIBLE', effort: p.effort, split: p.split, conflicts: p.conflicts });
+        const revisionBad = p.revised ? revisionProblem(f, p.revised) : null; // an OLD sentence not in the description: unusable
+        const revised = revisionBad ? null : p.revised, auto = p.auto && !!revised, malformed = revisionBad ? [...p.malformed, `revised spec: ${revisionBad}`] : p.malformed;
+        const held = record({ verdict: 'INFEASIBLE', effort: p.effort, split: p.split, conflicts: p.conflicts, items: p.items, revised, auto, malformed, text: r.text });
+        const revisedFile = relative(root, join(runDir, PLAN_REVISED)), revisedShown = revised ? revisedText({ ...revised, auto }) : undefined;
         await edit(id, (x) => {
           const stop = { attempt: (x.attempts || 0) + 1, counted: false };
           Object.assign(x, { status: 'todo', stop, updatedAt: now(), plan: summaryOf(held), planningHold: { cause: 'spec-conflict', confidence: 'high', evidence: p.conflicts,
-            review: `plan:${id}/${tag}`, passEnd: now(), inputs: planInputs, ts: now() } });
+            review: `plan:${id}/${tag}`, passEnd: now(), inputs: planInputs, ts: now(), ...(revisedShown ? { revised: revisedShown } : {}), auto } });
         });
+        const n = p.conflicts.length, prot = p.items.filter((c) => c.severity !== 'spec-only').length;
         log(root, id, 'planning-hold', `spec-conflict (high), planner before any build: ${p.conflicts.map((c, i) => `${i + 1}. ${c.split('\n')[0]}`).join(' ')}${split}. ` +
+          `${n} conflict${n === 1 ? '' : 's'} (${prot} protected, ${n - prot} spec-only). ` +
+          (revised ? `Proposed revised spec: ${revisedFile} (AUTO: ${auto ? `yes; \`${NAME} plan-apply ${id}\` applies it` : 'no; a person must edit the spec'}). ` : 'No usable revised spec was proposed. ') +
+          (malformed.length ? `Off the answer format: ${malformed.join('; ')}. ` : '') +
           `No builder was started and no attempt spent. Edit the spec (a spec fix may be drafted), or \`${NAME} release ${id}\` to launch it unchanged.`);
-        out(`hold ${id}: the planner found the spec cannot be met as written (${p.conflicts.length} conflict${p.conflicts.length === 1 ? '' : 's'}); no build started`);
+        out(`hold ${id}: the planner found the spec cannot be met as written (${n} conflict${n === 1 ? '' : 's'}${revised ? `, a revised spec proposed, AUTO ${auto ? 'yes' : 'no'}` : ''}); no build started`);
+        // config.planner.autoApply: a revised spec whose every conflict is spec-only is applied without a person, once per feature;
+        // the hold is released and the next launch plans the revised spec afresh (a FEASIBLE answer confirms it).
+        if (auto && config.planner.autoApply) {
+          const { applyPlanRevision } = await import('./specfix.ts');
+          const err = await applyPlanRevision(root, id, 'auto', { stopping: () => stopping });
+          if (err) log(root, id, 'plan-auto-refused', `the revised spec stays for a person: ${err}`);
+          else { log(root, id, 'plan-auto-applied', `the revised spec of plan ${tag} was applied (all ${n} conflict${n === 1 ? '' : 's'} spec-only); the planner runs again on the revised spec to confirm it FEASIBLE`); out(`plan ${id}: applied the planner's revised spec automatically; planning it again`); }
+        }
         return 'stop';
       }
       const limit = config.planner.splitWords ?? 750;

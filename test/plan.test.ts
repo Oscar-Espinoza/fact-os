@@ -8,13 +8,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parsePlan, planSkip, plannerRunsSince, plannerPrompt } from '../lib/plan.ts';
+import { infeasibleText, parsePlan, planSkip, plannerRunsSince, plannerPrompt, revise, revisionProblem } from '../lib/plan.ts';
 import { plannedEffort, plannerRole, profileProblems } from '../lib/profiles.ts';
 import { DEFAULT_CONFIG, loadConfig } from '../lib/state.ts';
 import { builderPrompt, evaluatorPrompt, holdInputs, planSection } from '../lib/foreman.ts';
 import { candidates, currentFailure } from '../lib/specfix.ts';
 import type { Config, Feature, FeaturesFile, LogEvent, Verdict } from '../lib/types.ts';
 import { reap } from './reap.ts';
+import { buildStory } from '../lib/story.ts';
 
 const BIN = fileURLToPath(new URL('../bin/fact-os', import.meta.url));
 const FAKE = fileURLToPath(new URL('../fixtures/fake-claude.ts', import.meta.url));
@@ -31,12 +32,76 @@ test('parsePlan: FEASIBLE with effort, split and the plan body', () => {
   assert.deepEqual(s, { verdict: 'FEASIBLE', effort: 'medium', split: 'the API and the UI', plan: 'plan', words: 1 });
 });
 
-test('parsePlan: INFEASIBLE needs numbered conflicts, each quoting file:line', () => {
+test('parsePlan: INFEASIBLE keeps every numbered conflict; what is off the contract is noted, never a reason to build', () => {
   const ok = parsePlan('VERDICT: INFEASIBLE\nEFFORT: medium\nSPLIT: no\nCONFLICTS\n1. "no runtime change" vs "fail safely": lib/pay.ts:40 throws.\n   Resolutions: allow a change.\n2) src/x.tsx:7 has no such export');
-  assert.deepEqual(ok, { verdict: 'INFEASIBLE', effort: 'medium', split: null,
-    conflicts: ['"no runtime change" vs "fail safely": lib/pay.ts:40 throws.\nResolutions: allow a change.', 'src/x.tsx:7 has no such export'] });
-  assert.match((parsePlan('VERDICT: INFEASIBLE\nEFFORT: medium\nSPLIT: no\nCONFLICTS\n1. the spec is vague') as { error: string }).error, /conflict 1 quotes no file:line/);
-  assert.match((parsePlan('VERDICT: INFEASIBLE\nEFFORT: medium\nSPLIT: no\nit cannot be done') as { error: string }).error, /numbered CONFLICTS/);
+  assert.ok(!('error' in ok) && ok.verdict === 'INFEASIBLE');
+  assert.deepEqual(ok.items, [{ text: '"no runtime change" vs "fail safely": lib/pay.ts:40 throws.', severity: null, resolution: 'allow a change.' },
+    { text: 'src/x.tsx:7 has no such export', severity: null, resolution: null }]);
+  assert.deepEqual(ok.conflicts, ['[protected?] "no runtime change" vs "fail safely": lib/pay.ts:40 throws.\nResolution: allow a change.', '[protected?] src/x.tsx:7 has no such export']);
+  assert.deepEqual([ok.revised, ok.auto], [null, false]);
+  assert.ok(ok.malformed.includes('conflict 1 has no [protected] or [spec-only] tag (treated as protected)'));
+  assert.ok(ok.malformed.includes('conflict 2 gives no Resolution'));
+  assert.ok(ok.malformed.includes('no COMPLETE REVISED SPEC section'));
+  const vague = parsePlan('VERDICT: INFEASIBLE\nEFFORT: medium\nSPLIT: no\nCONFLICTS\n1. the spec is vague');
+  assert.ok(!('error' in vague) && vague.verdict === 'INFEASIBLE' && vague.malformed.includes('conflict 1 quotes no file:line evidence'));
+  const none = parsePlan('VERDICT: INFEASIBLE\nEFFORT: medium\nSPLIT: no\nit cannot be done');
+  assert.ok(!('error' in none) && none.verdict === 'INFEASIBLE');
+  assert.deepEqual([none.conflicts, none.malformed[0]], [['[protected?] it cannot be done'], 'INFEASIBLE without a numbered CONFLICTS list']);
+});
+
+const MULTI = (sev2: string, auto: string) => [
+  'VERDICT: INFEASIBLE', 'EFFORT: high', 'SPLIT: no', 'CONFLICTS',
+  '1. [spec-only] Acceptance 2 (cleanup deletes stale rows) vs acceptance 4 (rows are owned by the importer): lib/import.ts:12 "owner = importer".',
+  '   Resolution: acceptance 2 -> "cleanup marks stale rows archived"',
+  `2. [${sev2}] Acceptance 2 vs the DB grants: packages/platform/src/grants/app.sql:7 "GRANT SELECT, UPDATE ON rows".`,
+  '   Resolution: description "The cleanup job deletes stale rows." -> "The cleanup job archives stale rows."',
+  '3. [spec-only] Acceptance 3 vs nested AGENTS.md: apps/api/AGENTS.md:4 "never call the clock directly".',
+  '   Resolution: acceptance 3 -> "the cleanup takes the time as an argument"',
+  '', '## COMPLETE REVISED SPEC', 'Description changes:', '- OLD: The cleanup job deletes stale rows.', '  NEW: The cleanup job archives stale rows.',
+  'Acceptance:', '1. stale means older than 30 days', '2. cleanup marks stale rows archived', '   and leaves the rest', '3. the cleanup takes the time as an argument',
+  '4. rows are owned by the importer', `AUTO: ${auto}`].join('\n');
+
+test('parsePlan: every conflict with its severity, resolution and evidence, and the complete revised spec (AUTO yes only when all are spec-only)', () => {
+  const p = parsePlan(MULTI('spec-only', 'yes'));
+  assert.ok(!('error' in p) && p.verdict === 'INFEASIBLE');
+  assert.equal(p.items.length, 3);
+  assert.deepEqual(p.items.map((c) => c.severity), ['spec-only', 'spec-only', 'spec-only']);
+  assert.equal(p.items[1]!.resolution, 'description "The cleanup job deletes stale rows." -> "The cleanup job archives stale rows."');
+  assert.match(p.conflicts[0]!, /^\[spec-only\] Acceptance 2 [^]*lib\/import\.ts:12[^]*\nResolution: acceptance 2 -> "cleanup marks stale rows archived"$/);
+  assert.deepEqual(p.revised, { description: [{ old: 'The cleanup job deletes stale rows.', new: 'The cleanup job archives stale rows.' }],
+    acceptance: ['stale means older than 30 days', 'cleanup marks stale rows archived and leaves the rest', 'the cleanup takes the time as an argument', 'rows are owned by the importer'], auto: true });
+  assert.deepEqual([p.auto, p.malformed], [true, []]);
+  const text = infeasibleText({ conflicts: p.conflicts, revised: p.revised, auto: p.auto });
+  assert.ok(text.indexOf('3. [spec-only]') < text.indexOf('Proposed revised spec'), 'the conflicts first, then the revised spec');
+  assert.match(text, /Proposed revised spec\nDescription changes:\n- OLD: The cleanup job deletes stale rows\.\n  NEW: The cleanup job archives[^]*\nAcceptance:\n1\. stale[^]*4\. rows are owned by the importer\n\nAUTO: yes$/);
+  // revise: the description sentence replaced in place, the acceptance list replaced whole; an OLD sentence not in the description is refused
+  const f = { description: 'Nightly. The cleanup job deletes stale rows. Keep logs.' };
+  assert.deepEqual(revise(f, p.revised!), { description: 'Nightly. The cleanup job archives stale rows. Keep logs.', acceptance: p.revised!.acceptance });
+  assert.equal(revisionProblem(f, p.revised!), null);
+  assert.match(revisionProblem({ description: 'Something else.' }, p.revised!)!, /no sentence "The cleanup job deletes/);
+});
+
+test('parsePlan: a protected conflict means AUTO no, even when the planner says yes; untagged counts as protected', () => {
+  const prot = parsePlan(MULTI('protected', 'no'));
+  assert.ok(!('error' in prot) && prot.verdict === 'INFEASIBLE');
+  assert.deepEqual([prot.items[1]!.severity, prot.auto, prot.revised?.auto, prot.malformed], ['protected', false, false, []]);
+  const lie = parsePlan(MULTI('protected', 'yes'));
+  assert.ok(!('error' in lie) && lie.verdict === 'INFEASIBLE');
+  assert.equal(lie.auto, false);
+  assert.match(lie.malformed.join(), /AUTO: yes, but 1 conflict is not tagged spec-only/);
+  const untagged = parsePlan(MULTI('spec-only', 'yes').replace('[spec-only] Acceptance 3', 'Acceptance 3'));
+  assert.ok(!('error' in untagged) && untagged.verdict === 'INFEASIBLE' && untagged.auto === false && untagged.items[2]!.severity === null);
+  const noAuto = parsePlan(MULTI('spec-only', 'yes').replace(/\nAUTO: yes$/, ''));
+  assert.ok(!('error' in noAuto) && noAuto.verdict === 'INFEASIBLE' && noAuto.auto === false && noAuto.malformed.includes('no "AUTO: yes|no" line (treated as no)'));
+});
+
+test('parsePlan: a malformed INFEASIBLE answer is still a hold, with its raw text', () => {
+  const p = parsePlan('**VERDICT: INFEASIBLE**\nEFFORT: medium\nthe rules collide');
+  assert.ok(!('error' in p) && p.verdict === 'INFEASIBLE');
+  assert.deepEqual([p.conflicts, p.revised, p.auto], [['[protected?] **VERDICT: INFEASIBLE**\nEFFORT: medium\nthe rules collide'], null, false]);
+  assert.match(p.malformed[0]!, /first line/);
+  const noRevised = parsePlan(MULTI('spec-only', 'yes').replace(/\nAcceptance:[^]*$/, '\nAUTO: yes'));
+  assert.ok(!('error' in noRevised) && noRevised.verdict === 'INFEASIBLE' && noRevised.revised === null && noRevised.auto === false && noRevised.items.length === 3);
 });
 
 test('parsePlan: anything off the contract is an error (fail soft), never a verdict', () => {
@@ -99,7 +164,8 @@ test('config.planner: defaults, partial blocks keep defaults, bad values are ref
     writeFileSync(file, JSON.stringify({ planner: { maxPerDay: 3 } }));
     assert.deepEqual(loadConfig(root).planner, { ...DEFAULT_CONFIG.planner, maxPerDay: 3 });
     assert.equal(DEFAULT_CONFIG.planner.splitWords, 750);
-    for (const bad of [{ enabled: 'yes' }, { maxPerDay: -1 }, { skipBelow: 'easy' }, { permissionMode: 'auto' }, { effort: '' }, { splitWords: 0 }, { splitWords: 1.5 }, { splitWords: '750' }]) {
+    assert.equal(DEFAULT_CONFIG.planner.autoApply, false);
+    for (const bad of [{ autoApply: 'yes' }, { enabled: 'yes' }, { maxPerDay: -1 }, { skipBelow: 'easy' }, { permissionMode: 'auto' }, { effort: '' }, { splitWords: 0 }, { splitWords: 1.5 }, { splitWords: '750' }]) {
       writeFileSync(file, JSON.stringify({ planner: bad }));
       assert.throws(() => loadConfig(root), /config\.planner\./, JSON.stringify(bad));
     }
@@ -112,6 +178,12 @@ test('prompts: the planner prompt carries the contract; the builder gets the pla
   assert.match(pp, /^You are the planner for feature a: Feature a/);
   assert.match(pp, /Read-only/); assert.match(pp, /tasks\/a\.md/); assert.match(pp, /docs\/brief\.md/); assert.match(pp, /1\. one\n2\. two/);
   assert.match(pp, /VERDICT: FEASIBLE \| INFEASIBLE/); assert.match(pp, /Grep for existing helpers; never recall them from memory/);
+  assert.match(pp, /find EVERY conflict in this one pass before you answer; never stop at the first/);
+  assert.match(pp, /\(a\) the code[^]*\(b\)[^]*packages\/platform\/src\/grants[^]*nested AGENTS\.md[^]*'must not change'[^]*\(c\) every OTHER acceptance line[^]*pairwise/);
+  assert.match(pp, /listing ALL of them/);
+  assert.match(pp, /1\. \[protected \| spec-only\][^]*file:line[^]*Resolution: <ONE recommended resolution/);
+  assert.match(pp, /money, auth or sessions, tenant isolation, grants or RLS, migrations, production behaviour, or would weaken an existing test/);
+  assert.match(pp, /COMPLETE REVISED SPEC[^]*Description changes:[^]*- OLD:[^]*NEW:[^]*Acceptance:[^]*AUTO: yes \| no/);
   const root = mkdtempSync(join(tmpdir(), 'fact-os-planp-'));
   try {
     const bp = builderPrompt(root, c, f, 'ship/a', [], [], '', { plan: planSection({ verdict: 'FEASIBLE', text: 'STEP ONE' }) });
@@ -175,7 +247,7 @@ test('INFEASIBLE: the feature is held (spec-conflict) before any build; no build
   assert.equal(f.planningHold?.cause, 'spec-conflict');
   assert.match(f.planningHold!.evidence[0]!, /README\.md:1/);
   assert.equal(f.plan?.verdict, 'INFEASIBLE');
-  assert.match(readFileSync(join(s.sy('runs'), 'a', 'plan.md'), 'utf8'), /^1\. "no runtime change"/);
+  assert.match(readFileSync(join(s.sy('runs'), 'a', 'plan.md'), 'utf8'), /^1\. \[protected\?\] "no runtime change"[^]*No usable revised spec/);
   const hold = s.events('a').find((e) => e.event === 'planning-hold')!;
   assert.match(hold.detail, /^spec-conflict \(high\), planner before any build: 1\./);
   assert.ok(s.events('a').some((e) => e.event === 'prompt' && e.run?.phase === 'plan' && e.run.role === 'planner'));
@@ -288,4 +360,101 @@ test("EFFORT high selects the profile's effortHigh for the builder (fable-sonnet
   assert.equal(b!.args[b!.args.indexOf('--effort') + 1], 'high');
   const run = s.events('a').find((e) => e.event === 'prompt' && e.run?.role === 'builder')!.run!;
   assert.match(run.rule ?? '', /^planner: EFFORT high → the profile's effortHigh high/);
+});
+
+// ---- every conflict at once, the revised spec, plan-apply and config.planner.autoApply ----
+
+test('multi-conflict: every conflict is held with its severity, the revised spec is saved and shown, and plan-apply applies it', (t) => {
+  const s = setup(t, { features: [F('a')], scenario: { a: 'plan:multi,plan:once' } });
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('build', 'a').length, 0);
+  const f = s.feature('a'), h = f.planningHold!;
+  assert.equal(h.cause, 'spec-conflict');
+  assert.equal(h.evidence.length, 2);
+  assert.match(h.evidence[0]!, /^\[spec-only\] Acceptance 1 [^]*README\.md:1[^]*\nResolution: description "Build a" -> "Build a as a plain file"$/);
+  assert.match(h.evidence[1]!, /^\[spec-only\] /);
+  assert.equal(h.auto, true);
+  assert.match(h.revised!, /^Description changes:\n- OLD: Build a\n  NEW: Build a as a plain file\n\nAcceptance:\n1\. a\.txt exists and is kept\n2\. a\.txt says hello\n\nAUTO: yes$/);
+  const dir = join(s.sy('runs'), 'a'), saved = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+  assert.deepEqual(saved.revised.acceptance, ['a.txt exists and is kept', 'a.txt says hello']);
+  assert.equal(saved.auto, true);
+  assert.match(readFileSync(join(dir, 'plan-revised-spec.md'), 'utf8'), /^Description changes:[^]*AUTO: yes\n$/);
+  const md = readFileSync(join(dir, 'plan.md'), 'utf8');
+  assert.ok(md.indexOf('2. [spec-only]') < md.indexOf('Proposed revised spec'), 'plan.md: the conflicts first, then the revised spec');
+  const hold = s.events('a').find((e) => e.event === 'planning-hold')!.detail;
+  assert.match(hold, /^spec-conflict \(high\), planner before any build: 1\. \[spec-only\][^]* 2\. \[spec-only\][^]*2 conflicts \(0 protected, 2 spec-only\)\. Proposed revised spec: [^ ]*plan-revised-spec\.md \(AUTO: yes; `fact-os plan-apply a` applies it\)/);
+  // The dashboard's Needs you card: the conflicts, then the revised spec and the command.
+  const story = buildStory({ feature: f, events: [], runs: [], maxAttempts: 3, base: 'main' });
+  assert.deepEqual([story.needsYou?.what, story.needsYou?.conflicts, story.needsYou?.revised, story.needsYou?.apply],
+    ['Review and apply the revised spec', h.evidence, h.revised, 'fact-os plan-apply a']);
+  assert.match(story.state.why!, /planner found 2 conflicts/);
+  // A person applies it: description sentence and acceptance replaced, attempts reset, hold released, audited like a spec fix.
+  const r = s.cli('plan-apply', 'a'); assert.equal(r.status, 0, r.stdout + r.stderr);
+  const g = s.feature('a');
+  assert.deepEqual([g.description, g.acceptance, g.attempts, g.planningHold, g.stop], ['Build a as a plain file', ['a.txt exists and is kept', 'a.txt says hello'], 0, undefined, undefined]);
+  assert.equal(g.planRevisions?.[0]?.by, 'person');
+  assert.deepEqual(g.planRevisions?.[0]?.old, { description: 'Build a', acceptance: ['a.txt exists'] });
+  const changed = s.events('a').find((e) => e.event === 'acceptance-changed')!;
+  assert.equal(changed.attemptsReset, true);
+  assert.match(changed.detail, /planner revised spec \(plan \S+\) applied by a person: 1 description sentence and the acceptance list \(1 → 2 lines\), resolving 2 spec-only conflicts/);
+  assert.ok(s.events('a').some((e) => e.event === 'plan-applied' && /^person: /.test(e.detail)));
+  assert.match(s.cli('plan-apply', 'a').stderr, /not on the planner's spec-conflict hold/, 'applied once');
+  // The revised spec is planned again (FEASIBLE now) and built.
+  assert.equal(s.cli('run').status, 0);
+  assert.equal(s.calls('plan', 'a').length, 2);
+  assert.equal(s.feature('a').status, 'merged');
+});
+
+test('plan-apply refuses AUTO: no (a protected conflict) and a spec edited since the plan', (t) => {
+  const s = setup(t, { features: [F('p'), F('q')], scenario: { p: 'plan:protected', q: 'plan:multi' } });
+  assert.equal(s.cli('run').status, 2);
+  const p = s.feature('p');
+  assert.deepEqual([p.planningHold?.auto, /^\[protected\] /.test(p.planningHold!.evidence[1]!)], [false, true]);
+  assert.match(s.events('p').find((e) => e.event === 'planning-hold')!.detail, /1 protected, 1 spec-only[^]*AUTO: no; a person must edit the spec/);
+  const story = buildStory({ feature: p, events: [], runs: [], maxAttempts: 3, base: 'main' });
+  assert.deepEqual([story.needsYou?.what, story.needsYou?.apply], ['Resolve the protected conflicts', undefined]);
+  const r = s.cli('plan-apply', 'p');
+  assert.equal(r.status, 1); assert.match(r.stderr, /AUTO is no: a conflict is protected/);
+  assert.deepEqual(s.feature('p').acceptance, ['p.txt exists'], 'nothing changed');
+  s.setFeature('q', { acceptance: ['q.txt exists', 'edited by a person'] });
+  const r2 = s.cli('plan-apply', 'q');
+  assert.equal(r2.status, 1); assert.match(r2.stderr, /the spec or its inputs changed since the plan/);
+  assert.equal(s.events('q').some((e) => e.event === 'plan-applied'), false);
+});
+
+test('autoApply: an AUTO yes revision is applied by the foreman and planned again (FEASIBLE: built); one automatic round per feature; off by default', (t) => {
+  const s = setup(t, { features: [F('a'), F('b'), F('c')], config: { planner: { autoApply: true } }, scenario: { a: 'plan:multi,plan:once', b: 'plan:multi', c: 'plan:protected' } });
+  assert.equal(s.cli('run').status, 2);
+  // a: applied, relaunched, confirmed FEASIBLE, merged
+  assert.equal(s.calls('plan', 'a').length, 2);
+  assert.ok(s.events('a').some((e) => e.event === 'plan-applied' && /^auto: /.test(e.detail)));
+  assert.match(s.events('a').find((e) => e.event === 'plan-auto-applied')!.detail, /planner runs again on the revised spec/);
+  assert.match(s.events('a').find((e) => e.event === 'acceptance-changed')!.detail, /applied automatically \(config\.planner\.autoApply\)/);
+  assert.deepEqual([s.feature('a').status, s.feature('a').acceptance, s.feature('a').planRevisions?.[0]?.by], ['merged', ['a.txt exists and is kept', 'a.txt says hello'], 'auto']);
+  // b: still INFEASIBLE after its one automatic round: held for a person
+  assert.equal(s.calls('plan', 'b').length, 2);
+  assert.equal(s.feature('b').planningHold?.cause, 'spec-conflict');
+  assert.match(s.events('b').find((e) => e.event === 'plan-auto-refused')!.detail, /already had its one automatic revision/);
+  assert.equal(s.calls('build', 'b').length, 0);
+  // c: a protected conflict is never applied automatically
+  assert.equal(s.calls('plan', 'c').length, 1);
+  assert.equal(s.events('c').some((e) => /^plan-(auto|applied)/.test(e.event)), false);
+  // default: off; the AUTO yes revision waits for a person
+  const off = setup(t, { features: [F('d')], scenario: { d: 'plan:multi,plan:once' } });
+  assert.equal(off.cli('run').status, 2);
+  assert.equal(off.calls('plan', 'd').length, 1);
+  assert.equal(off.feature('d').planningHold?.auto, true);
+  assert.equal(off.events('d').some((e) => /^plan-(auto|applied)/.test(e.event)), false);
+});
+
+test('malformed INFEASIBLE: the feature is held with the raw answer; plan-apply has nothing to apply', (t) => {
+  const s = setup(t, { features: [F('m')], scenario: { m: 'plan:malformed' }, config: { planner: { autoApply: true } } });
+  assert.equal(s.cli('run').status, 2);
+  assert.equal(s.calls('build', 'm').length, 0);
+  const h = s.feature('m').planningHold!;
+  assert.deepEqual([h.cause, h.auto, h.revised], ['spec-conflict', false, undefined]);
+  assert.match(h.evidence[0]!, /^\[protected\?\] The cleanup rule and the ownership rule cannot both hold/);
+  assert.match(s.events('m').find((e) => e.event === 'planning-hold')!.detail, /No usable revised spec was proposed\. Off the answer format: INFEASIBLE without a numbered CONFLICTS list/);
+  const r = s.cli('plan-apply', 'm');
+  assert.equal(r.status, 1); assert.match(r.stderr, /no usable revised spec/);
 });

@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import type { ChildProcess } from 'node:child_process';
 import { claudeArgs, exec, git, holdInputs, parseClaudeOutput, parseCodexEvents } from './foreman.ts';
 import type { PromptReview } from './promptreview.ts';
+import { PLAN_FILE, revise, revisionProblem, type SavedPlan } from './plan.ts';
 import { riskFamilies } from './profiles.ts';
 import { childEnv, envVar, loadConfig, mutate, mutateWithAudit, paths, publishPendingAudit, readControlFile } from './state.ts';
 import type { Config, Feature, LogEvent, RoleConfig, SpecFixMode, SpecFixProposal, SpecFixRecord } from './types.ts';
@@ -256,6 +257,58 @@ export async function undoSpecFix(root: string, featureId: string, id: string): 
     newCycle(f);
     emit({ feature: featureId, event: 'acceptance-changed', attemptsReset: true, detail: `spec fix ${id} undone by a person: the earlier text is back` });
     emit({ feature: featureId, event: 'spec-fix-undone', detail: id });
+    return null;
+  });
+}
+
+// ---- the planner's revised spec (lib/plan.ts) ----
+
+// The planner's saved answer for a feature (runs/<id>/plan.json), whatever spec it was for (null: none or unreadable).
+export function savedPlanOf(root: string, id: string): SavedPlan | null {
+  try { const p = JSON.parse(readFileSync(join(paths(root).runs, id, PLAN_FILE), 'utf8')) as SavedPlan; return p && typeof p.verdict === 'string' ? p : null; } catch { return null; }
+}
+// Why `by` may not apply the planner's revised spec to `f` now (null: it may). Rechecked under the lock at apply time: the feature
+// is queued (or paused) on the spec-conflict hold this plan placed, the spec is exactly the one planned, the planner said AUTO: yes
+// (every conflict spec-only) with a usable revised spec; automatically only with config.planner.autoApply, never for a paused or
+// risky feature, and once per feature.
+export function planApplyProblem(root: string, config: Config, f: Feature, p: SavedPlan | null, by: 'person' | 'auto'): string | null {
+  if (!['todo', 'paused'].includes(f.status)) return `the feature is ${f.status}; only a queued or paused feature on a planner hold can take the revised spec`;
+  if (!p || p.verdict !== 'INFEASIBLE') return 'no INFEASIBLE planner answer is saved for it';
+  if (f.planningHold?.cause !== 'spec-conflict' || f.planningHold.review !== `plan:${f.id}/${p.tag}`) return "it is not on the planner's spec-conflict hold for this plan";
+  if (holdInputs(root, config, f) !== p.inputs) return 'the spec or its inputs changed since the plan';
+  if (!p.revised) return `the planner proposed no usable revised spec${p.malformed?.length ? ` (${p.malformed.join('; ')})` : ''}`;
+  if (p.auto !== true) return 'AUTO is no: a conflict is protected (or untagged), so a person must edit the spec';
+  const bad = revisionProblem(f, p.revised);
+  if (bad) return bad;
+  if (by === 'auto') {
+    if (!config.planner.autoApply) return 'config.planner.autoApply is off';
+    if (f.status === 'paused') return 'a person paused the feature';
+    if (f.tier === 'risky' || f.risk === 'high' || riskFamilies(`${f.title}\n${f.description ?? ''}`).length) return 'the feature is risky (money, auth, tenancy or similar)';
+    if ((f.planRevisions ?? []).some((r) => r.by === 'auto')) return 'this feature already had its one automatic revision';
+  }
+  return null;
+}
+// Applies the planner's revised spec (one atomic change, logged under the same lock as spec-fix apply): replaces the changed
+// description sentences and the whole acceptance list, records it, starts a new cycle (attempts reset) and releases the hold.
+// The next launch plans the revised spec afresh (its inputs changed), which confirms it FEASIBLE or holds it again. Returns why not, or null.
+export async function applyPlanRevision(root: string, featureId: string, by: 'person' | 'auto', opts: ApplyOpts = {}): Promise<string | null> {
+  const config = loadConfig(root), p = savedPlanOf(root, featureId);
+  return mutateWithAudit(root, (d, emit) => {
+    if (opts.stopping?.()) return 'stopping';
+    const f = d.features.find((x) => x.id === featureId);
+    if (!f) return 'unknown feature';
+    const err = planApplyProblem(root, config, f, p, by);
+    if (err) return err;
+    const r = p!.revised!, before = { description: f.description ?? '', acceptance: [...(f.acceptance ?? [])] }, next = revise(f, r);
+    f.description = next.description; f.acceptance = next.acceptance;
+    delete f.planningHold;
+    newCycle(f);
+    (f.planRevisions ??= []).push({ ts: now(), by, review: `plan:${f.id}/${p!.tag}`, inputs: p!.inputs, after: holdInputs(root, config, f), old: before, new: next, conflicts: p!.conflicts ?? [] });
+    decide(f, p!.inputs, 'applied');
+    const n = (p!.conflicts ?? []).length, what = `${r.description.length} description sentence${r.description.length === 1 ? '' : 's'} and the acceptance list (${before.acceptance.length} → ${next.acceptance.length} lines)`;
+    emit({ feature: featureId, event: 'acceptance-changed', attemptsReset: true, detail: `planner revised spec (plan ${p!.tag}) applied ${by === 'auto' ? 'automatically (config.planner.autoApply)' : 'by a person'}: ` +
+      `${what}, resolving ${n} spec-only conflict${n === 1 ? '' : 's'}` });
+    emit({ feature: featureId, event: 'plan-applied', detail: `${by}: plan ${p!.tag}: ${what}` });
     return null;
   });
 }

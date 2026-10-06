@@ -19,7 +19,10 @@ export interface Cycle { tries: Try[]; endedBy?: string }
 export interface StoryRun { tag: string; role: 'build' | 'eval' | 'resolve' | 'diagnose'; at: string; text: string; verdict?: Verdict | null; files?: number; unsure?: string[]; asked?: number; responses?: ReviewResponse[] }
 export interface StoryState { word: string; tone: 'run' | 'fix' | 'ok' | 'queue' | 'hold' | 'bad' | 'idle'; why: string | null; next: string | null }
 export interface Story {
-  title: string; goal: string | null; state: StoryState; needsYou: { what: string; why: string } | null;
+  title: string; goal: string | null; state: StoryState;
+  // conflicts/revised/apply: a planner spec-conflict hold's conflicts (severity-tagged), its proposed revised spec, and the command
+  // that applies it (only when the planner said AUTO: yes).
+  needsYou: { what: string; why: string; conflicts?: string[]; revised?: string; apply?: string } | null;
   current: Try | null; earlier: Try[]; archive: { label: string; tries: Try[] }[];
   problems: { active: { title: string; reasons: Reason[] } | null; earlier: { when: string; text: string }[] };
   nextTry: number | null;
@@ -449,6 +452,12 @@ function describe(inp: StoryInput, current: Try | null, cyc: Cycle): Pick<Story,
               : `The ${h.cause === 'prompt-conflict' ? 'instructions conflict' : 'spec cannot be met as written'}: ${h.evidence[0] ?? ''}`.trim(),
             next: f.specFix?.status === 'proposed' ? 'Review the proposed spec fix below: apply it, or dismiss it and edit the spec yourself.' : h.cause === 'needs-split' ? 'Split or trim the spec, or release the hold to launch it as it is.' : 'Edit the spec, or release the hold to launch it as it is.' };
         if (h.cause !== 'base-defect') needsYou = f.specFix?.status === 'proposed' ? { what: 'Review the proposed spec fix', why: state.why ?? '' } : { what: h.cause === 'needs-split' ? 'Split or trim the spec' : 'Clarify the conflicting requirement', why: state.why ?? '' };
+        if (h.cause === 'spec-conflict' && needsYou) {
+          const n = h.evidence.length;
+          state.why = `Before its first build, the planner found ${n} conflict${n === 1 ? '' : 's'} in the spec.`;
+          needsYou = { ...needsYou, what: f.specFix?.status === 'proposed' ? needsYou.what : h.revised ? (h.auto ? 'Review and apply the revised spec' : 'Resolve the protected conflicts') : 'Clarify the conflicting requirements',
+            why: state.why, conflicts: h.evidence, ...(h.revised ? { revised: h.revised } : {}), ...(h.revised && h.auto ? { apply: `fact-os plan-apply ${f.id}` } : {}) };
+        }
         break;
       }
       if (f.envRetryAt && Date.parse(f.envRetryAt) > Date.now()) { state = { word: 'Waiting to retry', tone: 'hold', why: f.evalFailures ? 'The evaluator gave no valid verdict; no retry used.' : 'A diagnosed test-environment fault; no retry used.', next: `Retries the same build at ${new Date(f.envRetryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` }; break; }

@@ -125,7 +125,7 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   same prompt with `codex.fallback` (default `{model: "opus", effort: "high"}`); a usage-limit, rate-limit or login
   error also cools Codex down for `codex.cooldownMin` minutes (default 30; `.fact-os/codex.json`). Codex reports
   tokens, not dollars, so its runs add nothing to the cost totals or budgets.
-- **Planner.** Before a spec's first build, a read-only Opus run (`config.planner`: `enabled` true, `model` opus, `effort`
+- **Planner.** Before a spec's first build, a read-only Opus run (`config.planner`: `enabled` true, `autoApply` false, `model` opus, `effort`
   medium, `effortHigh` high for specs saying "must not change"/"all paths"/"every" or touching money, auth or tenants, and
   after a failed attempt; `maxPerDay` 50; `skipBelow` null or a tier; `splitWords` 750; a profile may set a `planner` entry) checks every
   acceptance line against the code. `VERDICT: INFEASIBLE` (conflicts quoting file:line) puts the feature on a `spec-conflict`
@@ -134,7 +134,13 @@ launches regardless of who edited it. Saved prompts retain the checks used for e
   as context only, unless the plan runs over `splitWords` words: then the feature goes on a `needs-split` planning hold
   (same release rules; the hold shows the word count and any `SPLIT` suggestion, asking for the spec to be split or
   trimmed; released unchanged, it builds with that plan). Its `EFFORT: high` lifts the builder to the profile's `effortHigh`; `SPLIT: yes` is only recorded. A
-  plan is reused until the spec changes; a failed or unparseable planner never blocks a build. See SPEC.md "Plan".
+  plan is reused until the spec changes; a failed or unparseable planner never blocks a build. The planner lists EVERY
+  conflict in one pass (each acceptance line against the code, grants/RLS, nested AGENTS.md rules and every other line),
+  each tagged `protected` or `spec-only` with one exact-text resolution, then one COMPLETE REVISED SPEC resolving them all and
+  `AUTO: yes|no` (yes only when all are spec-only). The hold and the dashboard's Needs you card show the conflicts, then the
+  proposed revised spec (`runs/<id>/plan-revised-spec.md`); `fact-os plan-apply <id>` applies it (AUTO yes and an unchanged
+  spec only; attempts reset, hold released, planned again), and `planner.autoApply` (default false) lets the foreman do that
+  once per feature. A malformed INFEASIBLE answer still holds, with its raw text. See SPEC.md "Plan".
 - **Feature tiers.** Intake sets each feature's `tier` (`normal`, `multi`, `hard`, `risky`, `investigate`); a profile's
   `tiers` maps tiers to builder, resolver and evaluator overrides, e.g. `"tiers": {"risky": {"builder": {"model":
   "opus", "effort": "high"}, "evaluator": {"effort": "xhigh"}}}`. A tier replaces the keyword risk heuristic for that

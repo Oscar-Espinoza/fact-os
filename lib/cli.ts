@@ -21,6 +21,8 @@ const USAGE = `usage: ${NAME} <command>
   spec-fixes [manual|auto]        how drafted spec fixes are applied: manual = a person applies them; auto = applied without asking
                                   when every guard passes (protected changes stay manual); without an argument: the mode and proposals
   spec-fix apply|dismiss|undo <id>  apply or dismiss a feature's drafted spec fix, or undo its latest applied one
+  plan-apply <id>                 apply the planner's complete revised spec to a feature on its spec-conflict hold (only when the
+                                  planner said AUTO: yes and the spec is unchanged since the plan; attempts reset, hold released)
   spec-notes                      the spec-writing rules learned from corrected specs (the intake skill follows them)
   pause-all | resume-all          stop / restart launching new features (nothing running is interrupted)
   setup-resume                    release the launch hold opened by repeated setup (prepare) failures, once the environment is fixed
@@ -272,6 +274,14 @@ try {
     case 'pause-all': case 'resume-all': case 'lanes': case 'profile': await control(argv[0], argv.slice(1)); break;
     case 'spec-fixes': await specFixesCmd(argv.slice(1)); break;
     case 'spec-fix': await specFixCmd(argv.slice(1)); break;
+    case 'plan-apply': {
+      if (positionals.length !== 1) throw new Error(`usage: ${NAME} plan-apply <feature id>`);
+      const { applyPlanRevision } = await import('./specfix.ts');
+      const err = await applyPlanRevision(needRoot(), positionals[0]!, 'person');
+      if (err) throw new Error(`plan-apply ${positionals[0]}: ${err}`);
+      console.log(`plan-apply: ${positionals[0]}: the planner's revised spec is applied (queued with fresh tries; the planner checks it again first)`);
+      break;
+    }
     case 'spec-notes': { const { readSpecNotes, specNotesFile } = await import('./specnotes.ts'); const n = readSpecNotes(needRoot());
       console.log(n.length ? `${n.join('\n')}\n(${specNotesFile(needRoot())})` : 'No spec-writing rules learned yet.'); break; }
     case 'setup-resume': {

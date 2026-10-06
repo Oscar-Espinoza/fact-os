@@ -64,7 +64,7 @@ and one dashboard across projects.
   "profiles": {},               // extra model profiles (see Model profiles); optional; a profile may add "tiers" (below)
   "gateFixes": 0,               // resumed builder fixes after a test-gate failure, per pass (see Pass, Test)
   "diagnoser": null,            // null, or a role config (provider "claude" or "codex") diagnosing a repeated gate failure
-  "planner": {"enabled": true, "model": "opus", "effort": "medium", "effortHigh": "high", "maxPerDay": 50, "skipBelow": null, "splitWords": 750}, // see Plan
+  "planner": {"enabled": true, "model": "opus", "effort": "medium", "effortHigh": "high", "maxPerDay": 50, "skipBelow": null, "splitWords": 750, "autoApply": false}, // see Plan
   "codex": {"fallback": {"model": "opus", "effort": "high"}, "cooldownMin": 30} // when a Codex run cannot answer
                                 // (a leftover "classifier" key, from the Jev classifier removed on 2026-10-05, is ignored; doctor notes it)
 }
@@ -349,6 +349,25 @@ Each tick:
      worktree is not clean. A crash, timeout, contract violation or a run that changed the worktree (undone) is logged
      `plan` and the build goes on without a plan. Every builder prompt also says: if the spec cannot be met as written,
      finish with `blocked: spec-conflict` instead of working around it.
+     **All conflicts in one pass.** The prompt makes the planner check every acceptance line against (a) the code, (b) the
+     repo's permission model and constraints (DB grants/RLS, e.g. packages/platform/src/grants and migrations, nested
+     AGENTS.md rules, 'must not change' lists) and (c) every other acceptance line and the description's 'What to change'/'Do
+     not' text, pairwise, and list ALL conflicts: each `N. [protected|spec-only] <what cannot both hold, file:line evidence>`
+     with `Resolution: <exact replacement text>` (`protected`: the fix touches money, auth/sessions, tenant isolation,
+     grants/RLS, migrations, production behaviour or weakens a test). Then `COMPLETE REVISED SPEC` (`Description changes:`
+     `- OLD:`/`NEW:` pairs copied exactly from the description, `Acceptance:` the full numbered list) and `AUTO: yes|no`.
+     Parsed fail-soft: any INFEASIBLE answer holds (a broken header that still says `VERDICT: INFEASIBLE` holds with its raw
+     text); a missing tag counts as protected, and what broke the contract is logged; `auto` is true only with a usable
+     revised spec (every OLD sentence in the description), AUTO yes and every conflict spec-only. Saved in plan.json
+     (`items`, `revised`, `auto`, `malformed`) and `runs/<id>/plan-revised-spec.md`; the hold carries the severity-tagged
+     conflicts as evidence plus `revised`/`auto`, shown conflicts first, then "Proposed revised spec" (log, observer report,
+     dashboard Needs you). `fact-os plan-apply <id>` (lib/specfix.ts `applyPlanRevision`, under the same lock and audit as
+     spec-fix apply: `acceptance-changed` with `attemptsReset`, plus `plan-applied`) replaces the description sentences and
+     the acceptance list, records `planRevisions`, starts a new cycle and releases the hold; it refuses unless the feature is
+     on this plan's spec-conflict hold, the spec is unchanged since the plan and `auto` is true. With
+     `config.planner.autoApply` (default false) the foreman applies it itself (`plan-auto-applied`, never for a paused or
+     risky feature, one automatic round per feature, else `plan-auto-refused`), and the next launch plans the revised spec
+     again to confirm FEASIBLE.
    - **Build.** Create/reuse worktree `<worktreesDir>/<id>` on `<branchPrefix><id>` (or `branch`) from
      `base`. Run `claude -p` in it with the builder prompt: feature, acceptance checks, onMock note,
      previous evaluator feedback, lessons file, briefFiles, and the rule "commit your work; do not
